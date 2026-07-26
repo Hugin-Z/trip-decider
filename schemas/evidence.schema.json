@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trip-decider.example/schemas/0.1.0/evidence.schema.json",
+  "$defs": {
+    "subject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["subject_type", "entity_kind", "entity_id"],
+          "properties": {
+            "subject_type": {"const": "entity"},
+            "entity_kind": {"const": "candidate"},
+            "entity_id": {
+              "type": "string",
+              "pattern": "^candidate_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "subject_type",
+            "relation_type",
+            "from_candidate_ref",
+            "to_candidate_ref",
+            "mode"
+          ],
+          "properties": {
+            "subject_type": {"const": "relation"},
+            "relation_type": {"enum": ["route", "transfer", "service_between"]},
+            "from_candidate_ref": {
+              "type": "string",
+              "pattern": "^candidate_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "to_candidate_ref": {
+              "type": "string",
+              "pattern": "^candidate_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "mode": {"enum": ["driving", "walking", "transit", "cycling", "shuttle", "rail", "other"]}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {"$ref": "common.schema.json#/$defs/envelope_base"},
+    {
+      "properties": {
+        "artifact_type": {"const": "evidence"},
+        "payload": {
+          "type": "object",
+          "required": ["evidence_set_id", "facts", "mapping_rule_version"],
+          "properties": {
+            "evidence_set_id": {
+              "type": "string",
+              "pattern": "^evidence_set_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "facts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "fact_id",
+                  "subject",
+                  "field",
+                  "value",
+                  "unit",
+                  "support_status",
+                  "derivation",
+                  "freshness",
+                  "sources",
+                  "normalization",
+                  "display_status",
+                  "display_rule",
+                  "conflict_source_refs",
+                  "derivation_detail"
+                ],
+                "properties": {
+                  "fact_id": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "subject": {"$ref": "#/$defs/subject"},
+                  "field": {"type": "string", "minLength": 1},
+                  "value": {},
+                  "unit": {"type": ["string", "null"]},
+                  "support_status": {"enum": ["verified", "sourced", "conflicting", "unknown"]},
+                  "derivation": {
+                    "enum": [
+                      "direct_observation",
+                      "official_report",
+                      "api_estimate",
+                      "rule_derived",
+                      "model_estimate",
+                      "user_supplied"
+                    ]
+                  },
+                  "freshness": {
+                    "type": "object",
+                    "required": ["retrieved_at", "effective_at", "expires_at", "status"],
+                    "properties": {
+                      "retrieved_at": {
+                        "oneOf": [
+                          {"$ref": "common.schema.json#/$defs/date_time"},
+                          {"type": "null"}
+                        ]
+                      },
+                      "effective_at": {
+                        "oneOf": [
+                          {"$ref": "common.schema.json#/$defs/date_time"},
+                          {"type": "null"}
+                        ]
+                      },
+                      "expires_at": {
+                        "oneOf": [
+                          {"$ref": "common.schema.json#/$defs/date_time"},
+                          {"type": "null"}
+                        ]
+                      },
+                      "status": {"enum": ["current", "stale", "unknown"]}
+                    },
+                    "additionalProperties": false
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {"$ref": "common.schema.json#/$defs/source"}
+                  },
+                  "normalization": {
+                    "type": "object",
+                    "required": ["original_value", "normalized_value", "rule_id"],
+                    "properties": {
+                      "original_value": {},
+                      "normalized_value": {},
+                      "rule_id": {"type": "string", "minLength": 1}
+                    },
+                    "additionalProperties": false
+                  },
+                  "display_status": {
+                    "enum": ["verified", "sourced", "estimated", "conflicting", "unknown"]
+                  },
+                  "display_rule": {"type": "string", "minLength": 1},
+                  "conflict_source_refs": {
+                    "type": "array",
+                    "items": {"type": "string", "pattern": "^source_[a-z0-9_-]+$"}
+                  },
+                  "derivation_detail": {
+                    "type": "object",
+                    "required": ["input_fact_ids"],
+                    "properties": {
+                      "input_fact_ids": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^fact_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      },
+                      "estimate": {
+                        "type": "object",
+                        "required": ["method", "value", "unit"],
+                        "properties": {
+                          "method": {"type": "string", "minLength": 1},
+                          "value": {"type": "number"},
+                          "unit": {"type": "string", "minLength": 1}
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "derivation": {"enum": ["api_estimate", "model_estimate"]}
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "derivation_detail": {"required": ["estimate"]}
+                      }
+                    }
+                  }
+                ],
+                "additionalProperties": false
+              }
+            },
+            "mapping_rule_version": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

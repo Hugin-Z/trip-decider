@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trip-decider.example/schemas/0.1.0/previous-plan.schema.json",
+  "allOf": [
+    {"$ref": "common.schema.json#/$defs/envelope_base"},
+    {
+      "properties": {
+        "artifact_type": {"const": "previous-plan"},
+        "payload": {
+          "type": "object",
+          "required": [
+            "previous_plan_id",
+            "previous_plan_artifact_ref",
+            "baseline_constraint_set_id",
+            "snapshot",
+            "snapshot_created_at"
+          ],
+          "properties": {
+            "previous_plan_id": {
+              "type": "string",
+              "pattern": "^plan_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "previous_plan_artifact_ref": {"$ref": "common.schema.json#/$defs/artifact_ref"},
+            "baseline_constraint_set_id": {
+              "type": "string",
+              "pattern": "^constraint_set_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "snapshot": {
+              "type": "object",
+              "required": ["base_selections", "days"],
+              "properties": {
+                "base_selections": {
+                  "type": "array",
+                  "items": {"$ref": "common.schema.json#/$defs/base_selection"}
+                },
+                "days": {
+                  "type": "array",
+                  "items": {"$ref": "common.schema.json#/$defs/day"}
+                }
+              },
+              "additionalProperties": false
+            },
+            "snapshot_created_at": {"$ref": "common.schema.json#/$defs/date_time"}
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

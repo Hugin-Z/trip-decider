@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trip-decider.example/schemas/0.1.0/constraints.schema.json",
+  "$defs": {
+    "target_ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["target_type", "request_id", "scope_kind"],
+          "properties": {
+            "target_type": {"const": "request_scope"},
+            "request_id": {
+              "type": "string",
+              "pattern": "^request_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "scope_kind": {
+              "enum": [
+                "trip",
+                "travel_window",
+                "party",
+                "budget",
+                "transport",
+                "mobility",
+                "destination",
+                "must_visit",
+                "excluded",
+                "day_template"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["target_type", "entity_kind", "entity_id"],
+          "properties": {
+            "target_type": {"const": "entity"},
+            "entity_kind": {
+              "enum": ["candidate", "plan", "day", "activity", "leg", "base_selection"]
+            },
+            "entity_id": {"$ref": "common.schema.json#/$defs/entity_id"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {"$ref": "common.schema.json#/$defs/envelope_base"},
+    {
+      "properties": {
+        "artifact_type": {"const": "constraints"},
+        "payload": {
+          "type": "object",
+          "required": [
+            "constraint_set_id",
+            "request_ref",
+            "parse_ref",
+            "revision",
+            "constraints",
+            "user_edit_policy"
+          ],
+          "properties": {
+            "constraint_set_id": {
+              "type": "string",
+              "pattern": "^constraint_set_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "request_ref": {"$ref": "common.schema.json#/$defs/artifact_ref"},
+            "parse_ref": {"$ref": "common.schema.json#/$defs/artifact_ref"},
+            "revision": {"type": "integer", "minimum": 1},
+            "constraints": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "constraint_id",
+                  "layer",
+                  "category",
+                  "operator",
+                  "target_refs",
+                  "value",
+                  "unit",
+                  "origin",
+                  "enabled"
+                ],
+                "properties": {
+                  "constraint_id": {
+                    "type": "string",
+                    "pattern": "^constraint_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "layer": {"enum": ["hard", "soft", "environment"]},
+                  "category": {"type": "string", "minLength": 1},
+                  "operator": {"type": "string", "minLength": 1},
+                  "target_refs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"$ref": "#/$defs/target_ref"}
+                  },
+                  "value": {},
+                  "unit": {"type": ["string", "null"]},
+                  "origin": {"$ref": "common.schema.json#/$defs/origin"},
+                  "enabled": {"type": "boolean"},
+                  "supersedes_constraint_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^constraint_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                      },
+                      {"type": "null"}
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "user_edit_policy": {
+              "type": "object",
+              "required": ["constraints_are_solver_ssot", "request_auto_overwrite"],
+              "properties": {
+                "constraints_are_solver_ssot": {"const": true},
+                "request_auto_overwrite": {"const": false}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
