@@ -1,6 +1,12 @@
 # Work Unit 0 Review
 
-Review 状态：`READY_FOR_HUGIN_REVIEW`
+Review 状态：`APPROVED`
+
+Reviewer: Hugin
+Approval result: APPROVED
+Approval time: 2026-07-26T16:36:34.8523409+08:00
+Approved scope: Work Unit 0 Plan v0.2, C0—C4
+Approved HEAD before closure: 1970bde731a05628d7fb638eab434ed5d768b592
 
 范围：获批 Plan v0.2 的 C0—C4。本文记录的是可独立复核的仓库、handbook、prior-art、契约和 scope 证据；不声明 Hugin 已验收，也不开始 WU1。
 
@@ -110,7 +116,7 @@ plans/work-unit-0-bootstrap-d0.md
 
 ## 6. D0 prior-art 证据
 
-研究完成于 C2；以 C1→C2 commit timestamp 计算的 Git 边界耗时为 `8 分 24 秒`，低于 240 分钟上限。
+C1 至 C2 的 Git 提交边界间隔为 8 分 24 秒；该数据不是精确工时统计，仅用于证明未出现跨日失控执行。
 
 | 对象 | 身份/正式来源 | 代码与数据 | license 结论 | 状态 |
 |---|---|---|---|---|
