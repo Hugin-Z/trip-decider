@@ -741,7 +741,7 @@ class TestPlanSection111BaseCases(ContractTestCase):
             closure=BundleClosure.ARTIFACT_ONLY,
             root=candidates["artifact_id"],
         )
-        self.assert_problem(result, "DUPLICATE_DEFINITION_ID", "/payload/candidates/1/candidate_id", "uniqueDefinition")
+        self.assert_problem(result, "DUPLICATE_DEFINITION_ID", "/payload/candidates/2/candidate_id", "uniqueDefinition")
 
     def test_base_03_artifact_only_defers_future_entity_resolution(self) -> None:
         bundle = make_planning_bundle()
