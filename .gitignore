@@ -1,0 +1,28 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.venv/
+
+# Python/editor caches that future work units may create locally
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime and generated data
+logs/
+runtime/
+*.log
+data/raw/
+fixtures/private/
+
+# Operating-system and editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
