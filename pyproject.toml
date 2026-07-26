@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trip-decider"
+version = "0.1.0"
+description = "Strict artifact contract validation for trip-decider."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "PyYAML==6.0.3",
+    "jsonschema[format-nongpl]==4.26.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
