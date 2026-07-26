@@ -1085,7 +1085,14 @@ class TestCandidateSnapshots(ContractTestCase):
     def test_cs_03_planner_closed_uses_explicit_candidate_snapshot(self) -> None:
         bundle = make_planning_bundle()
         result = self.bundle_result(
-            list(bundle.values()),
+            [
+                bundle["request"],
+                bundle["parse"],
+                bundle["constraints"],
+                bundle["candidates"],
+                bundle["evidence"],
+                bundle["plan"],
+            ],
             closure=BundleClosure.CLOSED,
             root=bundle["plan"]["artifact_id"],
         )
