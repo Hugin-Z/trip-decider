@@ -22,13 +22,85 @@
     "bundle_closure": {"enum": ["artifact_only", "closed"]},
     "root_artifact_id": {"$ref": "common.schema.json#/$defs/artifact_id"},
     "source": {
-      "type": "object",
-      "required": ["kind", "description"],
-      "properties": {
-        "kind": {"enum": ["frozen_contract", "user_supplied_anchor"]},
-        "description": {"type": "string", "minLength": 1}
-      },
-      "additionalProperties": false
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "description"],
+          "properties": {
+            "kind": {"const": "frozen_contract"},
+            "description": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "description", "origin_url", "data_policy"],
+          "properties": {
+            "kind": {"const": "open_data_anchor"},
+            "description": {"type": "string", "minLength": 1},
+            "origin_url": {"type": "string", "format": "uri"},
+            "data_policy": {
+              "$ref": "common.schema.json#/$defs/open_data_anchor_policy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "description", "provider_name", "data_policy"],
+          "properties": {
+            "kind": {"const": "provider_authorized_anchor"},
+            "description": {"type": "string", "minLength": 1},
+            "provider_name": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]*$"
+            },
+            "data_policy": {
+              "$ref": "common.schema.json#/$defs/provider_authorized_anchor_policy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "description",
+            "specification_ref",
+            "data_policy"
+          ],
+          "properties": {
+            "kind": {"const": "synthetic_fixture"},
+            "description": {"type": "string", "minLength": 1},
+            "specification_ref": {"type": "string", "minLength": 1},
+            "data_policy": {
+              "$ref": "common.schema.json#/$defs/synthetic_fixture_policy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "description",
+            "user_control_ref",
+            "data_policy"
+          ],
+          "properties": {
+            "kind": {"const": "user_supplied_anchor"},
+            "description": {"type": "string", "minLength": 1},
+            "user_control_ref": {
+              "type": "string",
+              "pattern": "^user_control_[a-z0-9_-]+$"
+            },
+            "data_policy": {
+              "$ref": "common.schema.json#/$defs/user_supplied_anchor_policy"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "coverage": {
       "type": "array",

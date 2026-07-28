@@ -136,6 +136,256 @@
       },
       "additionalProperties": false
     },
+    "license": {
+      "type": "object",
+      "required": ["identifier", "url", "attribution"],
+      "properties": {
+        "identifier": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "format": "uri"},
+        "attribution": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "commercial_live_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "commercial"},
+        "capture_mode": {"const": "live"},
+        "storage_policy": {"const": "prohibited"},
+        "replay_allowed": {"const": false},
+        "fixture_allowed": {"const": false},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "string", "format": "uri"},
+        "authorization_ref": {"type": "null"},
+        "license": {"type": "null"}
+      },
+      "additionalProperties": false
+    },
+    "temporary_capture_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "commercial"},
+        "capture_mode": {"const": "temporary_capture"},
+        "storage_policy": {"const": "temporary_only"},
+        "replay_allowed": {"const": false},
+        "fixture_allowed": {"const": false},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "string", "format": "uri"},
+        "authorization_ref": {"type": "null"},
+        "license": {"type": "null"}
+      },
+      "additionalProperties": false
+    },
+    "open_data_anchor_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "open_data"},
+        "capture_mode": {"const": "persistent_anchor"},
+        "storage_policy": {"const": "persistent_allowed"},
+        "replay_allowed": {"const": true},
+        "fixture_allowed": {"const": true},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "string", "format": "uri"},
+        "authorization_ref": {"type": "null"},
+        "license": {"$ref": "#/$defs/license"}
+      },
+      "additionalProperties": false
+    },
+    "provider_authorized_anchor_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "commercial"},
+        "capture_mode": {"const": "persistent_anchor"},
+        "storage_policy": {"const": "persistent_authorized"},
+        "replay_allowed": {"const": true},
+        "fixture_allowed": {"const": true},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "string", "format": "uri"},
+        "authorization_ref": {
+          "type": "string",
+          "pattern": "^authorization_[a-z0-9_-]+$"
+        },
+        "license": {"type": "null"}
+      },
+      "additionalProperties": false
+    },
+    "synthetic_fixture_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "synthetic"},
+        "capture_mode": {"const": "persistent_anchor"},
+        "storage_policy": {"const": "persistent_allowed"},
+        "replay_allowed": {"const": true},
+        "fixture_allowed": {"const": true},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "null"},
+        "authorization_ref": {"type": "null"},
+        "license": {"type": "null"}
+      },
+      "additionalProperties": false
+    },
+    "user_supplied_anchor_policy": {
+      "type": "object",
+      "required": [
+        "source_class",
+        "capture_mode",
+        "storage_policy",
+        "replay_allowed",
+        "fixture_allowed",
+        "policy_checked_at",
+        "terms_url",
+        "authorization_ref",
+        "license"
+      ],
+      "properties": {
+        "source_class": {"const": "user_supplied"},
+        "capture_mode": {"const": "persistent_anchor"},
+        "storage_policy": {"const": "user_controlled"},
+        "replay_allowed": {"const": true},
+        "fixture_allowed": {"const": true},
+        "policy_checked_at": {"$ref": "#/$defs/date_time"},
+        "terms_url": {"type": "null"},
+        "authorization_ref": {
+          "type": "string",
+          "pattern": "^user_control_[a-z0-9_-]+$"
+        },
+        "license": {"type": "null"}
+      },
+      "additionalProperties": false
+    },
+    "data_policy": {
+      "oneOf": [
+        {"$ref": "#/$defs/commercial_live_policy"},
+        {"$ref": "#/$defs/temporary_capture_policy"},
+        {"$ref": "#/$defs/open_data_anchor_policy"},
+        {"$ref": "#/$defs/provider_authorized_anchor_policy"},
+        {"$ref": "#/$defs/synthetic_fixture_policy"},
+        {"$ref": "#/$defs/user_supplied_anchor_policy"}
+      ]
+    },
+    "provider_category": {
+      "type": "object",
+      "required": ["code", "label"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "label": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider_external_status": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "code", "label"],
+          "properties": {
+            "kind": {"const": "reported"},
+            "code": {"type": "string", "minLength": 1},
+            "label": {
+              "oneOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "null"}
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {"const": "not_reported"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "provider_metadata": {
+      "type": "object",
+      "required": [
+        "name",
+        "record_id",
+        "record_type",
+        "categories",
+        "external_status",
+        "data_policy"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "record_id": {"type": "string", "minLength": 1},
+        "record_type": {"type": "string", "minLength": 1},
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/provider_category"}
+        },
+        "external_status": {"$ref": "#/$defs/provider_external_status"},
+        "data_policy": {"$ref": "#/$defs/data_policy"}
+      },
+      "additionalProperties": false
+    },
     "origin": {
       "oneOf": [
         {
