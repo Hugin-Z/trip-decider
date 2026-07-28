@@ -1,0 +1,181 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-07-28T08:39:45Z",
+    "timestamp_areas_base": "2026-07-26T23:50:50Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "node",
+  "id": 244082160,
+  "lat": 29.3233840,
+  "lon": 117.7542738,
+  "tags": {
+    "alt_name": "婺源",
+    "alt_name:en": "Wuyuan",
+    "alt_name:zh": "婺源",
+    "gns:ADM1": "03",
+    "gns:DSG": "ADM3",
+    "gns:UFI": "-1931234",
+    "gns:UNI": "6667965",
+    "name": "婺源县",
+    "name:ceb": "Wuyuan Xian",
+    "name:de": "Wuyuan",
+    "name:en": "Wuyuan County",
+    "name:fa": "شهرستان وویوان (جیانگشی)",
+    "name:fr": "Xian de Wuyuan",
+    "name:gan": "婺源",
+    "name:it": "Contea di Wuyuan",
+    "name:ja": "ブ源県",
+    "name:ko": "우위안현",
+    "name:nan": "Bū-goân-koān",
+    "name:no": "Wuyuan",
+    "name:ru": "Уюань",
+    "name:sv": "Wuyuan",
+    "name:vi": "Vụ Nguyên",
+    "name:wuu": "婺源县",
+    "name:yue": "婺源",
+    "name:zh": "婺源县",
+    "name:zh-Hans": "婺源县",
+    "name:zh-Hant": "婺源縣",
+    "name:zh-Latn-pinyin": "Wùyuán Xiàn",
+    "place": "county",
+    "wikidata": "Q1357710",
+    "wikipedia": "zh:婺源县"
+  }
+},
+{
+  "type": "node",
+  "id": 673351120,
+  "lat": 29.2506588,
+  "lon": 117.8558318,
+  "tags": {
+    "capital": "6",
+    "name": "婺源县",
+    "name:ceb": "Wuyuan",
+    "name:de": "Wuyuan",
+    "name:en": "Wuyuan",
+    "name:fa": "شهرستان وویوان (جیانگشی)",
+    "name:fr": "Wuyuan",
+    "name:gan": "婺源縣",
+    "name:it": "Wuyuan",
+    "name:ja": "ブ源県",
+    "name:ko": "우위안현",
+    "name:nan": "Bū-goân-koān",
+    "name:no": "Wuyuan",
+    "name:ru": "Уюань",
+    "name:sv": "Wuyuan",
+    "name:vi": "Vụ Nguyên",
+    "name:wuu": "婺源县",
+    "name:yue": "婺源縣",
+    "name:zh": "婺源县",
+    "name:zh-Hans": "婺源县",
+    "name:zh-Hant": "婺源縣",
+    "name:zh-Latn-pinyin": "Wùyuán Xiàn",
+    "official_name": "婺源县",
+    "official_name:en": "Wuyuan County",
+    "official_name:zh": "婺源县",
+    "place": "city",
+    "place:CN": "county",
+    "population": "111199",
+    "population:date": "2022",
+    "population:note": "人口为城区人口",
+    "short_name": "婺源",
+    "wikidata": "Q1357710",
+    "wikipedia": "zh:婺源县"
+  }
+},
+{
+  "type": "node",
+  "id": 4818081345,
+  "lat": 29.3235898,
+  "lon": 118.1132609,
+  "tags": {
+    "name": "篁岭",
+    "place": "hamlet"
+  }
+},
+{
+  "type": "node",
+  "id": 5136917928,
+  "lat": 29.3256496,
+  "lon": 117.9266239,
+  "tags": {
+    "alt_name": "李坑村",
+    "name": "李坑",
+    "name:en": "Likeng",
+    "name:zh": "李坑",
+    "place": "village",
+    "source": "maxar Premium",
+    "wikidata": "Q11095803",
+    "wikipedia": "zh:李坑村"
+  }
+},
+{
+  "type": "node",
+  "id": 5139051592,
+  "lat": 29.4568362,
+  "lon": 118.0242016,
+  "tags": {
+    "name": "江岭",
+    "place": "hamlet"
+  }
+},
+{
+  "type": "node",
+  "id": 5404580598,
+  "lat": 29.3201205,
+  "lon": 118.1170726,
+  "tags": {
+    "name": "篁岭",
+    "name:en": "Huangling Scenic Area",
+    "tourism": "attraction"
+  }
+},
+{
+  "type": "relation",
+  "id": 3046784,
+  "center": {
+    "lat": 29.2987670,
+    "lon": 117.7871090
+  },
+  "tags": {
+    "admin_level": "6",
+    "alt_name": "婺源",
+    "alt_name:en": "Wuyuan",
+    "alt_name:zh": "婺源",
+    "boundary": "administrative",
+    "division_code": "361130",
+    "name": "婺源县",
+    "name:ceb": "Wuyuan Xian",
+    "name:de": "Wuyuan",
+    "name:en": "Wuyuan County",
+    "name:fa": "شهرستان وویوان",
+    "name:fr": "Xian de Wuyuan",
+    "name:gan": "婺源",
+    "name:it": "Contea di Wuyuan",
+    "name:ja": "ブ源県",
+    "name:ko": "우위안현",
+    "name:nan": "Bū-goân-koān",
+    "name:no": "Wuyuan",
+    "name:ru": "Уюань",
+    "name:sv": "Wuyuan",
+    "name:vi": "Vụ Nguyên",
+    "name:wuu": "婺源县",
+    "name:yue": "婺源",
+    "name:zh": "婺源县",
+    "name:zh-Hans": "婺源县",
+    "name:zh-Hant": "婺源縣",
+    "name:zh-Latn-pinyin": "Wùyuán Xiàn",
+    "place": "county",
+    "type": "boundary",
+    "wikidata": "Q1357710",
+    "wikipedia": "en:Wuyuan County, Jiangxi"
+  }
+}
+
+  ]
+}

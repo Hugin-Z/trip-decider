@@ -1,6 +1,6 @@
 # WU2R Resume Acquisition Decision
 
-Status: READY_TO_ATTEMPT
+Status: WU2R_ACQUISITION_COMPLETED
 
 Checked on: 2026-07-28
 
@@ -187,27 +187,106 @@ adapter, identity, coverage, source-policy, persistence, and independently
 authored fixture gates all pass. Failure creates no anchor and must be
 represented only by a durable sanitized FER envelope.
 
-## 6. Pre-attempt facts
+## 6. Completed acquisition facts
 
 ```text
 map_data_calls_in_C0_C1:
 0
 
 anchor_created:
-false
+true
 
 fixture_created:
-false
+true
 
 route_acquisition:
 false
 
-current_gate:
-READY_TO_ATTEMPT
+attempt_group_id:
+WU2R-resume-001
+
+run_id:
+run_wu2r_resume_001
+
+scheduled_overpass_posts:
+1
+
+physical_attempts:
+1
+
+retry_relations:
+0
+
+fer_status:
+succeeded
+
+fer_terminal_failure_code:
+null
+
+failure_evidence_path:
+runtime/wu2r-failure-evidence/run_wu2r_resume_001/failure-evidence.json
+
+failure_evidence_sha256:
+817197DA1D64AC660455C20725A11B03D8BAD7E9EACC9945FAEC815D7AD36CA3
+
+query_sha256:
+5A51E39FFD53FCD1B204AEBD6652CC7267853BD236B4FBA5D807941CFF62993F
+
+request_sha256:
+6765ABDAA3BBBB4A70F1E28EA7B4A339F81ED7A2F9CCC8B9A4CE8BA1DE275045
+
+response_sha256:
+41520443BB370919F184CF46441DB897A809EB1B86119B7CF2B6007F20A5B382
+
+response_bytes:
+4362
+
+source_base_timestamp:
+2026-07-28T08:39:45Z
+
+provider_identity_count:
+7
+
+candidate_count:
+7
+
+seed_status_counts:
+matched=2
+ambiguous=1
+unmatched=1
+
+cleanup_status:
+succeeded
+
+cleanup_residue_count:
+0
+
+primary_persistence:
+succeeded
+
+emergency_persistence:
+not_attempted
 ```
 
-`READY_TO_ATTEMPT` records that the fixed authority and preconditions are
-present. It is not evidence of a completed call, a valid response, an
-accepted candidate pool, or a replayable anchor.
+The authoritative FER ledger records one successful HTTP 200 attempt, an
+empty retry list, an accepted response phase, successful primary persistence,
+and successful cleanup. The independently authored anchor retains all seven
+provider identities exactly once. Its seed accounting contains all three
+required states and creates no placeholder for the unmatched seed.
 
-READY_TO_ATTEMPT
+The 11 Resume cases pass offline, including byte replay with zero network
+attempts. No second acquisition, route acquisition, provider fallback,
+identity selection, or old-work-unit restoration occurred.
+
+```text
+OLD_WU2_C5_C6_UNCHANGED:
+PROHIBITED
+
+AUTOMATIC_WU2R_RESUME:
+PROHIBITED
+
+AUTOMATIC_WU3_WU5_START:
+PROHIBITED
+```
+
+WU2R_ACQUISITION_COMPLETED

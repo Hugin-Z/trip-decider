@@ -19,10 +19,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import socket
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import urlencode
 from unittest.mock import Mock, patch
 
 from trip_decider.acquisition_evidence import (
@@ -56,6 +58,49 @@ HUANGLING_ATTRACTION = "candidate_8f330e07-0839-4696-8769-19ef50625ec0"
 HUANGLING_HAMLET = "candidate_2bd4a053-014f-4e14-8e54-79501b37a671"
 JIANGLING = "candidate_7dff94ab-4ca4-40ce-b9c7-33750c519679"
 LIKENG = "candidate_b6b13e35-55b6-4099-a30b-7027c684a1c5"
+ROOT = Path(__file__).resolve().parents[1]
+REAL_FIXTURE = ROOT / "fixtures" / "jiangxi_multi_identity_smoke"
+
+
+def canonical_json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def real_anchor_inputs():
+    case = json.loads((REAL_FIXTURE / "case.json").read_text(encoding="utf-8"))
+    replay = json.loads(
+        (REAL_FIXTURE / "replay.json").read_text(encoding="utf-8")
+    )
+    raw = (REAL_FIXTURE / "osm-pois.json").read_bytes()
+    documents = {
+        item["relative_path"]: json.loads(item["content_utf8"])
+        for item in case["documents"]
+    }
+    source = (
+        ROOT / "docs" / "wu2-recovery-source-and-capture.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        r"Exact UTF-8 query:\n\n```text\n(.*?)```",
+        source,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError("frozen query block is missing")
+    query_bytes = match.group(1).encode("utf-8")
+    request_bytes = urlencode(
+        {"data": match.group(1)},
+        encoding="utf-8",
+        errors="strict",
+    ).encode("ascii")
+    return case, replay, documents, raw, query_bytes, request_bytes
 
 
 def open_policy() -> dict[str, object]:
@@ -325,6 +370,56 @@ class ResumeIntegrationCase(unittest.TestCase):
             )
         return result, network.call_count
 
+    def replay_real_anchor(self):
+        (
+            case,
+            replay,
+            documents,
+            response,
+            query_bytes,
+            request_bytes,
+        ) = real_anchor_inputs()
+        metadata_value = replay["snapshot_metadata"]
+        snapshot_metadata = ResumeSnapshotMetadata(
+            format_version=metadata_value["format_version"],
+            provider=metadata_value["provider"],
+            operation=metadata_value["operation"],
+            crs=metadata_value["crs"],
+            retrieved_at=metadata_value["retrieved_at"],
+            request_fingerprint=metadata_value["request_fingerprint"],
+            response_locator=metadata_value["response_locator"],
+            data_policy=metadata_value["data_policy"],
+        )
+        context_value = replay["artifact_context"]
+        real_context = IngestionContext(
+            request_ref=context_value["request_ref"],
+            run_id=context_value["run_id"],
+            created_at=context_value["created_at"],
+            producer_name=context_value["producer_name"],
+            producer_version=context_value["producer_version"],
+        )
+        with patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("network forbidden"),
+        ) as network:
+            result = replay_wu2r_resume_anchor(
+                run_id=replay["run_id"],
+                query_bytes=query_bytes,
+                request_bytes=request_bytes,
+                expected_query_sha256=replay["query_sha256"],
+                expected_request_sha256=replay["request_sha256"],
+                response_bytes=response,
+                expected_response_sha256=replay["response_sha256"],
+                snapshot_metadata=snapshot_metadata,
+                seeds=tuple(
+                    item["seed"]
+                    for item in replay["expected"]["seed_matches"]
+                ),
+                context=real_context,
+            )
+        return result, case, replay, documents, response, network.call_count
+
     def test_ri01_explicit_linkage_is_preserved(self) -> None:
         response = raw_response()
         result, persisted, capture_calls, network_calls = self.acquire(
@@ -455,6 +550,171 @@ class ResumeIntegrationCase(unittest.TestCase):
         self.assertEqual(result.network_attempts, 0)
         self.assertFalse(result.problems)
         self.assertEqual(network_calls, 0)
+
+    def test_ra01_raw_and_source_policy_are_exact(self) -> None:
+        (
+            case,
+            replay,
+            _documents,
+            response,
+            query_bytes,
+            request_bytes,
+        ) = real_anchor_inputs()
+
+        self.assertEqual(
+            hashlib.sha256(query_bytes).hexdigest().upper(),
+            replay["query_sha256"],
+        )
+        self.assertEqual(
+            hashlib.sha256(request_bytes).hexdigest().upper(),
+            replay["request_sha256"],
+        )
+        self.assertEqual(len(response), replay["response_bytes"])
+        self.assertEqual(
+            hashlib.sha256(response).hexdigest().upper(),
+            replay["response_sha256"],
+        )
+        self.assertEqual(
+            replay["raw_response"],
+            {
+                "relative_path": "osm-pois.json",
+                "bytes": 4362,
+                "sha256": (
+                    "41520443BB370919F184CF46441DB897A809EB1B86119B7CF"
+                    "2B6007F20A5B382"
+                ),
+            },
+        )
+        self.assertEqual(case["source"]["kind"], "open_data_anchor")
+        self.assertEqual(
+            case["source"]["data_policy"]["license"],
+            {
+                "identifier": "ODbL-1.0",
+                "url": "https://opendatacommons.org/licenses/odbl/1-0/",
+                "attribution": "© OpenStreetMap contributors",
+            },
+        )
+        self.assertTrue(case["source"]["data_policy"]["replay_allowed"])
+        self.assertTrue(case["source"]["data_policy"]["fixture_allowed"])
+
+    def test_ra02_all_provider_identities_are_retained(self) -> None:
+        case, replay, documents, response, *_ = real_anchor_inputs()
+        candidate_document = documents["candidates.json"]
+        candidates = candidate_document["payload"]["candidates"]
+        expected_identities = [
+            (item["record_type"], item["record_id"])
+            for item in replay["expected"]["provider_identities"]
+        ]
+        actual_identities = [
+            (
+                item["provider"]["record_type"],
+                item["provider"]["record_id"],
+            )
+            for item in candidates
+        ]
+        raw_document = json.loads(response.decode("utf-8"))
+        raw_identities = sorted(
+            (
+                (item["type"], str(item["id"]))
+                for item in raw_document["elements"]
+            ),
+            key=lambda item: (item[0], int(item[1])),
+        )
+
+        self.assertEqual(case["root_artifact_id"], candidate_document["artifact_id"])
+        self.assertEqual(len(candidates), 7)
+        self.assertEqual(actual_identities, expected_identities)
+        self.assertEqual(actual_identities, raw_identities)
+        self.assertEqual(len(set(actual_identities)), 7)
+        self.assertEqual(
+            [item["label"] for item in candidates].count("篁岭"),
+            2,
+        )
+        self.assertEqual(
+            [item["label"] for item in candidates].count("婺源县"),
+            3,
+        )
+
+    def test_ra03_independent_artifacts_equal_replay_output(self) -> None:
+        result, case, replay, documents, _response, network_calls = (
+            self.replay_real_anchor()
+        )
+        request_document = documents["request.json"]
+        candidate_document = documents["candidates.json"]
+
+        self.assertEqual(
+            canonical_json_hash(request_document["payload"]),
+            request_document["integrity"]["payload_sha256"],
+        )
+        self.assertEqual(
+            request_document["artifact_id"],
+            replay["expected"]["request_artifact_id"],
+        )
+        self.assertEqual(
+            canonical_json_hash(candidate_document["payload"]),
+            replay["expected"]["candidate_payload_sha256"],
+        )
+        self.assertEqual(
+            candidate_document["artifact_id"],
+            replay["expected"]["candidate_artifact_id"],
+        )
+        self.assertEqual(
+            candidate_document["payload"]["request_ref"]["artifact_id"],
+            request_document["artifact_id"],
+        )
+        self.assertEqual(result.candidate_result.candidate_artifact, candidate_document)
+        self.assertEqual(case["bundle_closure"], "closed")
+        self.assertEqual(network_calls, 0)
+
+    def test_ra04_seed_accounting_and_local_facts_are_exact(self) -> None:
+        result, _case, replay, _documents, _response, network_calls = (
+            self.replay_real_anchor()
+        )
+        actual_matches = [
+            {
+                "seed": item.seed,
+                "status": item.status,
+                "candidate_refs": list(item.candidate_refs),
+            }
+            for item in result.candidate_result.seed_matches
+        ]
+        actual_facts = [
+            {
+                "candidate_id": item.candidate_id,
+                "provider_name": item.provider_name,
+                "provider_record_type": item.provider_record_type,
+                "provider_record_id": item.provider_record_id,
+                "categories": [
+                    {"code": code, "label": label}
+                    for code, label in item.categories
+                ],
+                "location": dict(item.location),
+                "source_refs": [dict(source) for source in item.source_refs],
+            }
+            for item in result.candidate_result.record_local_facts
+        ]
+
+        self.assertEqual(actual_matches, replay["expected"]["seed_matches"])
+        self.assertEqual(
+            replay["expected"]["seed_status_counts"],
+            {"matched": 2, "ambiguous": 1, "unmatched": 1},
+        )
+        self.assertEqual(actual_facts, replay["expected"]["record_local_facts"])
+        self.assertEqual(network_calls, 0)
+
+    def test_ra05_committed_anchor_replay_has_zero_network(self) -> None:
+        result, case, replay, documents, response, network_calls = (
+            self.replay_real_anchor()
+        )
+
+        self.assertFalse(replay["network_required"])
+        self.assertEqual(result.network_attempts, 0)
+        self.assertEqual(network_calls, 0)
+        self.assertEqual(len(case["documents"]), 2)
+        self.assertEqual(len(case["dirty_cases"]), 1)
+        self.assertEqual(len(documents["candidates.json"]["payload"]["candidates"]), 7)
+        self.assertEqual(result.response_bytes, len(response))
+        self.assertFalse(result.problems)
 
 
 if __name__ == "__main__":

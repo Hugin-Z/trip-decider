@@ -1,0 +1,377 @@
+{
+  "artifact_context": {
+    "created_at": "2026-07-28T08:40:51.708Z",
+    "producer_name": "trip-decider-wu2r-resume",
+    "producer_version": "0.1.0",
+    "request_ref": {
+      "artifact_id": "urn:uuid:20000001-0000-4000-8000-000000000001",
+      "artifact_type": "request",
+      "payload_sha256": "b49538aa6aea6526e4154e7aa18053ec343c3c5fa7a2436bdfb4f43143593823",
+      "schema_version": "0.1.0"
+    },
+    "run_id": "run_20000001-0000-4000-8000-000000000001"
+  },
+  "attempt_group_id": "WU2R-resume-001",
+  "coverage": [
+    "exact eligible OSM response bytes",
+    "every valid provider identity retained once",
+    "matched, ambiguous, and unmatched seed accounting",
+    "candidate-local provider facts",
+    "CLOSED candidates-root offline replay"
+  ],
+  "endpoint": "https://overpass-api.de/api/interpreter",
+  "expected": {
+    "candidate_artifact_id": "urn:uuid:13056a6a-7fb7-436a-9d55-6002d1981903",
+    "candidate_count": 7,
+    "candidate_payload_sha256": "1935798b8947b618ccc0342fb7236ab2a264c14d27c4da058a8d7bd4fff6d161",
+    "provider_identities": [
+      {
+        "record_id": "244082160",
+        "record_type": "node"
+      },
+      {
+        "record_id": "673351120",
+        "record_type": "node"
+      },
+      {
+        "record_id": "4818081345",
+        "record_type": "node"
+      },
+      {
+        "record_id": "5136917928",
+        "record_type": "node"
+      },
+      {
+        "record_id": "5139051592",
+        "record_type": "node"
+      },
+      {
+        "record_id": "5404580598",
+        "record_type": "node"
+      },
+      {
+        "record_id": "3046784",
+        "record_type": "relation"
+      }
+    ],
+    "record_local_facts": [
+      {
+        "candidate_id": "candidate_0cc67cb5-47b2-4fae-a1ab-68fad0735027",
+        "categories": [
+          {
+            "code": "place=hamlet",
+            "label": "hamlet"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.4568362,
+          "longitude": 118.0242016,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:5139051592"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "5139051592",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:5139051592"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_1f482f01-0110-4805-8b33-0481d2022674",
+        "categories": [
+          {
+            "code": "tourism=attraction",
+            "label": "attraction"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.3201205,
+          "longitude": 118.1170726,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:5404580598"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "5404580598",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:5404580598"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_31943b34-149b-46c1-a53f-50abde1d000d",
+        "categories": [
+          {
+            "code": "place=hamlet",
+            "label": "hamlet"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.3235898,
+          "longitude": 118.1132609,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:4818081345"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "4818081345",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:4818081345"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_70ae7fa8-a52c-4b66-a869-d30fbf60a97d",
+        "categories": [
+          {
+            "code": "place=county",
+            "label": "county"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.323384,
+          "longitude": 117.7542738,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:244082160"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "244082160",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:244082160"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_a0197ec2-70dc-45ba-ad68-c7f80abfc018",
+        "categories": [
+          {
+            "code": "place=city",
+            "label": "city"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.2506588,
+          "longitude": 117.8558318,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:673351120"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "673351120",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:673351120"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_c3c64ba9-4395-48a4-9848-350026d04c0c",
+        "categories": [
+          {
+            "code": "place=county",
+            "label": "county"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.298767,
+          "longitude": 117.787109,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:relation:3046784"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "3046784",
+        "provider_record_type": "relation",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:relation:3046784"
+          }
+        ]
+      },
+      {
+        "candidate_id": "candidate_cf7475fc-463a-48cd-a0e9-8c8726ee3f2c",
+        "categories": [
+          {
+            "code": "place=village",
+            "label": "village"
+          }
+        ],
+        "location": {
+          "crs": "WGS84",
+          "kind": "coordinates",
+          "latitude": 29.3256496,
+          "longitude": 117.9266239,
+          "source_refs": [
+            {
+              "kind": "provider_item",
+              "value": "osm:node:5136917928"
+            }
+          ]
+        },
+        "provider_name": "osm",
+        "provider_record_id": "5136917928",
+        "provider_record_type": "node",
+        "source_refs": [
+          {
+            "kind": "provider_item",
+            "value": "osm:node:5136917928"
+          }
+        ]
+      }
+    ],
+    "request_artifact_id": "urn:uuid:20000001-0000-4000-8000-000000000001",
+    "request_payload_sha256": "b49538aa6aea6526e4154e7aa18053ec343c3c5fa7a2436bdfb4f43143593823",
+    "seed_matches": [
+      {
+        "candidate_refs": [
+          "candidate_1f482f01-0110-4805-8b33-0481d2022674",
+          "candidate_31943b34-149b-46c1-a53f-50abde1d000d"
+        ],
+        "seed": "篁岭",
+        "status": "ambiguous"
+      },
+      {
+        "candidate_refs": [
+          "candidate_0cc67cb5-47b2-4fae-a1ab-68fad0735027"
+        ],
+        "seed": "江岭",
+        "status": "matched"
+      },
+      {
+        "candidate_refs": [
+          "candidate_cf7475fc-463a-48cd-a0e9-8c8726ee3f2c"
+        ],
+        "seed": "李坑",
+        "status": "matched"
+      },
+      {
+        "candidate_refs": [],
+        "seed": "庆源",
+        "status": "unmatched"
+      }
+    ],
+    "seed_status_counts": {
+      "ambiguous": 1,
+      "matched": 2,
+      "unmatched": 1
+    }
+  },
+  "failure_evidence": {
+    "relative_path": "runtime/wu2r-failure-evidence/run_wu2r_resume_001/failure-evidence.json",
+    "sha256": "817197DA1D64AC660455C20725A11B03D8BAD7E9EACC9945FAEC815D7AD36CA3"
+  },
+  "integration": {
+    "function": "replay_wu2r_resume_anchor",
+    "module": "trip_decider.resume_acquisition"
+  },
+  "method": "POST",
+  "network_required": false,
+  "non_coverage": [
+    "OSM completeness or real-place identity correctness",
+    "POI ranking, recommendation, or selection",
+    "route acquisition or route evidence",
+    "evidence rating, feasibility, itinerary planning, or UI"
+  ],
+  "query_sha256": "5A51E39FFD53FCD1B204AEBD6652CC7267853BD236B4FBA5D807941CFF62993F",
+  "raw_response": {
+    "bytes": 4362,
+    "relative_path": "osm-pois.json",
+    "sha256": "41520443BB370919F184CF46441DB897A809EB1B86119B7CF2B6007F20A5B382"
+  },
+  "request_sha256": "6765ABDAA3BBBB4A70F1E28EA7B4A339F81ED7A2F9CCC8B9A4CE8BA1DE275045",
+  "response_bytes": 4362,
+  "response_sha256": "41520443BB370919F184CF46441DB897A809EB1B86119B7CF2B6007F20A5B382",
+  "retrieved_at": "2026-07-28T08:40:51.708Z",
+  "run_id": "run_wu2r_resume_001",
+  "schema_version": "wu2r-resume-replay/1.0",
+  "snapshot_metadata": {
+    "crs": "WGS84",
+    "data_policy": {
+      "authorization_ref": null,
+      "capture_mode": "persistent_anchor",
+      "fixture_allowed": true,
+      "license": {
+        "attribution": "© OpenStreetMap contributors",
+        "identifier": "ODbL-1.0",
+        "url": "https://opendatacommons.org/licenses/odbl/1-0/"
+      },
+      "policy_checked_at": "2026-07-28T00:00:00+08:00",
+      "replay_allowed": true,
+      "source_class": "open_data",
+      "storage_policy": "persistent_allowed",
+      "terms_url": "https://www.openstreetmap.org/copyright"
+    },
+    "format_version": "0.1.0",
+    "operation": "overpass-poi-snapshot",
+    "provider": "osm",
+    "request_fingerprint": "6765abdaa3bbbb4a70f1e28ea7b4a339f81ed7a2f9ccc8b9a4ce8ba1de275045",
+    "response_locator": {
+      "kind": "response_location",
+      "value": "fixtures/jiangxi_multi_identity_smoke/osm-pois.json"
+    },
+    "retrieved_at": "2026-07-28T08:40:51.708Z"
+  },
+  "source_base_timestamp": "2026-07-28T08:39:45Z",
+  "source_policy": {
+    "authorization_ref": null,
+    "capture_mode": "persistent_anchor",
+    "fixture_allowed": true,
+    "license": {
+      "attribution": "© OpenStreetMap contributors",
+      "identifier": "ODbL-1.0",
+      "url": "https://opendatacommons.org/licenses/odbl/1-0/"
+    },
+    "policy_checked_at": "2026-07-28T00:00:00+08:00",
+    "replay_allowed": true,
+    "source_class": "open_data",
+    "storage_policy": "persistent_allowed",
+    "terms_url": "https://www.openstreetmap.org/copyright"
+  }
+}
