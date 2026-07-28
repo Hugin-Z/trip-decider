@@ -27,6 +27,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from trip_decider.recovery import RecoveryRunSummary, run_wu2_recovery
+from trip_decider.resume_acquisition import (
+    replay_wu2r_resume_anchor as real_replay_function,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -333,10 +336,14 @@ class DownstreamOfflineRecoveryTests(unittest.TestCase):
             raw_path.write_bytes(raw[:-2] + b" " + raw[-1:])
             output_root = temp_root / "output"
             output_root.mkdir()
-            result, network_attempts = self._run(
-                copied_fixture,
-                output_root,
-            )
+            with patch(
+                "trip_decider.resume_acquisition.replay_wu2r_resume_anchor",
+                wraps=real_replay_function,
+            ) as replay_mock:
+                result, network_attempts = self._run(
+                    copied_fixture,
+                    output_root,
+                )
 
             self.assertIsNone(result.value)
             self.assertEqual(len(result.problems), 1)
@@ -346,6 +353,7 @@ class DownstreamOfflineRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(list(output_root.iterdir()), [])
             self.assertEqual(network_attempts, 0)
+            self.assertEqual(replay_mock.call_count, 1)
         self.assertEqual(
             {
                 filename: _file_hash(REAL_FIXTURE / filename)
