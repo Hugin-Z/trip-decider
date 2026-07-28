@@ -269,8 +269,21 @@ class AcquisitionHarnessCase(unittest.TestCase):
 
     def test_a06_unknown_body_metadata_remains_null(self) -> None:
         private_detail = "do-not-reconstruct-deadbeef"
+
+        class UnreadableBody(BytesIO):
+            def read(self, *args: object, **kwargs: object) -> bytes:
+                raise OSError("synthetic unreadable body")
+
+        headers = Message()
+        headers["Content-Type"] = "text/plain; charset=utf-8"
         transport = SequenceTransport(
-            http_error(404, None, reason=private_detail)
+            HTTPError(
+                ENDPOINT,
+                404,
+                private_detail,
+                headers,
+                UnreadableBody(b"body exists but cannot be read"),
+            )
         )
 
         result = self.run_case(transport, attempt_count=1)
