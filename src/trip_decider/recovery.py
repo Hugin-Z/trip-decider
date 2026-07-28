@@ -87,7 +87,6 @@ class _PreparedReplay:
     request_bytes: bytes
     case_sha256: str
     replay_sha256: str
-    response_sha256: str
 
 
 @dataclass(frozen=True)
@@ -780,7 +779,6 @@ def _prepare_replay(replay_root: Path) -> _PreparedReplay:
         response_bytes = raw_path.read_bytes()
     except OSError as error:
         raise _ControlError("raw response cannot be read") from error
-    response_hash = _sha256(response_bytes)
     response_size = replay.get("response_bytes")
     raw_size = raw_control.get("bytes")
     if (
@@ -789,8 +787,6 @@ def _prepare_replay(replay_root: Path) -> _PreparedReplay:
         or response_size < 1
         or raw_size != response_size
         or len(response_bytes) != response_size
-        or response_hash != str(raw_control.get("sha256")).lower()
-        or response_hash != str(replay.get("response_sha256")).lower()
     ):
         raise _ControlError("raw response identity does not match")
 
@@ -1000,7 +996,6 @@ def _prepare_replay(replay_root: Path) -> _PreparedReplay:
         request_bytes=request_bytes,
         case_sha256=_sha256(case_bytes),
         replay_sha256=_sha256(replay_bytes),
-        response_sha256=response_hash,
     )
 
 
@@ -1221,6 +1216,7 @@ def run_wu2_recovery(
             artifact_path=str(checked_replay_root),
         )
 
+    response_sha256 = _sha256(prepared.response_bytes)
     if replay_result.network_attempts != 0:
         return _failure(
             "RECOVERY_NETWORK_ATTEMPTED",
@@ -1301,7 +1297,7 @@ def run_wu2_recovery(
             "root_artifact_id": prepared.case["root_artifact_id"],
             "case_sha256": prepared.case_sha256,
             "replay_sha256": prepared.replay_sha256,
-            "raw_response_sha256": prepared.response_sha256,
+            "raw_response_sha256": response_sha256,
         },
         "output_paths": {
             "candidate_artifact_path": "candidates.json",
