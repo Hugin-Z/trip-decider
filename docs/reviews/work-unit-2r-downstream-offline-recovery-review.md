@@ -14,9 +14,45 @@ Lines: 545
 Bytes: 17980
 ```
 
-This Review closes only WU2R-DOR C0-C4. It does not reinterpret the old WU2
-or WU2R attempts, authorize WU3/WU5, acquire data, or implement routing,
-evidence rating, recommendation, or planning.
+This document preserves the original WU2R-DOR C0-C4 Review and adds the
+subsequently approved boundary-remediation evidence. It does not reinterpret
+the old WU2 or WU2R attempts, authorize WU3/WU5, acquire data, or implement
+routing, evidence rating, recommendation, or planning.
+
+## 0. Boundary remediation status history
+
+The original C4 commit
+`3f1c636c8d2cedc799f24f870efd4511bbb1dbcf` declared
+`READY_FOR_HUGIN_REVIEW`. A final audit after that commit found that Recovery
+computed and compared the actual response SHA256 with replay declarations
+before calling Resume replay. The original statements that Recovery copied
+no response-hash validation and that criterion 5 was complete were therefore
+invalid. WU2R-DOR was reclassified as `INCOMPLETE`.
+
+Hugin first approved a narrow correction limited to the test, Recovery, and
+this Review. The execution preflight then found that the unchanged verifier
+froze the old test/Recovery hashes and allowed only the original 3-5 commit
+prefix. Codex stopped before modifying any file and reported `BLOCKED`
+instead of producing a verification result that could not pass. Hugin then
+supplemented the approval with the verifier's minimal hash and exact
+8-or-9-commit gate update.
+
+The remediation history is additive:
+
+```text
+0e749257923965f57257b623b1b4d457f0fc61c3 test: require Resume-owned response hash validation
+4b811362b275a1d829ec51abf2a6a2f7e271b301 fix: delegate response hash validation to Resume replay
+ede70f1ab7b70c026d6edd0ddc2eaa6b2104cbdf chore: update downstream recovery verifier after remediation
+R4: docs: correct downstream recovery review after boundary remediation
+```
+
+The original C4 Review conclusion is superseded by this later remediation
+evidence, while its Git history remains intact.
+
+```text
+原C4 Review结论已被后续remediation证据取代，
+但其Git历史被完整保留。
+```
 
 ## 1. Preserved state and execution baseline
 
@@ -156,6 +192,19 @@ scripts/verify_wu2r_downstream_recovery.ps1
 6299CD4AB0F312E55DBC91E529D1D4F9FFC9EC20830797DB50B4B5AEA3BA85ED
 ```
 
+Mechanically measured post-remediation hashes:
+
+```text
+src/trip_decider/recovery.py
+C0E098DD4AB997727A0EFBCCC9C396AC480DEEB3477DBF4CDCB5E31A34E0D8BA
+
+tests/test_wu2r_downstream_recovery.py
+E52AE191B5D244CD810F4E0648459BF7B6F3E4B891B4A0FDDA72E8957133A3FF
+
+scripts/verify_wu2r_downstream_recovery.ps1
+BB26BA892ACB6714A295C5A0B9FD283C65F6B7337C179B22FC5A0CB1476F4FFC
+```
+
 ## 4. C1 red evidence
 
 Character-identical C1/C2 command:
@@ -218,8 +267,8 @@ C2 changed only `src/trip_decider/recovery.py`. It:
 - reads only the exact four-file anchor root and strict JSON controls;
 - verifies safe immediate-child paths and independent Candidate integrity;
 - reconstructs the exact frozen query/form bytes from the frozen source doc;
-- delegates response/hash/provider normalization, candidate IDs, seed
-  accounting, and record-local facts to `replay_wu2r_resume_anchor`;
+- calls `replay_wu2r_resume_anchor` for response/provider normalization,
+  candidate IDs, seed accounting, and record-local facts;
 - compares the delegated result to independently authored fixture expected
   values before writing;
 - writes four deterministic UTF-8 JSON outputs through same-directory,
@@ -227,10 +276,63 @@ C2 changed only `src/trip_decider/recovery.py`. It:
 - rolls back invocation-created temp/final files on failure;
 - rejects a caller-owned non-empty output root without overwriting it.
 
-An AST/source gate confirms that `run_wu2_recovery` references the Resume
-replay boundary and does not reference adapter normalization, candidate ID,
-seed-accounting, or record-local-fact generators. No route call or selection
-is performed.
+The original source gate confirmed that `run_wu2_recovery` referenced the
+Resume boundary and did not directly reference adapter normalization,
+candidate-ID, seed-accounting, or record-local-fact generators. It did not
+detect the response-hash comparison in the private `_prepare_replay` helper.
+That audit gap caused the original completion statement to overclaim the
+boundary.
+
+### R1/R2 response-hash boundary remediation
+
+R1 strengthened the existing DR05 without adding a seventh test. It wrapped
+the real Resume replay function, retained the original error/output/fixture
+and zero-network assertions, and added an exact one-call assertion.
+
+The character-identical command produced the remediation red:
+
+```text
+exit code: 1
+tests: 6
+passed: 5
+failures: 1
+errors: 0
+unique failure: expected Resume replay call count 1, actual 0
+network attempts: 0
+```
+
+R2 changed only `recovery.py`. It removed both comparisons between actual raw
+response SHA256 and the replay declarations before Resume. Raw bytes are now
+passed to Resume first. A failed Resume result is mapped to the existing
+Recovery problem; only after Resume succeeds does Recovery calculate the
+actual raw SHA256 for `input_fixture_identity`.
+
+The same command then produced:
+
+```text
+exit code: 0
+tests: 6
+passed: 6
+failures: 0
+errors: 0
+network attempts: 0
+```
+
+The explicit full regression after R2 produced:
+
+```text
+exit code: 0
+Ran 186 tests in 11.516s
+OK
+```
+
+Source-order inspection confirms the call to Resume precedes actual-response
+hash calculation. No pre-Resume actual-response hash comparison or
+hash-driven skip remains. Resume replay is the sole authority deciding
+query/request/response hash validity. Recovery retains exact paths, strict
+control shape, independent Candidate/seed/fact comparisons, output-root
+safety, atomic writes, and rollback. No route call or identity selection is
+performed.
 
 ## 6. Outputs, independent expectations, and rollback
 
@@ -343,6 +445,39 @@ OK
 exit code: 0
 ```
 
+After mechanically updating only the verifier's Recovery/test hashes and
+exact 8-or-9-commit prefix, the unchanged verification checks produced:
+
+```text
+exit code: 0
+Ran 186 tests in 11.663s
+OK
+Schemas: 11
+fixtures/documents/dirty cases: 7/40/7
+outputs: 4
+network attempts: 0
+temporary residue: 0
+```
+
+The corrected R4 Review content was then checked through the same entry before
+its documentation-only commit:
+
+```text
+exit code: 0
+Ran 186 tests in 11.608s
+OK
+Schemas: 11
+fixtures/documents/dirty cases: 7/40/7
+outputs: 4
+network attempts: 0
+temporary residue: 0
+```
+
+Remediation modified only the approved test, Recovery implementation,
+verifier, and this Review. Fixture, Resume, FER, adapter, Schema, validator,
+Plan, dependencies, and all other paths remained unchanged. It made no
+network call, did not rewrite history, and did not start WU3/WU5.
+
 ## 9. R10, secret, fallback, and scope audit
 
 Measured/inspected results:
@@ -364,11 +499,12 @@ remote/push/PR: 0
 WU3/WU5 paths: 0
 ```
 
-No actual input value, response body, credential, exception text, or machine
-absolute path is serialized into a ValidationProblem or runtime output.
-Known fixture/control mismatches map to existing Recovery problem codes;
-unexpected programming/storage errors are rolled back and re-raised rather
-than relabeled as valid input failure.
+Runtime control documents contain only relative logical output paths.
+ValidationProblem `artifact_path` may identify the caller-supplied filesystem
+path, but it contains no raw input value, response body, credential, or
+exception text. Known fixture/control mismatches map to existing Recovery
+problem codes; unexpected programming/storage errors are rolled back and
+re-raised rather than relabeled as valid input failure.
 
 ### C4 Review scan observation
 
@@ -399,9 +535,10 @@ temporary residue: 0
    were not rewritten or reinterpreted.
 4. ✓ 已完成 — Only the committed anchor is consumed; acquisition and all
    other data/network calls are 0.
-5. ✓ 已完成 — Recovery delegates to Resume replay and copies no adapter,
-   candidate-ID, seed-accounting, record-local-fact, or raw-response
-   validation logic.
+5. ✓ 已完成 — Post-remediation source-order audit and wrapped-function DR05
+   prove Resume replay is the sole response-hash validity authority. Recovery
+   retains no pre-Resume actual-response hash acceptance gate and copies no
+   adapter, candidate-ID, seed-accounting, or record-local-fact logic.
 6. ✓ 已完成 — Four complete deterministic outputs are installed and their
    actual bytes are independently hash-readable.
 7. ✓ 已完成 — Candidate output equals the independently embedded Candidate
@@ -412,10 +549,11 @@ temporary residue: 0
    caller-owned root remains byte-identical and is not overwritten.
 10. ✓ 已完成 — The committed C1 surface produced exact six-error
     `NotImplementedError` red; C2 used the character-identical command for
-    6/6 green. The pre-commit DR05 subtest multiplicity correction is
-    recorded above and did not change contract semantics.
+    6/6 green. The later DR05 remediation produced exact 5/1 red before R2
+    restored 6/6 green. Both earlier test-structure and later boundary
+    corrections are recorded without rewriting history.
 11. ✓ 已完成 — Full regression is 186/186; fixture counts remain 7/40/7;
-    network attempts and temporary residue are 0.
+    outputs remain 4; network attempts and temporary residue are 0.
 12. ✓ 已完成 — This Review records Git, hashes, outputs, red/green, scope,
     boundaries, and execution observations, then stops without WU3/WU5.
 
