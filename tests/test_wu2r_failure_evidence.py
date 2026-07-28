@@ -500,8 +500,8 @@ class FailureEvidenceCase(unittest.TestCase):
                     http_status=503,
                     response_bytes=3,
                     response_sha256=(
-                        "2f05d4b689d270cafb02285f35f44866bfe1dc3fc3a887d70e"
-                        "ca9320887028d"
+                        "2f05d4b689d270cafb02285f35f44866f7dc8a2d368a3f9d1"
+                        "124373eeab31fb1"
                     ),
                     content_type="text/plain",
                     retry_decision="not_retryable_http",
