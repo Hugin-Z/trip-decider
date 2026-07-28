@@ -375,10 +375,10 @@ class ResumeIntegrationCase(unittest.TestCase):
         self.assertEqual(
             [item["candidate_id"] for item in candidates],
             [
-                HUANGLING_HAMLET,
                 HUANGLING_ATTRACTION,
-                JIANGLING,
+                HUANGLING_HAMLET,
                 LIKENG,
+                JIANGLING,
             ],
         )
         self.assertEqual(
