@@ -7,8 +7,8 @@ Set-StrictMode -Version Latest
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $startHead = '276221d860950e6940d344fe2889312104da4290'
 $approvedPlanHash = '1D671D9C1777755305526A05F82CEBB4279D4B9FA743762A0769C825E4770F8D'
-$recoveryHash = '870FB097B4E9059D7D5DCCAD41A4522B31AB79ACBA7DC961BAD40970E8DB6511'
-$testHash = '1CEAD6C418A19789C0AEABDE2E5CBC461D436D074256A73948B89580D0815E09'
+$recoveryHash = 'C0E098DD4AB997727A0EFBCCC9C396AC480DEEB3477DBF4CDCB5E31A34E0D8BA'
+$testHash = 'E52AE191B5D244CD810F4E0648459BF7B6F3E4B891B4A0FDDA72E8957133A3FF'
 $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $oldPythonPath = $env:PYTHONPATH
 $oldVerifyRoot = $env:TRIP_DECIDER_DOR_VERIFY_ROOT
@@ -184,18 +184,22 @@ function Assert-ScopeAndCommits {
         'test: add failing downstream recovery cases',
         'feat: implement downstream offline recovery',
         'chore: add downstream recovery verification entry',
-        'docs: prepare downstream offline recovery review'
+        'docs: prepare downstream offline recovery review',
+        'test: require Resume-owned response hash validation',
+        'fix: delegate response hash validation to Resume replay',
+        'chore: update downstream recovery verifier after remediation',
+        'docs: correct downstream recovery review after boundary remediation'
     )
     $messages = @(git log --reverse --format='%s' "$startHead..HEAD")
     Assert-True `
-        ($messages.Count -ge 3 -and $messages.Count -le 5) `
+        ($messages.Count -ge 8 -and $messages.Count -le 9) `
         'WU2R-DOR commit count is outside the approved sequence'
     for ($index = 0; $index -lt $messages.Count; $index += 1) {
         Assert-True `
             ($messages[$index] -eq $expectedMessages[$index]) `
             "WU2R-DOR commit mismatch at index $index"
     }
-    if ($messages.Count -eq 5) {
+    if ($messages.Count -eq 9) {
         Assert-True `
             ($pathSet.Contains($allowedPaths[4])) `
             'Final Review path is missing'
