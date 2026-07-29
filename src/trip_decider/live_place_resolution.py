@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 import yaml
@@ -80,6 +81,9 @@ _PROBLEM_MESSAGES = {
     "LIVE_PLACE_SELECTION_INVALID": (
         "Interactive selection is not an offered Candidate ID or zero."
     ),
+    "OBSERVATION_POLICY_MISMATCH": (
+        "AMap observation does not match the explicit closed policy mode."
+    ),
 }
 _SCHEMA_ROOT = Path(__file__).resolve().parents[2] / "schemas"
 _PLANNING_FILENAMES = (
@@ -109,6 +113,7 @@ _TRANSPORT_MODES = frozenset(
         "other",
     }
 )
+_OBSERVATION_CONTRACT_TOKEN = object()
 
 
 class _InputIssue(ValueError):
@@ -125,6 +130,10 @@ class _SelectionIssue(ValueError):
 
 class _ContractIssue(ValueError):
     """Expected generated-artifact contract violation."""
+
+
+class _ObservationPolicyIssue(ValueError):
+    """Expected sealed observation-policy violation."""
 
 
 @dataclass(frozen=True)
@@ -253,6 +262,7 @@ class PolicyBoundAmapObservation:
     locator_prefix: str
     persistence_capability: str
     provenance_label: str
+    _contract_token: object
 
 
 @dataclass(frozen=True)
@@ -272,7 +282,47 @@ def parse_amap_district_response(
 ) -> ValidationResult[ParsedAmapDistrictResponse]:
     """Parse a decoded or UTF-8 JSON AMap-shaped district response."""
 
-    raise NotImplementedError
+    try:
+        document = _controlled_response_document(response)
+        status, infocode, marker = _parsed_response_header(document)
+        raw_districts = document.get("districts")
+        if not isinstance(raw_districts, list):
+            raise _ProviderIssue("district collection is invalid")
+        districts: list[ParsedAmapDistrict] = []
+        for item in raw_districts:
+            if not isinstance(item, Mapping):
+                raise _ProviderIssue("district item is invalid")
+            name = item.get("name")
+            adcode = item.get("adcode")
+            level = item.get("level")
+            if not all(
+                isinstance(value, str) and value
+                for value in (name, adcode, level)
+            ):
+                raise _ProviderIssue("district identity is invalid")
+            districts.append(
+                ParsedAmapDistrict(
+                    name=name,
+                    adcode=adcode,
+                    level=level,
+                )
+            )
+    except _ProviderIssue:
+        return _failure(
+            "LIVE_PLACE_PROVIDER_RESPONSE_INVALID",
+            "/provider_response",
+            "amapDistrictShape",
+            expected="valid AMap-shaped district response",
+        )
+    return ValidationResult(
+        ParsedAmapDistrictResponse(
+            status=status,
+            infocode=infocode,
+            synthetic_test_data=marker,
+            districts=tuple(districts),
+        ),
+        (),
+    )
 
 
 def parse_amap_poi_response(
@@ -280,7 +330,69 @@ def parse_amap_poi_response(
 ) -> ValidationResult[ParsedAmapPoiResponse]:
     """Parse a decoded or UTF-8 JSON AMap-shaped POI response."""
 
-    raise NotImplementedError
+    try:
+        document = _controlled_response_document(response)
+        status, infocode, marker = _parsed_response_header(document)
+        count = document.get("count")
+        if count is not None and not isinstance(count, str):
+            raise _ProviderIssue("POI count is invalid")
+        raw_pois = document.get("pois")
+        if not isinstance(raw_pois, list):
+            raise _ProviderIssue("POI collection is invalid")
+        pois: list[ParsedAmapPoi] = []
+        for item in raw_pois:
+            if not isinstance(item, Mapping):
+                raise _ProviderIssue("POI item is invalid")
+            record_id = item.get("id")
+            name = item.get("name")
+            location = item.get("location")
+            category_label = item.get("type")
+            category_code = item.get("typecode")
+            if not all(
+                isinstance(value, str) and value
+                for value in (
+                    record_id,
+                    name,
+                    location,
+                    category_label,
+                    category_code,
+                )
+            ):
+                raise _ProviderIssue("POI identity or category is invalid")
+            _coordinates(location)
+            pois.append(
+                ParsedAmapPoi(
+                    record_id=record_id,
+                    name=name,
+                    location=location,
+                    category_label=category_label,
+                    category_code=category_code,
+                    address=_optional_provider_text(item.get("address")),
+                    province_name=_optional_provider_text(item.get("pname")),
+                    city_name=_optional_provider_text(item.get("cityname")),
+                    district_name=_optional_provider_text(item.get("adname")),
+                    province_code=_optional_provider_text(item.get("pcode")),
+                    city_code=_optional_provider_text(item.get("citycode")),
+                    district_code=_optional_provider_text(item.get("adcode")),
+                )
+            )
+    except _ProviderIssue:
+        return _failure(
+            "LIVE_PLACE_PROVIDER_RESPONSE_INVALID",
+            "/provider_response",
+            "amapPoiShape",
+            expected="valid AMap-shaped POI response",
+        )
+    return ValidationResult(
+        ParsedAmapPoiResponse(
+            status=status,
+            infocode=infocode,
+            synthetic_test_data=marker,
+            count=count,
+            pois=tuple(pois),
+        ),
+        (),
+    )
 
 
 def bind_amap_observation_policy(
@@ -291,7 +403,45 @@ def bind_amap_observation_policy(
 ) -> ValidationResult[PolicyBoundAmapObservation]:
     """Bind one parsed response to an explicit closed observation mode."""
 
-    raise NotImplementedError
+    if (
+        not isinstance(
+            parsed,
+            (ParsedAmapDistrictResponse, ParsedAmapPoiResponse),
+        )
+        or not isinstance(mode, AmapObservationMode)
+        or not isinstance(policy_checked_at, str)
+    ):
+        return _policy_mismatch("/observation_policy")
+    try:
+        _date_time(policy_checked_at)
+    except _InputIssue:
+        return _policy_mismatch("/observation_policy/policy_checked_at")
+    marker = parsed.synthetic_test_data
+    if mode is AmapObservationMode.SYNTHETIC_TEST:
+        if marker is not True:
+            return _policy_mismatch("/provider_response/synthetic_test_data")
+        policy = _synthetic_policy(policy_checked_at)
+        locator_prefix = "synthetic-amap:poi:"
+        persistence = "synthetic_snapshot_allowed"
+        provenance = "synthetic_test_data"
+    elif mode is AmapObservationMode.EPHEMERAL_LIVE:
+        if marker is True:
+            return _policy_mismatch("/provider_response/synthetic_test_data")
+        policy = _ephemeral_policy(policy_checked_at)
+        locator_prefix = "ephemeral-amap:poi:"
+        persistence = "ephemeral_memory_only"
+        provenance = "ephemeral_live_observation"
+    else:
+        return _policy_mismatch("/observation_policy/mode")
+    bound = object.__new__(PolicyBoundAmapObservation)
+    object.__setattr__(bound, "mode", mode)
+    object.__setattr__(bound, "response", parsed)
+    object.__setattr__(bound, "data_policy", _freeze_value(policy))
+    object.__setattr__(bound, "locator_prefix", locator_prefix)
+    object.__setattr__(bound, "persistence_capability", persistence)
+    object.__setattr__(bound, "provenance_label", provenance)
+    object.__setattr__(bound, "_contract_token", _OBSERVATION_CONTRACT_TOKEN)
+    return ValidationResult(bound, ())
 
 
 def project_amap_candidates(
@@ -306,7 +456,82 @@ def project_amap_candidates(
 ) -> ValidationResult[AmapCandidateProjection]:
     """Project policy-bound observations through the shared identity core."""
 
-    raise NotImplementedError
+    try:
+        mode = _observation_mode(district_observation)
+        if not isinstance(
+            district_observation.response,
+            ParsedAmapDistrictResponse,
+        ):
+            raise _ProviderIssue("district observation kind is invalid")
+        if (
+            not isinstance(city, str)
+            or not city
+            or (
+                city_adcode is not None
+                and (
+                    not isinstance(city_adcode, str)
+                    or not city_adcode
+                )
+            )
+        ):
+            raise _ProviderIssue("district query identity is invalid")
+        checked_seeds = _projection_seeds(seeds)
+        checked_pois = _projection_poi_observations(
+            checked_seeds,
+            poi_observations,
+            mode,
+        )
+        _resolved_district(
+            city,
+            city_adcode,
+            district_observation.response,
+        )
+        choices = _checked_selection_choices(selection_choices)
+        (
+            candidates,
+            facts,
+            seed_matches,
+            selections,
+            selected_choices,
+        ) = _project_candidate_values(
+            checked_seeds,
+            checked_pois,
+            selection_reader,
+            choices,
+        )
+    except _SelectionIssue:
+        return _failure(
+            "LIVE_PLACE_SELECTION_INVALID",
+            "/selection",
+            "offeredCandidateOrZero",
+            expected="one displayed Candidate ID or 0",
+        )
+    except _ProviderIssue:
+        return _failure(
+            "LIVE_PLACE_PROVIDER_RESPONSE_INVALID",
+            "/provider_response",
+            "providerNeutralProjection",
+            expected="compatible policy-bound AMap observations",
+        )
+    except _ObservationPolicyIssue:
+        return _policy_mismatch("/observation_policy/mode")
+    return ValidationResult(
+        AmapCandidateProjection(
+            mode=mode,
+            candidates=tuple(_freeze_value(item) for item in candidates),
+            record_local_facts=tuple(
+                _freeze_value(item) for item in facts
+            ),
+            seed_matches=tuple(
+                _freeze_value(item) for item in seed_matches
+            ),
+            selections=tuple(
+                _freeze_value(item) for item in selections
+            ),
+            selection_choices=_freeze_value(selected_choices),
+        ),
+        (),
+    )
 
 
 @dataclass(frozen=True)
@@ -316,6 +541,7 @@ class _PreparedRun:
     requests: tuple[SyntheticProviderRequest, ...]
     responses: tuple[Mapping[str, object], ...]
     selection_choices: Mapping[str, str]
+    observation_mode: AmapObservationMode
 
 
 def _problem(
@@ -362,6 +588,82 @@ def _failure(
             ),
         ),
     )
+
+
+def _policy_mismatch(
+    pointer: str,
+) -> ValidationResult[PolicyBoundAmapObservation]:
+    return _failure(
+        "OBSERVATION_POLICY_MISMATCH",
+        pointer,
+        "closedObservationMode",
+        expected="explicit compatible AmapObservationMode",
+    )
+
+
+def _controlled_response_document(
+    response: bytes | Mapping[str, object],
+) -> dict[str, object]:
+    if isinstance(response, bytes):
+        try:
+            decoded = response.decode("utf-8")
+            document = json.loads(decoded)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise _ProviderIssue("provider response bytes are invalid") from error
+        if not isinstance(document, Mapping):
+            raise _ProviderIssue("provider response is not an object")
+        return copy.deepcopy(dict(document))
+    if not isinstance(response, Mapping):
+        raise _ProviderIssue("provider response is not bytes or an object")
+    return copy.deepcopy(dict(response))
+
+
+def _parsed_response_header(
+    document: Mapping[str, object],
+) -> tuple[str, str, bool | None]:
+    status = document.get("status")
+    infocode = document.get("infocode")
+    if status != "1" or infocode != "10000":
+        raise _ProviderIssue("provider response status is invalid")
+    if (
+        "synthetic_test_data" in document
+        and not isinstance(document["synthetic_test_data"], bool)
+    ):
+        raise _ProviderIssue("synthetic marker is invalid")
+    marker = document.get("synthetic_test_data")
+    return status, infocode, marker if isinstance(marker, bool) else None
+
+
+def _optional_provider_text(value: object) -> str | None:
+    if value is None or value == "" or value == []:
+        return None
+    if not isinstance(value, str):
+        raise _ProviderIssue("optional provider text is invalid")
+    return value
+
+
+def _freeze_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                str(key): _freeze_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _thaw_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _thaw_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    return value
 
 
 def _sha256(value: bytes) -> str:
@@ -861,45 +1163,6 @@ def _acquire_synthetic(
     return tuple(captured), evidence.document
 
 
-def _require_synthetic_response(
-    response: Mapping[str, object],
-) -> None:
-    if (
-        response.get("synthetic_test_data") is not True
-        or response.get("status") != "1"
-        or response.get("infocode") != "10000"
-    ):
-        raise _ProviderIssue("synthetic response status is invalid")
-
-
-def _resolve_city(
-    value: StructuredTripInput,
-    response: Mapping[str, object],
-) -> str:
-    _require_synthetic_response(response)
-    districts = response.get("districts")
-    if not isinstance(districts, list):
-        raise _ProviderIssue("district collection is invalid")
-    matches: list[str] = []
-    for item in districts:
-        if not isinstance(item, Mapping):
-            raise _ProviderIssue("district item is invalid")
-        name = item.get("name")
-        adcode = item.get("adcode")
-        level = item.get("level")
-        if not all(isinstance(field, str) and field for field in (name, adcode, level)):
-            raise _ProviderIssue("district identity is invalid")
-        name_matches = _normalized_text(name) == _normalized_text(value.city)
-        adcode_matches = (
-            value.city_adcode is None or adcode == value.city_adcode
-        )
-        if name_matches and adcode_matches:
-            matches.append(adcode)
-    if len(matches) != 1:
-        raise _ProviderIssue("district identity is not unique")
-    return matches[0]
-
-
 def _synthetic_policy(created_at: str) -> dict[str, object]:
     return {
         "source_class": "synthetic",
@@ -909,6 +1172,20 @@ def _synthetic_policy(created_at: str) -> dict[str, object]:
         "fixture_allowed": True,
         "policy_checked_at": created_at,
         "terms_url": None,
+        "authorization_ref": None,
+        "license": None,
+    }
+
+
+def _ephemeral_policy(created_at: str) -> dict[str, object]:
+    return {
+        "source_class": "commercial",
+        "capture_mode": "temporary_capture",
+        "storage_policy": "temporary_only",
+        "replay_allowed": False,
+        "fixture_allowed": False,
+        "policy_checked_at": created_at,
+        "terms_url": "https://lbs.amap.com/pages/terms/",
         "authorization_ref": None,
         "license": None,
     }
@@ -936,20 +1213,12 @@ def _coordinates(value: object) -> tuple[float, float]:
 
 
 def _candidate_from_poi(
-    poi: Mapping[str, object],
+    poi: ParsedAmapPoi,
     seed: str,
-    created_at: str,
+    observation: PolicyBoundAmapObservation,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    record_id = poi.get("id")
-    name = poi.get("name")
-    type_value = poi.get("type")
-    typecode = poi.get("typecode")
-    if not all(
-        isinstance(item, str) and item
-        for item in (record_id, name, type_value, typecode)
-    ):
-        raise _ProviderIssue("POI identity or category is invalid")
-    longitude, latitude = _coordinates(poi.get("location"))
+    record_id = poi.record_id
+    longitude, latitude = _coordinates(poi.location)
     candidate_id = stable_identifier(
         "candidate",
         "trip-decider:wu7:amap-poi",
@@ -957,9 +1226,14 @@ def _candidate_from_poi(
     )
     source = {
         "kind": "provider_item",
-        "value": f"synthetic-amap:poi:{record_id}",
+        "value": f"{observation.locator_prefix}{record_id}",
     }
-    categories = [{"code": typecode, "label": type_value}]
+    categories = [
+        {
+            "code": poi.category_code,
+            "label": poi.category_label,
+        }
+    ]
     location = {
         "kind": "coordinates",
         "latitude": latitude,
@@ -979,12 +1253,20 @@ def _candidate_from_poi(
             "record_type": "poi",
             "categories": categories,
             "external_status": {"kind": "not_reported"},
-            "data_policy": _synthetic_policy(created_at),
+            "data_policy": _thaw_value(observation.data_policy),
         },
         "source_refs": [source],
         "evidence_fact_refs": [],
         "generation_reason": (
-            "Exact-name synthetic provider alternative; no ranking or recommendation."
+            (
+                "Exact-name synthetic provider alternative; "
+                "no ranking or recommendation."
+            )
+            if observation.mode is AmapObservationMode.SYNTHETIC_TEST
+            else (
+                "Exact-name ephemeral provider alternative; "
+                "no ranking or recommendation."
+            )
         ),
     }
     fact = {
@@ -999,76 +1281,126 @@ def _candidate_from_poi(
     return candidate, fact
 
 
-def _validate_provider_responses(
-    value: StructuredTripInput,
-    requests: Sequence[SyntheticProviderRequest],
-    responses: Sequence[Mapping[str, object]],
-) -> None:
-    if len(requests) != len(responses) or not responses:
-        raise _ProviderIssue("response cardinality is invalid")
-    _resolve_city(value, responses[0])
-    for request, response in zip(
-        requests[1:],
-        responses[1:],
-        strict=True,
+def _observation_mode(
+    observation: object,
+) -> AmapObservationMode:
+    if (
+        not isinstance(observation, PolicyBoundAmapObservation)
+        or getattr(observation, "_contract_token", None)
+        is not _OBSERVATION_CONTRACT_TOKEN
+        or not isinstance(observation.mode, AmapObservationMode)
+        or not isinstance(observation.data_policy, Mapping)
+        or not isinstance(observation.locator_prefix, str)
+        or not isinstance(observation.persistence_capability, str)
+        or not isinstance(observation.provenance_label, str)
     ):
-        _require_synthetic_response(response)
-        pois = response.get("pois")
-        if not isinstance(pois, list):
-            raise _ProviderIssue("POI collection is invalid")
-        seed = str(request.parameters["keywords"])
-        for item in pois:
-            if not isinstance(item, Mapping):
-                raise _ProviderIssue("POI item is invalid")
-            name = item.get("name")
-            if not isinstance(name, str) or not name:
-                raise _ProviderIssue("POI name is invalid")
-            if _normalized_text(name) == _normalized_text(seed):
-                _candidate_from_poi(
-                    item,
-                    seed,
-                    value.input_recorded_at,
-                )
+        raise _ObservationPolicyIssue("observation policy is not sealed")
+    return observation.mode
 
 
-def _resolution_documents(
-    *,
-    value: StructuredTripInput,
-    run_id: str,
-    request_document: Mapping[str, object],
-    seed_responses: Sequence[tuple[str, Mapping[str, object]]],
+def _projection_seeds(values: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise _ProviderIssue("seed collection is invalid")
+    seeds = tuple(values)
+    if any(not isinstance(seed, str) or not seed for seed in seeds):
+        raise _ProviderIssue("seed identity is invalid")
+    normalized = tuple(_normalized_text(seed) for seed in seeds)
+    if len(set(normalized)) != len(normalized):
+        raise _ProviderIssue("seed identity is not unique")
+    return seeds
+
+
+def _projection_poi_observations(
+    seeds: tuple[str, ...],
+    values: Sequence[tuple[str, PolicyBoundAmapObservation]],
+    mode: AmapObservationMode,
+) -> tuple[tuple[str, PolicyBoundAmapObservation], ...]:
+    if isinstance(values, (str, bytes)):
+        raise _ProviderIssue("POI observations are invalid")
+    observations = tuple(values)
+    if len(observations) != len(seeds):
+        raise _ProviderIssue("POI observation cardinality is invalid")
+    checked: list[tuple[str, PolicyBoundAmapObservation]] = []
+    for expected_seed, item in zip(seeds, observations, strict=True):
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or item[0] != expected_seed
+        ):
+            raise _ProviderIssue("POI observation seed is invalid")
+        observation = item[1]
+        if _observation_mode(observation) is not mode:
+            raise _ObservationPolicyIssue("observation modes differ")
+        if not isinstance(observation.response, ParsedAmapPoiResponse):
+            raise _ProviderIssue("POI observation kind is invalid")
+        checked.append((expected_seed, observation))
+    return tuple(checked)
+
+
+def _resolved_district(
+    city: str,
+    city_adcode: str | None,
+    response: ParsedAmapDistrictResponse,
+) -> str:
+    matches = [
+        item.adcode
+        for item in response.districts
+        if _normalized_text(item.name) == _normalized_text(city)
+        and (city_adcode is None or item.adcode == city_adcode)
+    ]
+    if len(matches) != 1:
+        raise _ProviderIssue("district identity is not unique")
+    return matches[0]
+
+
+def _checked_selection_choices(
+    values: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping) or any(
+        not isinstance(seed, str)
+        or not seed
+        or not isinstance(candidate_id, str)
+        or not candidate_id
+        for seed, candidate_id in values.items()
+    ):
+        raise _SelectionIssue("selection choices are invalid")
+    return dict(values)
+
+
+def _project_candidate_values(
+    seeds: tuple[str, ...],
+    poi_observations: tuple[
+        tuple[str, PolicyBoundAmapObservation],
+        ...,
+    ],
     selection_reader: SelectionReader | None,
     replay_choices: Mapping[str, str],
-    snapshot_sha256: str,
 ) -> tuple[
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
     dict[str, str],
 ]:
+    if selection_reader is not None and not callable(selection_reader):
+        raise _SelectionIssue("selection reader is not callable")
     candidates_by_id: dict[str, dict[str, object]] = {}
     facts_by_id: dict[str, dict[str, object]] = {}
     alternatives_by_seed: list[tuple[str, tuple[str, ...]]] = []
-    for seed, response in seed_responses:
-        _require_synthetic_response(response)
-        pois = response.get("pois")
-        if not isinstance(pois, list):
-            raise _ProviderIssue("POI collection is invalid")
+    for seed, observation in poi_observations:
+        response = observation.response
+        if not isinstance(response, ParsedAmapPoiResponse):
+            raise _ProviderIssue("POI observation kind is invalid")
         alternatives: list[str] = []
-        for item in pois:
-            if not isinstance(item, Mapping):
-                raise _ProviderIssue("POI item is invalid")
-            name = item.get("name")
-            if not isinstance(name, str) or not name:
-                raise _ProviderIssue("POI name is invalid")
-            if _normalized_text(name) != _normalized_text(seed):
+        for poi in response.pois:
+            if _normalized_text(poi.name) != _normalized_text(seed):
                 continue
             candidate, fact = _candidate_from_poi(
-                item,
+                poi,
                 seed,
-                value.input_recorded_at,
+                observation,
             )
             candidate_id = str(candidate["candidate_id"])
             previous = candidates_by_id.get(candidate_id)
@@ -1080,11 +1412,190 @@ def _resolution_documents(
         alternatives_by_seed.append(
             (seed, tuple(sorted(set(alternatives))))
         )
-
     candidates = [
         candidates_by_id[candidate_id]
         for candidate_id in sorted(candidates_by_id)
     ]
+    facts = [
+        facts_by_id[candidate_id]
+        for candidate_id in sorted(facts_by_id)
+    ]
+    selections: list[dict[str, object]] = []
+    seed_matches: list[dict[str, object]] = []
+    selected_choices: dict[str, str] = {}
+    for seed, refs in alternatives_by_seed:
+        selected: str | None = None
+        source = "not_applicable"
+        if len(refs) > 1:
+            source = "non_interactive_none"
+            if seed in replay_choices:
+                selected = replay_choices[seed]
+                if selected not in refs:
+                    raise _SelectionIssue(
+                        "selection is not an offered Candidate ID"
+                    )
+                source = "user_explicit"
+            elif selection_reader is not None:
+                offered = tuple(
+                    (
+                        candidate_id,
+                        str(candidates_by_id[candidate_id]["label"]),
+                    )
+                    for candidate_id in refs
+                )
+                answer = selection_reader(seed, offered)
+                if answer == "0":
+                    source = "user_explicit_none"
+                elif answer in refs:
+                    selected = answer
+                    source = "user_explicit"
+                else:
+                    raise _SelectionIssue(
+                        "selection is not an offered Candidate ID"
+                    )
+            if selected is not None:
+                selected_choices[seed] = selected
+                status = "matched"
+                accounted_refs = [selected]
+            else:
+                status = "ambiguous"
+                accounted_refs = list(refs)
+        elif len(refs) == 1:
+            status = "matched"
+            accounted_refs = list(refs)
+        else:
+            status = "unmatched"
+            accounted_refs = []
+        seed_matches.append(
+            {
+                "seed": seed,
+                "status": status,
+                "candidate_refs": accounted_refs,
+            }
+        )
+        selections.append(
+            {
+                "seed": seed,
+                "alternatives": list(refs),
+                "selected_candidate_ref": selected,
+                "selection_source": source,
+            }
+        )
+    if set(replay_choices) - set(seeds):
+        raise _SelectionIssue("selection seed is not part of the projection")
+    return (
+        candidates,
+        facts,
+        seed_matches,
+        selections,
+        selected_choices,
+    )
+
+
+def _bound_provider_responses(
+    value: StructuredTripInput,
+    requests: Sequence[SyntheticProviderRequest],
+    responses: Sequence[Mapping[str, object]],
+    *,
+    mode: AmapObservationMode,
+) -> tuple[
+    PolicyBoundAmapObservation,
+    tuple[tuple[str, PolicyBoundAmapObservation], ...],
+]:
+    if (
+        not isinstance(mode, AmapObservationMode)
+        or len(requests) != len(responses)
+        or not responses
+        or requests[0].operation != "district"
+    ):
+        raise _ProviderIssue("response cardinality is invalid")
+    parsed_district = parse_amap_district_response(responses[0])
+    if parsed_district.problems or parsed_district.value is None:
+        raise _ProviderIssue("district response is invalid")
+    district = bind_amap_observation_policy(
+        parsed_district.value,
+        mode=mode,
+        policy_checked_at=value.input_recorded_at,
+    )
+    if district.problems or district.value is None:
+        raise _ProviderIssue("district policy is invalid")
+    pois: list[tuple[str, PolicyBoundAmapObservation]] = []
+    for request, response in zip(
+        requests[1:],
+        responses[1:],
+        strict=True,
+    ):
+        if request.operation != "place_text":
+            raise _ProviderIssue("POI request operation is invalid")
+        seed = request.parameters.get("keywords")
+        if not isinstance(seed, str) or not seed:
+            raise _ProviderIssue("POI request seed is invalid")
+        parsed_poi = parse_amap_poi_response(response)
+        if parsed_poi.problems or parsed_poi.value is None:
+            raise _ProviderIssue("POI response is invalid")
+        bound = bind_amap_observation_policy(
+            parsed_poi.value,
+            mode=mode,
+            policy_checked_at=value.input_recorded_at,
+        )
+        if bound.problems or bound.value is None:
+            raise _ProviderIssue("POI policy is invalid")
+        pois.append((seed, bound.value))
+    _resolved_district(
+        value.city,
+        value.city_adcode,
+        district.value.response,
+    )
+    return district.value, tuple(pois)
+
+
+def _validate_provider_responses(
+    value: StructuredTripInput,
+    requests: Sequence[SyntheticProviderRequest],
+    responses: Sequence[Mapping[str, object]],
+) -> None:
+    _bound_provider_responses(
+        value,
+        requests,
+        responses,
+        mode=AmapObservationMode.SYNTHETIC_TEST,
+    )
+
+
+def _resolution_documents(
+    *,
+    value: StructuredTripInput,
+    run_id: str,
+    request_document: Mapping[str, object],
+    projection: AmapCandidateProjection,
+    snapshot_sha256: str,
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, str],
+]:
+    if projection.mode is not AmapObservationMode.SYNTHETIC_TEST:
+        raise _ObservationPolicyIssue("durable projection is not synthetic")
+    candidates = [
+        _thaw_value(item)
+        for item in projection.candidates
+    ]
+    facts = [
+        _thaw_value(item)
+        for item in projection.record_local_facts
+    ]
+    seed_matches = [
+        _thaw_value(item)
+        for item in projection.seed_matches
+    ]
+    selection_records = [
+        _thaw_value(item)
+        for item in projection.selections
+    ]
+    choices = dict(projection.selection_choices)
     candidate_payload: dict[str, object] = {
         "candidate_set_id": stable_identifier(
             "candidate_set",
@@ -1111,59 +1622,6 @@ def _resolution_documents(
         stage="wu7-synthetic-place-resolution",
     )
 
-    selection_records: list[dict[str, object]] = []
-    seed_matches: list[dict[str, object]] = []
-    choices: dict[str, str] = {}
-    for seed, refs in alternatives_by_seed:
-        selected: str | None = None
-        source = "not_applicable"
-        if len(refs) > 1:
-            source = "non_interactive_none"
-            if seed in replay_choices:
-                selected = replay_choices[seed]
-                source = "user_explicit"
-            elif value.interactive and selection_reader is not None:
-                offered = tuple(
-                    (candidate_id, str(candidates_by_id[candidate_id]["label"]))
-                    for candidate_id in refs
-                )
-                answer = selection_reader(seed, offered)
-                if answer == "0":
-                    source = "user_explicit_none"
-                elif answer in refs:
-                    selected = answer
-                    source = "user_explicit"
-                else:
-                    raise _SelectionIssue("selection is not an offered Candidate ID")
-            if selected is not None:
-                choices[seed] = selected
-                status = "matched"
-                accounted_refs = [selected]
-            else:
-                status = "ambiguous"
-                accounted_refs = list(refs)
-        elif len(refs) == 1:
-            status = "matched"
-            accounted_refs = list(refs)
-        else:
-            status = "unmatched"
-            accounted_refs = []
-        seed_matches.append(
-            {
-                "seed": seed,
-                "status": status,
-                "candidate_refs": accounted_refs,
-            }
-        )
-        selection_records.append(
-            {
-                "seed": seed,
-                "alternatives": list(refs),
-                "selected_candidate_ref": selected,
-                "selection_source": source,
-            }
-        )
-
     seed_document = {
         "schema_version": "wu2r-downstream-seed-accounting/1.0",
         "run_id": run_id,
@@ -1172,10 +1630,7 @@ def _resolution_documents(
     facts_document = {
         "schema_version": "wu2r-downstream-record-local-facts/1.0",
         "run_id": run_id,
-        "record_local_facts": [
-            facts_by_id[candidate_id]
-            for candidate_id in sorted(facts_by_id)
-        ],
+        "record_local_facts": facts,
     }
     candidate_bytes = _json_bytes(candidate_document)
     seed_bytes = _json_bytes(seed_document)
@@ -1304,7 +1759,11 @@ def _snapshot_document(
     requests: Sequence[SyntheticProviderRequest],
     responses: Sequence[Mapping[str, object]],
     selection_choices: Mapping[str, str],
+    *,
+    observation_mode: AmapObservationMode,
 ) -> dict[str, object]:
+    if observation_mode is not AmapObservationMode.SYNTHETIC_TEST:
+        raise _ObservationPolicyIssue("snapshot requires synthetic mode")
     input_value = asdict(value)
     input_value["transport_modes"] = list(value.transport_modes)
     input_value["must_visit"] = list(value.must_visit)
@@ -1326,7 +1785,11 @@ def _manifest_document(
     snapshot_bytes: bytes,
     requests: Sequence[SyntheticProviderRequest],
     responses: Sequence[Mapping[str, object]],
+    *,
+    observation_mode: AmapObservationMode,
 ) -> dict[str, object]:
+    if observation_mode is not AmapObservationMode.SYNTHETIC_TEST:
+        raise _ObservationPolicyIssue("manifest requires synthetic mode")
     return {
         "schema_version": "wu7-synthetic-provider-observation/1.0",
         "run_id": run_id,
@@ -1356,6 +1819,8 @@ def _prepare_and_install(
     selection_reader: SelectionReader | None,
     evidence_document: Mapping[str, object],
 ) -> ValidationResult[LivePlaceResolutionSummary]:
+    if prepared.observation_mode is not AmapObservationMode.SYNTHETIC_TEST:
+        return _policy_mismatch("/observation_policy/persistence")
     failure_root = output_root.with_name(
         output_root.name + ".failure-evidence"
     )
@@ -1385,27 +1850,49 @@ def _prepare_and_install(
             _yaml_bytes(constraints),
         )
 
-        seed_responses = tuple(
-            (
-                str(request_item.parameters["keywords"]),
-                response,
-            )
-            for request_item, response in zip(
-                prepared.requests[1:],
-                prepared.responses[1:],
-                strict=True,
-            )
+        district_observation, poi_observations = _bound_provider_responses(
+            prepared.structured_input,
+            prepared.requests,
+            prepared.responses,
+            mode=prepared.observation_mode,
         )
         candidate_input_snapshot = _snapshot_document(
             prepared.structured_input,
             prepared.requests,
             prepared.responses,
             {},
+            observation_mode=prepared.observation_mode,
         )
         candidate_input_snapshot["structured_input"]["interactive"] = False
         candidate_input_hash = _sha256(
             _json_bytes(candidate_input_snapshot)
         )
+        projected = project_amap_candidates(
+            city=prepared.structured_input.city,
+            city_adcode=prepared.structured_input.city_adcode,
+            seeds=tuple(seed for seed, _ in poi_observations),
+            district_observation=district_observation,
+            poi_observations=poi_observations,
+            selection_reader=(
+                selection_reader
+                if prepared.structured_input.interactive
+                else None
+            ),
+            selection_choices=prepared.selection_choices,
+        )
+        if projected.problems or projected.value is None:
+            code = (
+                projected.problems[0].error_code
+                if projected.problems
+                else ""
+            )
+            if code == "LIVE_PLACE_SELECTION_INVALID":
+                raise _SelectionIssue("Candidate selection is invalid")
+            if code == "OBSERVATION_POLICY_MISMATCH":
+                raise _ObservationPolicyIssue(
+                    "Candidate observation policy is invalid"
+                )
+            raise _ProviderIssue("Candidate projection is invalid")
         (
             candidate,
             accounting,
@@ -1417,9 +1904,7 @@ def _prepare_and_install(
             value=prepared.structured_input,
             run_id=prepared.run_id,
             request_document=request,
-            seed_responses=seed_responses,
-            selection_reader=selection_reader,
-            replay_choices=prepared.selection_choices,
+            projection=projected.value,
             snapshot_sha256=candidate_input_hash,
         )
         snapshot = _snapshot_document(
@@ -1427,6 +1912,7 @@ def _prepare_and_install(
             prepared.requests,
             prepared.responses,
             selected_choices,
+            observation_mode=prepared.observation_mode,
         )
         snapshot_bytes = _json_bytes(snapshot)
 
@@ -1439,6 +1925,7 @@ def _prepare_and_install(
                     snapshot_bytes,
                     prepared.requests,
                     prepared.responses,
+                    observation_mode=prepared.observation_mode,
                 )
             ),
         )
@@ -1493,6 +1980,9 @@ def _prepare_and_install(
             evidence_path = failure_root / "acquisition-evidence.json"
             evidence_path.unlink(missing_ok=True)
             failure_root.rmdir()
+    except _ObservationPolicyIssue:
+        _clean_stage(stage)
+        return _policy_mismatch("/observation_policy/persistence")
     except _SelectionIssue:
         _clean_stage(stage)
         return _failure(
@@ -1655,9 +2145,7 @@ def run_synthetic_live_place_resolution(
             expected="successful injected synthetic provider execution",
         )
     try:
-        _resolve_city(value, responses[0])
-        if len(responses) != len(requests):
-            raise _ProviderIssue("response cardinality is invalid")
+        _validate_provider_responses(value, requests, responses)
     except _ProviderIssue:
         return _failure(
             "LIVE_PLACE_PROVIDER_RESPONSE_INVALID",
@@ -1671,6 +2159,7 @@ def run_synthetic_live_place_resolution(
         requests=requests,
         responses=responses,
         selection_choices={},
+        observation_mode=AmapObservationMode.SYNTHETIC_TEST,
     )
     return _prepare_and_install(
         prepared,
@@ -1829,6 +2318,7 @@ def replay_synthetic_normalized_snapshot(
         requests=requests,
         responses=responses,
         selection_choices=choices,
+        observation_mode=AmapObservationMode.SYNTHETIC_TEST,
     )
     return _prepare_and_install(
         prepared,
