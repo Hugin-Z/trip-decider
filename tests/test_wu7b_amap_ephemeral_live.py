@@ -5,8 +5,10 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import fields
 from pathlib import Path
 from unittest.mock import patch
 
@@ -147,10 +149,19 @@ class FakeLiveTransport:
         self.network_attempts += 1
         self.requests.append(request)
         self.credentials.append(credential)
-        if self.failure == "transport":
+        failure_prefix = request.operation + "_"
+        if self.failure == failure_prefix + "transport":
             raise OSError("sanitized fake transport failure")
+        if self.failure == failure_prefix + "http":
+            raise urllib.error.HTTPError(
+                "https://provider.invalid/?key=" + SENTINEL_KEY,
+                403,
+                "provider detail must not escape",
+                None,
+                io.BytesIO(b'{"forbidden":"provider response body"}'),
+            )
         if request.operation == "district":
-            if self.failure == "api":
+            if self.failure == "district_api":
                 return json.dumps(
                     {
                         "status": "0",
@@ -160,11 +171,40 @@ class FakeLiveTransport:
                         "districts": [],
                     }
                 ).encode("utf-8")
-            if self.failure == "parse":
+            if self.failure == "district_invalid_json":
                 return b"{not-json"
+            if self.failure == "district_invalid_shape":
+                return json.dumps(
+                    {
+                        "status": "1",
+                        "infocode": "10000",
+                        "districts": {},
+                    }
+                ).encode("utf-8")
             return _district_response()
         seed = request.parameters["keywords"]
-        if self.failure == "window":
+        if self.failure == "poi_api":
+            return json.dumps(
+                {
+                    "status": "0",
+                    "info": "FAKE_FAILURE",
+                    "infocode": "20000",
+                    "count": "0",
+                    "pois": [],
+                }
+            ).encode("utf-8")
+        if self.failure == "poi_invalid_json":
+            return b"{not-json"
+        if self.failure == "poi_invalid_shape":
+            return json.dumps(
+                {
+                    "status": "1",
+                    "infocode": "10000",
+                    "count": "0",
+                    "pois": {},
+                }
+            ).encode("utf-8")
+        if self.failure == "result_window":
             return json.dumps(
                 {
                     "status": "1",
@@ -434,9 +474,174 @@ class AmapEphemeralLiveCase(unittest.TestCase):
             self.assertNotIn(b"ephemeral-amap:poi:", flattened)
 
     def test_p205_provider_failures_use_fer_without_partial_output(self) -> None:
+        cases = (
+            (
+                "district_transport",
+                "district_transport",
+                "transport_error",
+                1,
+                0,
+                1,
+                "unavailable",
+                "unavailable",
+                "unavailable",
+                False,
+            ),
+            (
+                "district_http",
+                "district_http",
+                "http_error",
+                1,
+                0,
+                1,
+                "4xx",
+                "unavailable",
+                "unavailable",
+                False,
+            ),
+            (
+                "district_api",
+                "district_api_status",
+                "provider_api_error",
+                1,
+                0,
+                1,
+                "2xx",
+                "0",
+                "20000",
+                True,
+            ),
+            (
+                "district_invalid_json",
+                "district_parse",
+                "invalid_json",
+                1,
+                0,
+                1,
+                "2xx",
+                "unavailable",
+                "unavailable",
+                True,
+            ),
+            (
+                "district_invalid_shape",
+                "district_parse",
+                "invalid_response_shape",
+                1,
+                0,
+                1,
+                "2xx",
+                "unavailable",
+                "unavailable",
+                True,
+            ),
+            (
+                "poi_transport",
+                "poi_transport",
+                "transport_error",
+                1,
+                1,
+                2,
+                "unavailable",
+                "unavailable",
+                "unavailable",
+                False,
+            ),
+            (
+                "poi_http",
+                "poi_http",
+                "http_error",
+                1,
+                1,
+                2,
+                "4xx",
+                "unavailable",
+                "unavailable",
+                False,
+            ),
+            (
+                "poi_api",
+                "poi_api_status",
+                "provider_api_error",
+                1,
+                1,
+                2,
+                "2xx",
+                "0",
+                "20000",
+                True,
+            ),
+            (
+                "poi_invalid_json",
+                "poi_parse",
+                "invalid_json",
+                1,
+                1,
+                2,
+                "2xx",
+                "unavailable",
+                "unavailable",
+                True,
+            ),
+            (
+                "poi_invalid_shape",
+                "poi_parse",
+                "invalid_response_shape",
+                1,
+                1,
+                2,
+                "2xx",
+                "unavailable",
+                "unavailable",
+                True,
+            ),
+            (
+                "result_window",
+                "result_window",
+                "result_window_exhausted",
+                1,
+                1,
+                2,
+                "2xx",
+                "1",
+                "10000",
+                True,
+            ),
+        )
+        expected_fields = {
+            "failure_token",
+            "failure_stage",
+            "district_attempts",
+            "poi_attempts",
+            "total_network_attempts",
+            "http_status_class",
+            "amap_status",
+            "amap_infocode",
+            "safe_failure_class",
+            "response_bytes_received",
+            "fer_classification_completed",
+            "final_output_installed",
+            "raw_provider_residue",
+            "normalized_provider_residue",
+            "temporary_residue",
+            "key_leakage_detected",
+            "retry_count",
+            "fallback_count",
+        }
         with tempfile.TemporaryDirectory(prefix="trip-decider-p205-") as temp:
             temp_root = Path(temp)
-            for failure in ("transport", "api", "parse", "window"):
+            for (
+                failure,
+                stage,
+                failure_class,
+                district_attempts,
+                poi_attempts,
+                total_attempts,
+                http_class,
+                amap_status,
+                amap_infocode,
+                response_received,
+            ) in cases:
                 output_root = temp_root / failure
                 transport = FakeLiveTransport({}, failure=failure)
                 with patch.dict(
@@ -450,6 +655,54 @@ class AmapEphemeralLiveCase(unittest.TestCase):
                         transport=transport,
                     )
                 self.assertEqual(_result_code(result), AMAP_PROVIDER_FAILURE)
+                summary = result.value
+                self.assertIsNotNone(summary)
+                self.assertEqual(
+                    {item.name for item in fields(summary)},
+                    expected_fields,
+                )
+                actual = {
+                    item.name: getattr(summary, item.name)
+                    for item in fields(summary)
+                }
+                self.assertEqual(
+                    actual,
+                    {
+                        "failure_token": AMAP_PROVIDER_FAILURE,
+                        "failure_stage": stage,
+                        "district_attempts": district_attempts,
+                        "poi_attempts": poi_attempts,
+                        "total_network_attempts": total_attempts,
+                        "http_status_class": http_class,
+                        "amap_status": amap_status,
+                        "amap_infocode": amap_infocode,
+                        "safe_failure_class": failure_class,
+                        "response_bytes_received": response_received,
+                        "fer_classification_completed": True,
+                        "final_output_installed": False,
+                        "raw_provider_residue": 0,
+                        "normalized_provider_residue": 0,
+                        "temporary_residue": 0,
+                        "key_leakage_detected": False,
+                        "retry_count": 0,
+                        "fallback_count": 0,
+                    },
+                )
+                serialized = json.dumps(actual, sort_keys=True)
+                for forbidden in (
+                    SENTINEL_KEY,
+                    "provider.invalid",
+                    "provider response body",
+                    "provider detail must not escape",
+                    PROVIDER_ID_A,
+                    PROVIDER_ADDRESS,
+                    PROVIDER_LOCATION_A,
+                    PROVIDER_CATEGORY,
+                    PROVIDER_TYPECODE,
+                    PROVIDER_ADCODE,
+                    str(temp_root),
+                ):
+                    self.assertNotIn(forbidden, serialized)
                 self.assertFalse(output_root.exists())
             self.assertEqual(
                 [path for path in temp_root.rglob("*") if path.is_file()],
