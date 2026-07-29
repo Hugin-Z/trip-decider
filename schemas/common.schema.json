@@ -562,8 +562,6 @@
       "required": [
         "activity_id",
         "candidate_ref",
-        "start_at",
-        "end_at",
         "constraint_refs",
         "evidence_fact_refs"
       ],
@@ -578,6 +576,9 @@
         },
         "start_at": {"$ref": "#/$defs/date_time"},
         "end_at": {"$ref": "#/$defs/date_time"},
+        "timing_status": {
+          "enum": ["timed", "day_assigned_unscheduled"]
+        },
         "constraint_refs": {
           "type": "array",
           "items": {"$ref": "#/$defs/entity_id"}
@@ -587,6 +588,26 @@
           "items": {"$ref": "#/$defs/entity_id"}
         }
       },
+      "oneOf": [
+        {
+          "required": ["start_at", "end_at"],
+          "properties": {
+            "timing_status": {"const": "timed"}
+          }
+        },
+        {
+          "required": ["timing_status"],
+          "properties": {
+            "timing_status": {"const": "day_assigned_unscheduled"}
+          },
+          "not": {
+            "anyOf": [
+              {"required": ["start_at"]},
+              {"required": ["end_at"]}
+            ]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "leg": {
