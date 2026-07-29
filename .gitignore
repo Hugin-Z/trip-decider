@@ -20,6 +20,11 @@ runtime/
 data/raw/
 fixtures/private/
 
+# Local generated trip outputs (never source artifacts)
+shanghai-live-plan/
+shanghai-v01-plan/
+shanghai-v01-plan-final/
+
 # Operating-system and editor noise
 .DS_Store
 Thumbs.db

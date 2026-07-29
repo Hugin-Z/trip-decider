@@ -1,0 +1,128 @@
+{
+  "case_id": "golden-wuhan-wuyuan",
+  "fixture_role": "acceptance_input_not_production_data",
+  "intent": {
+    "task_mode": "ANCHORED_PLAN",
+    "origin": "武汉",
+    "destination_anchor": "婺源",
+    "earliest_departure_at": "2026-08-04T12:00",
+    "latest_return_at": "2026-08-07T20:00",
+    "travelers": 2,
+    "total_budget_cny": 6000,
+    "pace": "relaxed",
+    "transport_preferences": [
+      "high_speed_rail"
+    ],
+    "themes": [
+      "山水",
+      "古村"
+    ]
+  },
+  "collector_evidence": [
+    {
+      "evidence_id": "golden-railway",
+      "domain": "railway",
+      "status": "sourced",
+      "value": {
+        "snapshot_status": "STALE",
+        "semantics": "recorded_test_fixture_not_current_availability",
+        "origin_station": "武汉站",
+        "destination_station": "婺源站"
+      },
+      "sources": [
+        {
+          "source_type": "recorded_test_fixture",
+          "title": "Golden-case railway contract snapshot",
+          "retrieved_at": "2026-07-29T10:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "evidence_id": "golden-map",
+      "domain": "map",
+      "status": "sourced",
+      "value": {
+        "coordinate_system": "GCJ-02",
+        "destination_scope": "婺源县",
+        "attractions": [
+          {
+            "name": "婺女洲",
+            "traits": [
+              "夜游型",
+              "雨天可保留部分室内活动"
+            ],
+            "suggested_visit_minutes": 180
+          },
+          {
+            "name": "李坑",
+            "traits": [
+              "古村",
+              "步行游览"
+            ],
+            "suggested_visit_minutes": 120
+          },
+          {
+            "name": "江湾",
+            "traits": [
+              "古村",
+              "人文"
+            ],
+            "suggested_visit_minutes": 120
+          },
+          {
+            "name": "江岭",
+            "traits": [
+              "摄影",
+              "山水"
+            ],
+            "suggested_visit_minutes": 180
+          },
+          {
+            "name": "篁岭",
+            "traits": [
+              "山地古村",
+              "全天型"
+            ],
+            "suggested_visit_minutes": 300
+          }
+        ],
+        "lodging_area_seed": "婺源县城·老北站/火车站公交走廊",
+        "published_service_names": [
+          "婺源1路",
+          "婺源520/521路",
+          "婺源—篁岭班线"
+        ]
+      },
+      "sources": [
+        {
+          "source_type": "migrated_golden_case",
+          "title": "Previously collected Wuyuan map and local-transit facts",
+          "locator": "former src/trip_decider/wuyuan_trip.py",
+          "retrieved_at": "2026-07-29T00:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "evidence_id": "golden-web",
+      "domain": "web",
+      "status": "conflicting",
+      "value": {
+        "fact_domains": [
+          "opening_hours",
+          "tickets",
+          "local_bus_schedule"
+        ],
+        "known_sources": [
+          "Discover Wuyuan",
+          "上饶旅游网",
+          "景区官方页面"
+        ]
+      },
+      "sources": [],
+      "conflict_details": [
+        "Historical ticket and operating-hour captures are not current for a new run.",
+        "Local-bus service details require date-specific revalidation."
+      ]
+    }
+  ]
+}
