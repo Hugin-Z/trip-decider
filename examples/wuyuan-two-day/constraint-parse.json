@@ -1,0 +1,39 @@
+{
+  "artifact_id": "urn:uuid:72a359c8-bb4b-49d1-aeae-59e649fab048",
+  "artifact_type": "constraint-parse",
+  "created_at": "2026-07-29T08:00:00+08:00",
+  "integrity": {
+    "canonicalization": "canonical-json-v1",
+    "payload_sha256": "5cc8d256f6f0a57c79210d1bcdb68c9508b2fb6cb8b220e7374efd82a87f385c"
+  },
+  "payload": {
+    "needs_confirmation": false,
+    "parse_notes": [
+      "Planning constraints are explicit user edits; no NL parse ran."
+    ],
+    "parsed_constraints": [],
+    "parser": {
+      "kind": "user_structured",
+      "name": "wu4-structured-test-input",
+      "version": "0.1.0"
+    },
+    "request_id": "request_20000001-0000-4000-8000-000000000001",
+    "request_ref": {
+      "artifact_id": "urn:uuid:20000001-0000-4000-8000-000000000001",
+      "artifact_type": "request",
+      "payload_sha256": "b49538aa6aea6526e4154e7aa18053ec343c3c5fa7a2436bdfb4f43143593823",
+      "schema_version": "0.1.0"
+    }
+  },
+  "producer": {
+    "name": "wu4-coarse-planner-test-input",
+    "run_id": "run_ef8e70a8-a712-4e9c-ba69-cfa67dcdebcc",
+    "version": "0.1.0"
+  },
+  "provenance": {
+    "input_hashes": [],
+    "parent_artifact_ids": [],
+    "pipeline_stage": "wu4-coarse-planner-test-input"
+  },
+  "schema_version": "0.1.0"
+}

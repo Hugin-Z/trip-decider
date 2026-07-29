@@ -1,0 +1,70 @@
+artifact_id: urn:uuid:93d97ccf-c2ce-4c63-9db5-2722024705a8
+artifact_type: constraints
+created_at: '2026-07-29T08:00:00+08:00'
+integrity:
+  canonicalization: canonical-json-v1
+  payload_sha256: ec577faba1241b7a1fed1feb3bfcfbcb7c03fab4577ad82af1cc2517db00e065
+payload:
+  constraint_set_id: constraint_set_445e1654-4c1e-4a77-a451-1e300bad7ea4
+  constraints:
+  - category: time_window
+    constraint_id: constraint_40000001-0000-4000-8000-000000000001
+    enabled: true
+    layer: hard
+    operator: within
+    origin:
+      edited_at: '2026-07-29T08:00:00+08:00'
+      kind: user_edited
+      locator: &id001
+        kind: user_input
+        value: wu4-test:explicit-2-day-constraints
+      replaced_value: 2026-08-05/2026-08-05
+    target_refs:
+    - request_id: request_20000001-0000-4000-8000-000000000001
+      scope_kind: travel_window
+      target_type: request_scope
+    unit: null
+    value: 2026-08-05/2026-08-06
+  - category: must_visit
+    constraint_id: constraint_40000002-0000-4000-8000-000000000002
+    enabled: true
+    layer: hard
+    operator: include
+    origin:
+      edited_at: '2026-07-29T08:00:00+08:00'
+      kind: user_edited
+      locator: *id001
+      replaced_value: []
+    target_refs:
+    - request_id: request_20000001-0000-4000-8000-000000000001
+      scope_kind: must_visit
+      target_type: request_scope
+    unit: null
+    value:
+    - 江岭
+    - 李坑
+    - 篁岭
+    - 庆源
+  parse_ref:
+    artifact_id: urn:uuid:72a359c8-bb4b-49d1-aeae-59e649fab048
+    artifact_type: constraint-parse
+    payload_sha256: 5cc8d256f6f0a57c79210d1bcdb68c9508b2fb6cb8b220e7374efd82a87f385c
+    schema_version: 0.1.0
+  request_ref:
+    artifact_id: urn:uuid:20000001-0000-4000-8000-000000000001
+    artifact_type: request
+    payload_sha256: b49538aa6aea6526e4154e7aa18053ec343c3c5fa7a2436bdfb4f43143593823
+    schema_version: 0.1.0
+  revision: 1
+  user_edit_policy:
+    constraints_are_solver_ssot: true
+    request_auto_overwrite: false
+producer:
+  name: wu4-coarse-planner-test-input
+  run_id: run_f445e948-0676-497e-a0c9-825243382bcc
+  version: 0.1.0
+provenance:
+  input_hashes: []
+  parent_artifact_ids: []
+  pipeline_stage: wu4-coarse-planner-test-input
+schema_version: 0.1.0
