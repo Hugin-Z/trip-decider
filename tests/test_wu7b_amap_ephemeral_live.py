@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import tempfile
@@ -12,14 +13,17 @@ from dataclasses import fields
 from pathlib import Path
 from unittest.mock import patch
 
+import trip_decider.amap_ephemeral_live as amap_live
 from trip_decider.amap_ephemeral_live import (
     AMAP_CREDENTIAL_MISSING,
     AMAP_PROVIDER_FAILURE,
     AMAP_P2_CLEANUP_FAILED,
+    AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED,
     AmapEphemeralLiveConfig,
     AmapLiveRequest,
     run_amap_ephemeral_live,
 )
+from trip_decider.adapters.contracts import stable_identifier
 from trip_decider.live_place_resolution import StructuredTripInput
 from trip_decider.schema_validation import (
     BundleClosure,
@@ -97,20 +101,26 @@ def _poi(
     name: str,
     *,
     location: str,
+    category: str = PROVIDER_CATEGORY,
+    typecode: str = PROVIDER_TYPECODE,
+    address: str = PROVIDER_ADDRESS,
+    province_code: str = "990000",
+    city_code: str = "990100",
+    district_code: str = PROVIDER_ADCODE,
 ) -> dict[str, object]:
     return {
         "id": record_id,
         "name": name,
         "location": location,
-        "type": PROVIDER_CATEGORY,
-        "typecode": PROVIDER_TYPECODE,
-        "address": PROVIDER_ADDRESS,
+        "type": category,
+        "typecode": typecode,
+        "address": address,
         "pname": "测试省",
         "cityname": "测试市",
         "adname": "测试区",
-        "pcode": "990000",
-        "citycode": "990100",
-        "adcode": PROVIDER_ADCODE,
+        "pcode": province_code,
+        "citycode": city_code,
+        "adcode": district_code,
     }
 
 
@@ -134,12 +144,24 @@ class FakeLiveTransport:
         responses: Mapping[str, tuple[Mapping[str, object], ...]],
         *,
         failure: str | None = None,
+        alternate_serialization: bool = False,
     ) -> None:
         self.responses = responses
         self.failure = failure
+        self.alternate_serialization = alternate_serialization
         self.requests: list[AmapLiveRequest] = []
         self.credentials: list[str] = []
         self.network_attempts = 0
+
+    def _serialize(self, value: bytes) -> bytes:
+        if not self.alternate_serialization:
+            return value
+        return json.dumps(
+            json.loads(value),
+            ensure_ascii=False,
+            sort_keys=False,
+            indent=3,
+        ).encode("utf-8")
 
     def __call__(
         self,
@@ -181,7 +203,7 @@ class FakeLiveTransport:
                         "districts": {},
                     }
                 ).encode("utf-8")
-            return _district_response()
+            return self._serialize(_district_response())
         seed = request.parameters["keywords"]
         if self.failure == "poi_api":
             return json.dumps(
@@ -214,7 +236,7 @@ class FakeLiveTransport:
                     "pois": [],
                 }
             ).encode("utf-8")
-        return _poi_response(self.responses.get(seed, ()))
+        return self._serialize(_poi_response(self.responses.get(seed, ())))
 
 
 def _config(
@@ -780,6 +802,357 @@ class AmapEphemeralLiveCase(unittest.TestCase):
                 )
             self.assertEqual(_result_code(cleanup), AMAP_P2_CLEANUP_FAILED)
             self.assertFalse(failed_root.exists())
+
+        def run_safe_case(
+            case_root: Path,
+            *,
+            case_seed: str = "景点甲",
+            poi: Mapping[str, object] | None = None,
+            alternate_serialization: bool = False,
+        ) -> bytes:
+            selected_poi = poi or _poi(
+                PROVIDER_ID_A,
+                case_seed,
+                location=PROVIDER_LOCATION_A,
+            )
+            case_transport = FakeLiveTransport(
+                {case_seed: (selected_poi,)},
+                alternate_serialization=alternate_serialization,
+            )
+            with patch.dict(
+                os.environ,
+                {"AMAP_WEB_SERVICE_KEY": SENTINEL_KEY},
+                clear=False,
+            ):
+                result = run_amap_ephemeral_live(
+                    _config(must_visit=(case_seed,)),
+                    case_root,
+                    transport=case_transport,
+                )
+            self.assertFalse(result.problems)
+            self.assertEqual(case_transport.network_attempts, 2)
+            return _tree_bytes(case_root)
+
+        with tempfile.TemporaryDirectory(
+            prefix="trip-decider-p206-origin-"
+        ) as temp:
+            matrix_root = Path(temp)
+            baseline_root = matrix_root / "baseline"
+            baseline_bytes = run_safe_case(baseline_root)
+            baseline_plan = json.loads(
+                (baseline_root / "planning" / "plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            collision_token = str(baseline_plan["artifact_id"])[9:15]
+            self.assertEqual(len(collision_token), 6)
+
+            # The pre-remediation substring scanner rejects this safe-ID
+            # collision even though the provider category is never projected.
+            short_collision = run_safe_case(
+                matrix_root / "short-code-collision",
+                poi=_poi(
+                    PROVIDER_ID_A,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_A,
+                    category=collision_token,
+                ),
+            )
+            self.assertEqual(short_collision, baseline_bytes)
+
+            user_collision = run_safe_case(
+                matrix_root / "user-collision",
+                poi=_poi(
+                    PROVIDER_ID_A,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_A,
+                    address="景点甲",
+                ),
+            )
+            self.assertEqual(user_collision, baseline_bytes)
+            contract_collision = run_safe_case(
+                matrix_root / "contract-collision",
+                poi=_poi(
+                    PROVIDER_ID_A,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_A,
+                    category="completed",
+                ),
+            )
+            self.assertEqual(contract_collision, baseline_bytes)
+            html_collision = run_safe_case(
+                matrix_root / "html-collision",
+                poi=_poi(
+                    PROVIDER_ID_A,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_A,
+                    category="max-width",
+                ),
+            )
+            self.assertEqual(html_collision, baseline_bytes)
+
+            changed_identity = run_safe_case(
+                matrix_root / "changed-identity",
+                poi=_poi(
+                    PROVIDER_ID_B,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_A,
+                ),
+            )
+            self.assertEqual(changed_identity, baseline_bytes)
+            changed_provider_fields = run_safe_case(
+                matrix_root / "changed-provider-fields",
+                poi=_poi(
+                    PROVIDER_ID_A,
+                    "景点甲",
+                    location=PROVIDER_LOCATION_B,
+                    category="CHANGED-CATEGORY",
+                    typecode="220000",
+                    address="CHANGED-PROVIDER-ADDRESS",
+                    province_code="880000",
+                    city_code="880100",
+                    district_code="880101",
+                ),
+            )
+            self.assertEqual(changed_provider_fields, baseline_bytes)
+            changed_serialization = run_safe_case(
+                matrix_root / "changed-serialization",
+                alternate_serialization=True,
+            )
+            self.assertEqual(changed_serialization, baseline_bytes)
+
+            provider_locator = "ephemeral-amap:poi:" + PROVIDER_ID_A
+            temporary_candidate_id = stable_identifier(
+                "candidate",
+                "trip-decider:wu7:amap-poi",
+                f"amap|poi|{PROVIDER_ID_A}",
+            )
+            response_hash = hashlib.sha256(_district_response()).hexdigest()
+            blocked_values = (
+                ("provider-id", PROVIDER_ID_A),
+                ("embedded-provider-id", f"safe:{PROVIDER_ID_A}:ref"),
+                ("address", PROVIDER_ADDRESS),
+                ("coordinates", PROVIDER_LOCATION_A),
+                ("category", PROVIDER_CATEGORY),
+                ("typecode", PROVIDER_TYPECODE),
+                ("adcode", PROVIDER_ADCODE),
+                ("response-hash", response_hash),
+                ("provider-locator", provider_locator),
+                ("temporary-candidate", temporary_candidate_id),
+                ("temporary-path", str(matrix_root.resolve())),
+                ("key-substring", f"prefix-{SENTINEL_KEY}-suffix"),
+            )
+
+            real_prepare = amap_live._prepare_safe_stage
+
+            for name, leaked_value in blocked_values:
+                with self.subTest(blocked_leak=name):
+                    output_root = matrix_root / f"blocked-{name}"
+
+                    def inject_leak(**kwargs: object) -> object:
+                        manifest = real_prepare(**kwargs)
+                        stage = Path(kwargs["stage"])
+                        summary_path = stage / "run-summary.json"
+                        summary = json.loads(
+                            summary_path.read_text(encoding="utf-8")
+                        )
+                        summary["diagnostic"] = leaked_value
+                        summary_path.write_text(
+                            json.dumps(
+                                summary,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                        return manifest
+
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {"AMAP_WEB_SERVICE_KEY": SENTINEL_KEY},
+                            clear=False,
+                        ),
+                        patch.object(
+                            amap_live,
+                            "_prepare_safe_stage",
+                            side_effect=inject_leak,
+                        ),
+                    ):
+                        blocked = run_amap_ephemeral_live(
+                            _config(must_visit=("景点甲",)),
+                            output_root,
+                            transport=FakeLiveTransport(
+                                {
+                                    "景点甲": (
+                                        _poi(
+                                            PROVIDER_ID_A,
+                                            "景点甲",
+                                            location=PROVIDER_LOCATION_A,
+                                        ),
+                                    )
+                                }
+                            ),
+                        )
+                    self.assertEqual(
+                        _result_code(blocked),
+                        AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED,
+                    )
+                    self.assertFalse(output_root.exists())
+
+            unknown_root = matrix_root / "blocked-unknown-origin"
+
+            def inject_unknown(**kwargs: object) -> object:
+                manifest = real_prepare(**kwargs)
+                stage = Path(kwargs["stage"])
+                summary_path = stage / "run-summary.json"
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                summary["unclassified_probe"] = "contract-safe-looking"
+                summary_path.write_text(
+                    json.dumps(
+                        summary,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return manifest
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {"AMAP_WEB_SERVICE_KEY": SENTINEL_KEY},
+                    clear=False,
+                ),
+                patch.object(
+                    amap_live,
+                    "_prepare_safe_stage",
+                    side_effect=inject_unknown,
+                ),
+            ):
+                unknown = run_amap_ephemeral_live(
+                    _config(must_visit=("景点甲",)),
+                    unknown_root,
+                    transport=FakeLiveTransport(
+                        {
+                            "景点甲": (
+                                _poi(
+                                    PROVIDER_ID_A,
+                                    "景点甲",
+                                    location=PROVIDER_LOCATION_A,
+                                ),
+                            )
+                        }
+                    ),
+                )
+            self.assertEqual(
+                _result_code(unknown),
+                AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED,
+            )
+
+            real_candidate_map = amap_live._safe_candidate_map
+
+            def mismatched_candidate_map(
+                projection: object,
+                request_artifact_id: str,
+            ) -> dict[str, str]:
+                mapping = real_candidate_map(
+                    projection,
+                    request_artifact_id,
+                )
+                first = next(iter(mapping))
+                mapping[first] = stable_identifier(
+                    "candidate",
+                    "trip-decider:wu7b:incorrect-safe-candidate",
+                    f"{request_artifact_id}|景点甲|1",
+                )
+                return mapping
+
+            mismatch_root = matrix_root / "blocked-safe-id-mismatch"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"AMAP_WEB_SERVICE_KEY": SENTINEL_KEY},
+                    clear=False,
+                ),
+                patch.object(
+                    amap_live,
+                    "_safe_candidate_map",
+                    side_effect=mismatched_candidate_map,
+                ),
+            ):
+                mismatched = run_amap_ephemeral_live(
+                    _config(must_visit=("景点甲",)),
+                    mismatch_root,
+                    transport=FakeLiveTransport(
+                        {
+                            "景点甲": (
+                                _poi(
+                                    PROVIDER_ID_A,
+                                    "景点甲",
+                                    location=PROVIDER_LOCATION_A,
+                                ),
+                            )
+                        }
+                    ),
+                )
+            self.assertEqual(
+                _result_code(mismatched),
+                AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED,
+            )
+
+            def non_bijective_candidate_map(
+                projection: object,
+                request_artifact_id: str,
+            ) -> dict[str, str]:
+                mapping = real_candidate_map(
+                    projection,
+                    request_artifact_id,
+                )
+                first = next(iter(mapping.values()))
+                return {key: first for key in mapping}
+
+            non_bijective_root = matrix_root / "blocked-non-bijection"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"AMAP_WEB_SERVICE_KEY": SENTINEL_KEY},
+                    clear=False,
+                ),
+                patch.object(
+                    amap_live,
+                    "_safe_candidate_map",
+                    side_effect=non_bijective_candidate_map,
+                ),
+            ):
+                non_bijective = run_amap_ephemeral_live(
+                    _config(must_visit=("景点甲",), interactive=False),
+                    non_bijective_root,
+                    transport=FakeLiveTransport(
+                        {
+                            "景点甲": (
+                                _poi(
+                                    PROVIDER_ID_A,
+                                    "景点甲",
+                                    location=PROVIDER_LOCATION_A,
+                                ),
+                                _poi(
+                                    PROVIDER_ID_B,
+                                    "景点甲",
+                                    location=PROVIDER_LOCATION_B,
+                                ),
+                            )
+                        }
+                    ),
+                )
+            self.assertEqual(
+                _result_code(non_bijective),
+                AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED,
+            )
 
 
 if __name__ == "__main__":
