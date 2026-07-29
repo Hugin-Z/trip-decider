@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
@@ -185,6 +186,127 @@ class LivePlaceResolutionSummary:
     synthetic_test_data: bool
     generation_allowed: bool
     output_sha256: Mapping[str, str]
+
+
+class AmapObservationMode(str, Enum):
+    """Closed provenance modes accepted by the shared AMap parser contract."""
+
+    SYNTHETIC_TEST = "synthetic_test"
+    EPHEMERAL_LIVE = "ephemeral_live"
+
+
+@dataclass(frozen=True)
+class ParsedAmapDistrict:
+    """Controlled district identity parsed from an AMap-shaped response."""
+
+    name: str
+    adcode: str
+    level: str
+
+
+@dataclass(frozen=True)
+class ParsedAmapPoi:
+    """Controlled POI fields parsed without policy or persistence decisions."""
+
+    record_id: str
+    name: str
+    location: str
+    category_label: str
+    category_code: str
+    address: str | None
+    province_name: str | None
+    city_name: str | None
+    district_name: str | None
+    province_code: str | None
+    city_code: str | None
+    district_code: str | None
+
+
+@dataclass(frozen=True)
+class ParsedAmapDistrictResponse:
+    """Immutable district response value before observation-policy binding."""
+
+    status: str
+    infocode: str
+    synthetic_test_data: bool | None
+    districts: tuple[ParsedAmapDistrict, ...]
+
+
+@dataclass(frozen=True)
+class ParsedAmapPoiResponse:
+    """Immutable POI response value before observation-policy binding."""
+
+    status: str
+    infocode: str
+    synthetic_test_data: bool | None
+    count: str | None
+    pois: tuple[ParsedAmapPoi, ...]
+
+
+@dataclass(frozen=True, init=False)
+class PolicyBoundAmapObservation:
+    """Sealed policy binding produced only by the public binding function."""
+
+    mode: AmapObservationMode
+    response: ParsedAmapDistrictResponse | ParsedAmapPoiResponse
+    data_policy: Mapping[str, object]
+    locator_prefix: str
+    persistence_capability: str
+    provenance_label: str
+
+
+@dataclass(frozen=True)
+class AmapCandidateProjection:
+    """In-memory shared Candidate projection without persistence methods."""
+
+    mode: AmapObservationMode
+    candidates: tuple[Mapping[str, object], ...]
+    record_local_facts: tuple[Mapping[str, object], ...]
+    seed_matches: tuple[Mapping[str, object], ...]
+    selections: tuple[Mapping[str, object], ...]
+    selection_choices: Mapping[str, str]
+
+
+def parse_amap_district_response(
+    response: bytes | Mapping[str, object],
+) -> ValidationResult[ParsedAmapDistrictResponse]:
+    """Parse a decoded or UTF-8 JSON AMap-shaped district response."""
+
+    raise NotImplementedError
+
+
+def parse_amap_poi_response(
+    response: bytes | Mapping[str, object],
+) -> ValidationResult[ParsedAmapPoiResponse]:
+    """Parse a decoded or UTF-8 JSON AMap-shaped POI response."""
+
+    raise NotImplementedError
+
+
+def bind_amap_observation_policy(
+    parsed: ParsedAmapDistrictResponse | ParsedAmapPoiResponse,
+    *,
+    mode: AmapObservationMode,
+    policy_checked_at: str,
+) -> ValidationResult[PolicyBoundAmapObservation]:
+    """Bind one parsed response to an explicit closed observation mode."""
+
+    raise NotImplementedError
+
+
+def project_amap_candidates(
+    *,
+    city: str,
+    city_adcode: str | None,
+    seeds: Sequence[str],
+    district_observation: PolicyBoundAmapObservation,
+    poi_observations: Sequence[tuple[str, PolicyBoundAmapObservation]],
+    selection_reader: SelectionReader | None = None,
+    selection_choices: Mapping[str, str] | None = None,
+) -> ValidationResult[AmapCandidateProjection]:
+    """Project policy-bound observations through the shared identity core."""
+
+    raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -1718,12 +1840,23 @@ def replay_synthetic_normalized_snapshot(
 
 __all__ = [
     "AMAP_PERSISTENCE_POLICY_STATUS",
+    "AmapCandidateProjection",
+    "AmapObservationMode",
     "LIVE_SMOKE_STATUS",
     "LivePlaceResolutionSummary",
+    "ParsedAmapDistrict",
+    "ParsedAmapDistrictResponse",
+    "ParsedAmapPoi",
+    "ParsedAmapPoiResponse",
+    "PolicyBoundAmapObservation",
     "SelectionReader",
     "StructuredTripInput",
     "SyntheticProviderRequest",
     "SyntheticTransport",
+    "bind_amap_observation_policy",
+    "parse_amap_district_response",
+    "parse_amap_poi_response",
+    "project_amap_candidates",
     "replay_synthetic_normalized_snapshot",
     "run_synthetic_live_place_resolution",
 ]
