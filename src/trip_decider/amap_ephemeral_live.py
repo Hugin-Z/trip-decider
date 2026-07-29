@@ -24,6 +24,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
@@ -177,13 +178,18 @@ _DENIED_FINAL_KEYS = frozenset(
         "latitude",
         "location",
         "longitude",
+        "poi_id",
         "provider",
+        "provider_id",
         "provider_locator",
+        "raw_response",
         "record_id",
         "record_local_facts",
         "response_bytes",
+        "response_hash",
         "response_sha256",
         "source_refs",
+        "temporary_candidate_id",
         "typecode",
     }
 )
@@ -366,6 +372,55 @@ class _SafeProjection:
     seed_results: tuple[SafeSeedResult, ...]
     scheduled_count: int
     blocked_count: int
+    request_artifact_id: str
+    candidate_map: Mapping[str, str]
+    fact_map: Mapping[str, str]
+    fact_sources: tuple[tuple[str, str, str], ...]
+
+
+class _FinalOrigin(Enum):
+    USER_EXPLICIT = "user_explicit"
+    CONTRACT_DERIVED = "contract_derived"
+    SAFE_PROJECTION = "safe_projection"
+    PROVIDER_DERIVED = "provider_derived"
+    TEMPORARY_RUNTIME = "temporary_runtime"
+
+
+_ALLOWED_FINAL_ORIGINS = frozenset(
+    {
+        _FinalOrigin.USER_EXPLICIT,
+        _FinalOrigin.CONTRACT_DERIVED,
+        _FinalOrigin.SAFE_PROJECTION,
+    }
+)
+
+
+@dataclass(frozen=True)
+class _FinalScalarRule:
+    origin: _FinalOrigin
+    expected: object
+    allowed_type: str
+    derive_rule: str
+
+
+@dataclass(frozen=True)
+class _TypedHtmlSlot:
+    slot_path: str
+    origin: _FinalOrigin
+    value: str
+
+
+@dataclass(frozen=True)
+class _FinalOutputManifest:
+    expected_files: Mapping[str, bytes]
+    scalar_rules: Mapping[tuple[str, str], _FinalScalarRule]
+    html_slots: tuple[_TypedHtmlSlot, ...]
+
+
+@dataclass(frozen=True)
+class _SensitiveValues:
+    high_risk_substrings: frozenset[str]
+    exact_provider_scalars: frozenset[str]
 
 
 def _problem(code: str) -> ValidationProblem:
@@ -1613,6 +1668,26 @@ def _safe_projection(
         (evidence_root / "evidence.json").read_text(encoding="utf-8")
     )
     fact_map = _safe_fact_map(evidence, candidate_map)
+    evidence_payload = evidence.get("payload")
+    evidence_facts = (
+        evidence_payload.get("facts")
+        if isinstance(evidence_payload, Mapping)
+        else None
+    )
+    if not isinstance(evidence_facts, list):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    fact_sources = tuple(
+        (
+            str(item["fact_id"]),
+            str(item["subject"]["entity_id"]),
+            str(item["field"]),
+        )
+        for item in evidence_facts
+        if isinstance(item, Mapping)
+        and isinstance(item.get("subject"), Mapping)
+    )
+    if len(fact_sources) != len(evidence_facts):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
     candidate_manifest = {
         "contract": "wu7b-safe-candidate-logical-ref/1.0",
         "request_artifact_id": request["artifact_id"],
@@ -1808,6 +1883,10 @@ def _safe_projection(
         seed_results=tuple(seed_results),
         scheduled_count=scheduled_count,
         blocked_count=blocked_count,
+        request_artifact_id=str(request["artifact_id"]),
+        candidate_map=MappingProxyType(dict(candidate_map)),
+        fact_map=MappingProxyType(dict(fact_map)),
+        fact_sources=fact_sources,
     )
 
 
@@ -1815,18 +1894,62 @@ def _render_html(
     safe: _SafeProjection,
     *,
     network_calls: int,
-) -> bytes:
+) -> tuple[bytes, tuple[_TypedHtmlSlot, ...]]:
+    slots: list[_TypedHtmlSlot] = []
+
+    def render_slot(
+        slot_path: str,
+        value: object,
+        origin: _FinalOrigin,
+    ) -> str:
+        if origin not in _ALLOWED_FINAL_ORIGINS:
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        rendered = str(value)
+        slots.append(
+            _TypedHtmlSlot(
+                slot_path=slot_path,
+                origin=origin,
+                value=rendered,
+            )
+        )
+        return html.escape(rendered)
+
     rows = []
-    for item in safe.seed_results:
+    for index, item in enumerate(safe.seed_results):
         day = f"Day {item.day_number}" if item.day_number is not None else "—"
         blocker = item.blocker or "none"
+        seed_slot = render_slot(
+            f"/seed_results/{index}/seed",
+            item.seed,
+            _FinalOrigin.USER_EXPLICIT,
+        )
+        day_slot = render_slot(
+            f"/seed_results/{index}/day",
+            day,
+            _FinalOrigin.CONTRACT_DERIVED,
+        )
+        status_slot = render_slot(
+            f"/seed_results/{index}/identity_status",
+            item.identity_status,
+            _FinalOrigin.CONTRACT_DERIVED,
+        )
+        blocker_slot = render_slot(
+            f"/seed_results/{index}/blocker",
+            blocker,
+            _FinalOrigin.CONTRACT_DERIVED,
+        )
+        selected_slot = render_slot(
+            f"/seed_results/{index}/explicitly_selected",
+            "yes" if item.explicitly_selected else "no",
+            _FinalOrigin.CONTRACT_DERIVED,
+        )
         rows.append(
             "<tr>"
-            f"<td>{html.escape(item.seed)}</td>"
-            f"<td>{html.escape(day)}</td>"
-            f"<td>{html.escape(item.identity_status)}</td>"
-            f"<td>{html.escape(blocker)}</td>"
-            f"<td>{'yes' if item.explicitly_selected else 'no'}</td>"
+            f"<td>{seed_slot}</td>"
+            f"<td>{day_slot}</td>"
+            f"<td>{status_slot}</td>"
+            f"<td>{blocker_slot}</td>"
+            f"<td>{selected_slot}</td>"
             "</tr>"
         )
     document = """<!doctype html>
@@ -1854,11 +1977,19 @@ table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ddd;padding
 </body>
 </html>
 """.format(
-        status=html.escape(str(safe.gate.get("planning_status"))),
+        status=render_slot(
+            "/planning_status",
+            safe.gate.get("planning_status"),
+            _FinalOrigin.CONTRACT_DERIVED,
+        ),
         rows="".join(rows),
-        calls=network_calls,
+        calls=render_slot(
+            "/network_calls",
+            network_calls,
+            _FinalOrigin.CONTRACT_DERIVED,
+        ),
     )
-    return document.encode("utf-8")
+    return document.encode("utf-8"), tuple(slots)
 
 
 def _provider_sensitive_values(
@@ -1871,19 +2002,21 @@ def _provider_sensitive_values(
     recovery_root: Path,
     evidence_root: Path,
     planner_root: Path,
-) -> set[str]:
-    values = set(response_hashes)
-    values.add(credential)
-    values.add(str(temp_root.resolve()))
+) -> _SensitiveValues:
+    high_risk = set(response_hashes)
+    high_risk.add(credential)
+    high_risk.add(str(temp_root.resolve()))
+    high_risk.add("ephemeral-amap:poi:")
+    exact_values: set[str] = set()
     for observation in observations:
         response = observation.response
         if isinstance(response, ParsedAmapDistrictResponse):
             for item in response.districts:
-                values.add(item.adcode)
+                exact_values.add(item.adcode)
         elif isinstance(response, ParsedAmapPoiResponse):
             for item in response.pois:
+                high_risk.add(item.record_id)
                 for value in (
-                    item.record_id,
                     item.location,
                     item.category_label,
                     item.category_code,
@@ -1893,44 +2026,57 @@ def _provider_sensitive_values(
                     item.district_code,
                 ):
                     if isinstance(value, str) and value:
-                        values.add(value)
-                values.update(part for part in item.location.split(",") if part)
+                        exact_values.add(value)
+                exact_values.update(
+                    part for part in item.location.split(",") if part
+                )
     for candidate in projection.candidates:
         plain = _plain(candidate)
-        values.add(str(plain["candidate_id"]))
+        high_risk.add(str(plain["candidate_id"]))
         provider = plain.get("provider")
         if isinstance(provider, Mapping):
             for key in ("record_id",):
                 item = provider.get(key)
                 if isinstance(item, str):
-                    values.add(item)
+                    high_risk.add(item)
             categories = provider.get("categories")
             if isinstance(categories, list):
-                values.update(str(item) for item in categories)
+                for item in categories:
+                    if isinstance(item, Mapping):
+                        exact_values.update(
+                            str(value)
+                            for value in item.values()
+                            if isinstance(value, str) and value
+                        )
         source_refs = plain.get("source_refs")
         if isinstance(source_refs, list):
-            values.update(
-                str(item.get("value"))
-                for item in source_refs
-                if isinstance(item, Mapping) and item.get("value")
-            )
+            for item in source_refs:
+                if isinstance(item, Mapping) and item.get("value"):
+                    high_risk.add(str(item["value"]))
         location = plain.get("location")
         if isinstance(location, Mapping):
             for key in ("latitude", "longitude"):
                 if key in location:
-                    values.add(str(location[key]))
+                    exact_values.add(str(location[key]))
     for root in (recovery_root, evidence_root, planner_root):
         for path in root.rglob("*"):
             if path.is_file():
-                values.add(_sha256(path.read_bytes()))
+                high_risk.add(_sha256(path.read_bytes()))
         for name in ("candidates.json", "evidence.json", "plan.json"):
             path = root / name
             if path.is_file():
                 document = json.loads(path.read_text(encoding="utf-8"))
                 for key in ("artifact_id",):
                     if isinstance(document.get(key), str):
-                        values.add(document[key])
-    return {item for item in values if item}
+                        high_risk.add(document[key])
+    return _SensitiveValues(
+        high_risk_substrings=frozenset(
+            item for item in high_risk if item
+        ),
+        exact_provider_scalars=frozenset(
+            item for item in exact_values if item
+        ),
+    )
 
 
 def _walk_keys(value: object) -> Sequence[str]:
@@ -1945,24 +2091,356 @@ def _walk_keys(value: object) -> Sequence[str]:
     return keys
 
 
-def _redaction_scan(root: Path, sensitive: set[str]) -> None:
+def _pointer_token(value: object) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _walk_scalars(
+    value: object,
+    pointer: str = "",
+) -> Sequence[tuple[str, object]]:
+    scalars: list[tuple[str, object]] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            child = f"{pointer}/{_pointer_token(key)}"
+            scalars.extend(_walk_scalars(item, child))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            scalars.extend(_walk_scalars(item, f"{pointer}/{index}"))
+    else:
+        scalars.append((pointer, value))
+    return scalars
+
+
+def _scalar_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is int:
+        return "integer"
+    if type(value) is float:
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+
+
+def _last_named_pointer_token(pointer: str) -> str:
+    for token in reversed(pointer.split("/")):
+        if token and not token.isdigit():
+            return token.replace("~1", "/").replace("~0", "~")
+    return ""
+
+
+def _origin_for_scalar(
+    relative_path: str,
+    pointer: str,
+) -> _FinalOrigin:
+    field = _last_named_pointer_token(pointer)
+    safe_fields = {
+        "activity_id",
+        "artifact_id",
+        "candidate_ref",
+        "constraint_id",
+        "day_id",
+        "fact_ref",
+        "input_hashes",
+        "parent_artifact_ids",
+        "parse_item_id",
+        "payload_sha256",
+        "plan_id",
+        "plan_ref",
+        "proof_refs",
+        "request_id",
+        "run_id",
+        "sha256",
+    }
+    user_fields = {
+        "city",
+        "count",
+        "created_at",
+        "end",
+        "excluded",
+        "label",
+        "locale",
+        "must_visit",
+        "name",
+        "party_count",
+        "seed",
+        "start",
+        "transport_modes",
+        "user_quote",
+    }
+    if field in safe_fields or field.endswith("_sha256"):
+        return _FinalOrigin.SAFE_PROJECTION
+    if relative_path.startswith("planning-input/"):
+        if (
+            field in user_fields
+            or "/payload/explicit/" in pointer
+            and field
+            not in {
+                "kind",
+                "origin",
+                "selection_mode",
+                "timezone",
+                "value",
+            }
+            or field == "value"
+            and (
+                "/normalized_expression/" in pointer
+                or "/payload/constraints/" in pointer
+            )
+        ):
+            return _FinalOrigin.USER_EXPLICIT
+        return _FinalOrigin.CONTRACT_DERIVED
+    if field in {"seed", "label"}:
+        return _FinalOrigin.USER_EXPLICIT
+    return _FinalOrigin.CONTRACT_DERIVED
+
+
+def _derive_rule(origin: _FinalOrigin) -> str:
+    if origin is _FinalOrigin.USER_EXPLICIT:
+        return "exact structured user input"
+    if origin is _FinalOrigin.CONTRACT_DERIVED:
+        return "fixed contract or deterministic user-only projection"
+    if origin is _FinalOrigin.SAFE_PROJECTION:
+        return "independently recomputed safe namespace projection"
+    raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+
+
+def _structured_document(relative_path: str, raw: bytes) -> object:
+    try:
+        text = raw.decode("utf-8")
+        if relative_path.endswith(".json"):
+            return json.loads(text)
+        if relative_path.endswith((".yaml", ".yml")):
+            return yaml.safe_load(text)
+    except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED) from exc
+    raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+
+
+def _build_final_manifest(
+    expected_files: Mapping[str, bytes],
+    html_slots: Sequence[_TypedHtmlSlot],
+) -> _FinalOutputManifest:
+    if set(expected_files) != set(_FINAL_FILES):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    rules: dict[tuple[str, str], _FinalScalarRule] = {}
+    for relative_path, raw in expected_files.items():
+        if relative_path.endswith(".html"):
+            continue
+        document = _structured_document(relative_path, raw)
+        for pointer, value in _walk_scalars(document):
+            origin = _origin_for_scalar(relative_path, pointer)
+            if origin not in _ALLOWED_FINAL_ORIGINS:
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            rules[(relative_path, pointer)] = _FinalScalarRule(
+                origin=origin,
+                expected=copy.deepcopy(value),
+                allowed_type=_scalar_type(value),
+                derive_rule=_derive_rule(origin),
+            )
+    slots = tuple(html_slots)
+    if any(item.origin not in _ALLOWED_FINAL_ORIGINS for item in slots):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    return _FinalOutputManifest(
+        expected_files=MappingProxyType(dict(expected_files)),
+        scalar_rules=MappingProxyType(rules),
+        html_slots=slots,
+    )
+
+
+def _independent_safe_candidate_map(
+    projection: AmapCandidateProjection,
+    request_artifact_id: str,
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for selection_value in projection.selections:
+        selection = _plain(selection_value)
+        seed = selection.get("seed")
+        alternatives = selection.get("alternatives")
+        if not isinstance(seed, str) or not isinstance(alternatives, list):
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        for ordinal, candidate_id in enumerate(alternatives, start=1):
+            if not isinstance(candidate_id, str) or not candidate_id:
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            expected = stable_identifier(
+                "candidate",
+                "trip-decider:wu7b:safe-candidate",
+                f"{request_artifact_id}|{seed}|{ordinal}",
+            )
+            if candidate_id in mapping and mapping[candidate_id] != expected:
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            mapping[candidate_id] = expected
+    provider_ids = {
+        str(_plain(item)["candidate_id"]) for item in projection.candidates
+    }
+    if set(mapping) != provider_ids or len(set(mapping.values())) != len(mapping):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    return mapping
+
+
+def _validate_safe_projection_identifiers(
+    safe: _SafeProjection,
+    projection: AmapCandidateProjection,
+) -> None:
+    expected_candidates = _independent_safe_candidate_map(
+        projection,
+        safe.request_artifact_id,
+    )
+    if dict(safe.candidate_map) != expected_candidates:
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    expected_facts: dict[str, str] = {}
+    seen_slots: set[tuple[str, str]] = set()
+    for fact_id, source_candidate, field in safe.fact_sources:
+        if source_candidate not in expected_candidates:
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        safe_candidate = expected_candidates[source_candidate]
+        slot = (safe_candidate, field)
+        if slot in seen_slots:
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        seen_slots.add(slot)
+        expected_facts[fact_id] = stable_identifier(
+            "fact",
+            "trip-decider:wu7b:safe-fact-reference",
+            f"{safe_candidate}|{field}",
+        )
+    if (
+        dict(safe.fact_map) != expected_facts
+        or len(set(expected_facts.values())) != len(expected_facts)
+    ):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+
+    candidate_manifest = {
+        "contract": "wu7b-safe-candidate-logical-ref/1.0",
+        "request_artifact_id": safe.request_artifact_id,
+        "candidate_ids": sorted(expected_candidates.values()),
+    }
+    evidence_manifest = {
+        "contract": "wu7b-safe-evidence-logical-ref/1.0",
+        "request_artifact_id": safe.request_artifact_id,
+        "fact_ids": sorted(expected_facts.values()),
+        "support_ceiling": "unknown",
+    }
+    payload = safe.plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    if (
+        payload.get("candidate_set_ref")
+        != _safe_logical_ref("candidates", candidate_manifest)
+        or payload.get("evidence_set_ref")
+        != _safe_logical_ref("evidence", evidence_manifest)
+        or payload.get("plan_id")
+        != stable_identifier(
+            "plan",
+            "trip-decider:wu7b:safe-plan",
+            safe.request_artifact_id,
+        )
+    ):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    days = payload.get("days")
+    if not isinstance(days, list):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+    safe_candidate_ids = set(expected_candidates.values())
+    for day_number, day in enumerate(days, start=1):
+        if not isinstance(day, Mapping):
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        if day.get("day_id") != stable_identifier(
+            "day",
+            "trip-decider:wu7b:safe-day",
+            f"{safe.request_artifact_id}|{day_number}|{day.get('date')}",
+        ):
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        activities = day.get("activities")
+        if not isinstance(activities, list):
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+        for activity_number, activity in enumerate(activities, start=1):
+            if not isinstance(activity, Mapping):
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            candidate_ref = activity.get("candidate_ref")
+            if candidate_ref not in safe_candidate_ids:
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            if activity.get("activity_id") != stable_identifier(
+                "activity",
+                "trip-decider:wu7b:safe-activity",
+                (
+                    f"{safe.request_artifact_id}|{day_number}|"
+                    f"{activity_number}|{candidate_ref}"
+                ),
+            ):
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+
+
+def _redaction_scan(
+    root: Path,
+    sensitive: _SensitiveValues,
+    manifest: _FinalOutputManifest,
+    *,
+    safe: _SafeProjection,
+    projection: AmapCandidateProjection,
+) -> None:
+    _validate_safe_projection_identifiers(safe, projection)
+    actual_files = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if actual_files != set(manifest.expected_files):
+        raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
+        relative_path = path.relative_to(root).as_posix()
         raw = path.read_bytes()
+        if raw != manifest.expected_files.get(relative_path):
+            raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED) from exc
-        for forbidden in sensitive:
+        for forbidden in sensitive.high_risk_substrings:
             if forbidden and forbidden in text:
                 raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
         if path.suffix in {".json", ".yaml", ".yml"}:
-            if path.suffix == ".json":
-                document = json.loads(text)
-            else:
-                document = yaml.safe_load(text)
+            document = _structured_document(relative_path, raw)
             if _DENIED_FINAL_KEYS.intersection(_walk_keys(document)):
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            actual_rules = {
+                (relative_path, pointer): value
+                for pointer, value in _walk_scalars(document)
+            }
+            expected_rules = {
+                key: value
+                for key, value in manifest.scalar_rules.items()
+                if key[0] == relative_path
+            }
+            if set(actual_rules) != set(expected_rules):
+                raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+            for key, actual in actual_rules.items():
+                rule = expected_rules[key]
+                if (
+                    rule.origin not in _ALLOWED_FINAL_ORIGINS
+                    or _scalar_type(actual) != rule.allowed_type
+                    or type(actual) is not type(rule.expected)
+                    or actual != rule.expected
+                    or not rule.derive_rule
+                ):
+                    raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
+                if (
+                    rule.origin is _FinalOrigin.SAFE_PROJECTION
+                    and isinstance(actual, str)
+                    and actual in sensitive.exact_provider_scalars
+                ):
+                    raise _RunIssue(
+                        AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED
+                    )
+        elif relative_path == "report/index.html":
+            if any(
+                slot.origin not in _ALLOWED_FINAL_ORIGINS
+                for slot in manifest.html_slots
+            ):
                 raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
 
 
@@ -1988,33 +2466,35 @@ def _prepare_safe_stage(
     safe: _SafeProjection,
     network_calls: int,
     cleanup_counts: Mapping[str, int],
-) -> None:
+) -> _FinalOutputManifest:
+    expected_files: dict[str, bytes] = {}
     for filename in _PLANNING_FILES:
-        _write(
-            stage / "planning-input" / filename,
-            (planning_root / filename).read_bytes(),
-        )
-    _write(stage / "planning" / "plan.json", _json_bytes(safe.plan, pretty=True))
-    _write(
-        stage / "planning" / "violations.json",
-        _json_bytes(safe.violations, pretty=True),
+        expected_files[f"planning-input/{filename}"] = (
+            planning_root / filename
+        ).read_bytes()
+    expected_files["planning/plan.json"] = _json_bytes(
+        safe.plan,
+        pretty=True,
     )
-    _write(
-        stage / "planning" / "planning-gate.json",
-        _json_bytes(safe.gate, pretty=True),
+    expected_files["planning/violations.json"] = _json_bytes(
+        safe.violations,
+        pretty=True,
     )
-    _write(
-        stage / "planning" / "run-summary.json",
-        _json_bytes(safe.planning_summary, pretty=True),
+    expected_files["planning/planning-gate.json"] = _json_bytes(
+        safe.gate,
+        pretty=True,
     )
-    _write(
-        stage / "report" / "index.html",
-        _render_html(safe, network_calls=network_calls),
+    expected_files["planning/run-summary.json"] = _json_bytes(
+        safe.planning_summary,
+        pretty=True,
     )
+    html_bytes, html_slots = _render_html(safe, network_calls=network_calls)
+    expected_files["report/index.html"] = html_bytes
+    for relative_path, raw in expected_files.items():
+        _write(stage / relative_path, raw)
     eight_hashes = {
-        path.relative_to(stage).as_posix(): _sha256(path.read_bytes())
-        for path in sorted(stage.rglob("*"))
-        if path.is_file()
+        relative_path: _sha256(raw)
+        for relative_path, raw in sorted(expected_files.items())
     }
     top_summary = {
         "schema_version": "wu7b-amap-ephemeral-live-run/1.0",
@@ -2048,7 +2528,11 @@ def _prepare_safe_stage(
             "fine_schedule": False,
         },
     }
-    _write(stage / "run-summary.json", _json_bytes(top_summary, pretty=True))
+    expected_files["run-summary.json"] = _json_bytes(
+        top_summary,
+        pretty=True,
+    )
+    _write(stage / "run-summary.json", expected_files["run-summary.json"])
     actual_files = {
         path.relative_to(stage).as_posix()
         for path in stage.rglob("*")
@@ -2057,6 +2541,7 @@ def _prepare_safe_stage(
     if actual_files != set(_FINAL_FILES):
         raise _RunIssue(AMAP_P2_FINAL_OUTPUT_REDACTION_BLOCKED)
     _validate_final_artifacts(stage)
+    return _build_final_manifest(expected_files, html_slots)
 
 
 def _emergency_remove(root: Path) -> None:
@@ -2213,7 +2698,7 @@ def run_amap_ephemeral_live(
             f".{checked_output_root.name}.wu7b-stage-{uuid.uuid4().hex}"
         )
         safe_stage.mkdir()
-        _prepare_safe_stage(
+        final_manifest = _prepare_safe_stage(
             stage=safe_stage,
             planning_root=planning_root,
             safe=safe,
@@ -2230,7 +2715,13 @@ def run_amap_ephemeral_live(
             evidence_root=evidence_root,
             planner_root=planner_root,
         )
-        _redaction_scan(safe_stage, sensitive)
+        _redaction_scan(
+            safe_stage,
+            sensitive,
+            final_manifest,
+            safe=safe,
+            projection=projection,
+        )
     except _RunIssue as exc:
         issue = exc
     except Exception:
