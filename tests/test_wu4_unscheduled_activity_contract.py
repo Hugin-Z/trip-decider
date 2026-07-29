@@ -295,4 +295,3 @@ class UnscheduledActivityContractCase(unittest.TestCase):
                     previous_plan(copy.deepcopy(value)),
                     f"uc06-{index}.json",
                 )
-
