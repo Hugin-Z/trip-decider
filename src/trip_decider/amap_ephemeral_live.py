@@ -88,6 +88,32 @@ _AMAP_ORIGIN = "https://restapi.amap.com"
 _MAX_SEEDS = 8
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_POIS = 25
+_FAILURE_STAGES = frozenset(
+    {
+        "district_transport",
+        "district_http",
+        "district_api_status",
+        "district_parse",
+        "poi_transport",
+        "poi_http",
+        "poi_api_status",
+        "poi_parse",
+        "result_window",
+    }
+)
+_SAFE_FAILURE_CLASSES = frozenset(
+    {
+        "transport_error",
+        "http_error",
+        "provider_api_error",
+        "invalid_json",
+        "invalid_response_shape",
+        "result_window_exhausted",
+    }
+)
+_HTTP_STATUS_CLASSES = frozenset(
+    {"2xx", "3xx", "4xx", "5xx", "unavailable"}
+)
 _PLANNING_FILES = (
     "request.yaml",
     "constraint-parse.json",
@@ -170,10 +196,17 @@ class _RunIssue(ValueError):
 
 
 class _WireIssue(RuntimeError):
-    def __init__(self, kind: str, http_status: int | None = None) -> None:
+    def __init__(
+        self,
+        kind: str,
+        http_status: int | None = None,
+        *,
+        response_bytes_received: bool = False,
+    ) -> None:
         super().__init__(kind)
         self.kind = kind
         self.http_status = http_status
+        self.response_bytes_received = response_bytes_received
 
 
 @dataclass(frozen=True)
@@ -232,11 +265,96 @@ class AmapEphemeralLiveSummary:
     output_sha256: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class AmapProviderFailureSummary:
+    """Closed, secret-free classification of one failed provider run."""
+
+    failure_token: str
+    failure_stage: str
+    district_attempts: int
+    poi_attempts: int
+    total_network_attempts: int
+    http_status_class: str
+    amap_status: str
+    amap_infocode: str
+    safe_failure_class: str
+    response_bytes_received: bool
+    fer_classification_completed: bool
+    final_output_installed: bool
+    raw_provider_residue: int
+    normalized_provider_residue: int
+    temporary_residue: int
+    key_leakage_detected: bool
+    retry_count: int
+    fallback_count: int
+
+    def __post_init__(self) -> None:
+        if self.failure_token != AMAP_PROVIDER_FAILURE:
+            raise ValueError("invalid provider failure token")
+        if self.failure_stage not in _FAILURE_STAGES:
+            raise ValueError("invalid provider failure stage")
+        if self.safe_failure_class not in _SAFE_FAILURE_CLASSES:
+            raise ValueError("invalid safe provider failure class")
+        if self.http_status_class not in _HTTP_STATUS_CLASSES:
+            raise ValueError("invalid HTTP status class")
+        for value in (
+            self.district_attempts,
+            self.poi_attempts,
+            self.total_network_attempts,
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError("invalid network attempt count")
+        if (
+            self.total_network_attempts
+            != self.district_attempts + self.poi_attempts
+        ):
+            raise ValueError("inconsistent network attempt counts")
+        for value in (self.amap_status, self.amap_infocode):
+            if not _safe_provider_code(value):
+                raise ValueError("invalid safe provider code")
+        for value in (
+            self.response_bytes_received,
+            self.fer_classification_completed,
+            self.final_output_installed,
+            self.key_leakage_detected,
+        ):
+            if type(value) is not bool:
+                raise ValueError("invalid provider failure boolean")
+        if not self.fer_classification_completed:
+            raise ValueError("FER classification must be complete")
+        if self.final_output_installed or self.key_leakage_detected:
+            raise ValueError("unsafe provider failure state")
+        if (
+            self.raw_provider_residue,
+            self.normalized_provider_residue,
+            self.temporary_residue,
+            self.retry_count,
+            self.fallback_count,
+        ) != (0, 0, 0, 0, 0):
+            raise ValueError("provider failure residue or fallback is nonzero")
+
+
+@dataclass(frozen=True)
+class _ProviderFailureFact:
+    stage: str
+    safe_failure_class: str
+    http_status_class: str
+    amap_status: str
+    amap_infocode: str
+    response_bytes_received: bool
+    district_attempts: int
+    poi_attempts: int
+    total_network_attempts: int
+
+
 @dataclass
 class _AcquisitionState:
     observations: list[PolicyBoundAmapObservation]
     response_hashes: set[str]
     network_calls: int = 0
+    district_attempts: int = 0
+    poi_attempts: int = 0
+    provider_failure: _ProviderFailureFact | None = None
 
 
 @dataclass(frozen=True)
@@ -264,8 +382,67 @@ def _problem(code: str) -> ValidationProblem:
 
 def _failure(
     code: str,
-) -> ValidationResult[AmapEphemeralLiveSummary]:
+) -> ValidationResult[
+    AmapEphemeralLiveSummary | AmapProviderFailureSummary
+]:
     return ValidationResult(None, (_problem(code),))
+
+
+def _safe_provider_code(value: str) -> bool:
+    if value == "unavailable":
+        return True
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 32
+        and value.isascii()
+        and all(character.isalnum() or character in "_-" for character in value)
+    )
+
+
+def _provider_code(value: object) -> str:
+    if isinstance(value, str) and _safe_provider_code(value):
+        return value
+    return "unavailable"
+
+
+def _http_status_class(status: int | None) -> str:
+    if type(status) is not int:
+        return "unavailable"
+    if 200 <= status <= 299:
+        return "2xx"
+    if 300 <= status <= 399:
+        return "3xx"
+    if 400 <= status <= 499:
+        return "4xx"
+    if 500 <= status <= 599:
+        return "5xx"
+    return "unavailable"
+
+
+def _provider_failure_result(
+    fact: _ProviderFailureFact,
+) -> ValidationResult[AmapEphemeralLiveSummary | AmapProviderFailureSummary]:
+    summary = AmapProviderFailureSummary(
+        failure_token=AMAP_PROVIDER_FAILURE,
+        failure_stage=fact.stage,
+        district_attempts=fact.district_attempts,
+        poi_attempts=fact.poi_attempts,
+        total_network_attempts=fact.total_network_attempts,
+        http_status_class=fact.http_status_class,
+        amap_status=fact.amap_status,
+        amap_infocode=fact.amap_infocode,
+        safe_failure_class=fact.safe_failure_class,
+        response_bytes_received=fact.response_bytes_received,
+        fer_classification_completed=True,
+        final_output_installed=False,
+        raw_provider_residue=0,
+        normalized_provider_residue=0,
+        temporary_residue=0,
+        key_leakage_detected=False,
+        retry_count=0,
+        fallback_count=0,
+    )
+    return ValidationResult(summary, (_problem(AMAP_PROVIDER_FAILURE),))
 
 
 def _sha256(value: bytes) -> str:
@@ -777,12 +954,87 @@ def _real_transport(
     except Exception:
         raise _WireIssue("transport") from None
     if len(content) > _MAX_RESPONSE_BYTES:
-        raise _WireIssue("response_window")
+        raise _WireIssue(
+            "response_window",
+            response_bytes_received=True,
+        )
     return bytes(content)
 
 
 def _clock() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _record_provider_failure(
+    *,
+    state: _AcquisitionState,
+    request: AmapLiveRequest,
+    suffix: str,
+    safe_failure_class: str,
+    http_status_class: str = "unavailable",
+    amap_status: object = None,
+    amap_infocode: object = None,
+    response_bytes_received: bool,
+) -> None:
+    if state.provider_failure is not None:
+        return
+    stage = (
+        "result_window"
+        if suffix == "result_window"
+        else f"{request.operation}_{suffix}"
+    )
+    fact = _ProviderFailureFact(
+        stage=stage,
+        safe_failure_class=safe_failure_class,
+        http_status_class=http_status_class,
+        amap_status=_provider_code(amap_status),
+        amap_infocode=_provider_code(amap_infocode),
+        response_bytes_received=response_bytes_received,
+        district_attempts=state.district_attempts,
+        poi_attempts=state.poi_attempts,
+        total_network_attempts=state.network_calls,
+    )
+    AmapProviderFailureSummary(
+        failure_token=AMAP_PROVIDER_FAILURE,
+        failure_stage=fact.stage,
+        district_attempts=fact.district_attempts,
+        poi_attempts=fact.poi_attempts,
+        total_network_attempts=fact.total_network_attempts,
+        http_status_class=fact.http_status_class,
+        amap_status=fact.amap_status,
+        amap_infocode=fact.amap_infocode,
+        safe_failure_class=fact.safe_failure_class,
+        response_bytes_received=fact.response_bytes_received,
+        fer_classification_completed=True,
+        final_output_installed=False,
+        raw_provider_residue=0,
+        normalized_provider_residue=0,
+        temporary_residue=0,
+        key_leakage_detected=False,
+        retry_count=0,
+        fallback_count=0,
+    )
+    state.provider_failure = fact
+
+
+def _classified_parse_failure(
+    raw: bytes,
+) -> tuple[str, str, str]:
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        return "invalid_json", "unavailable", "unavailable"
+    if not isinstance(document, Mapping):
+        return "invalid_response_shape", "unavailable", "unavailable"
+    status = _provider_code(document.get("status"))
+    infocode = _provider_code(document.get("infocode"))
+    if (
+        status != "unavailable"
+        and infocode != "unavailable"
+        and (status != "1" or infocode != "10000")
+    ):
+        return "provider_api_error", status, infocode
+    return "invalid_response_shape", "unavailable", "unavailable"
 
 
 def _acquire_observation(
@@ -801,16 +1053,83 @@ def _acquire_observation(
 
     def runner(_: bytes) -> RunnerObservation:
         state.network_calls += 1
+        if request.operation == "district":
+            state.district_attempts += 1
+        else:
+            state.poi_attempts += 1
         started_at = _clock()
         try:
             raw = transport(request, credential)
-            if type(raw) is not bytes or len(raw) > _MAX_RESPONSE_BYTES:
-                raise _WireIssue("response_window")
+            if type(raw) is not bytes:
+                raise _WireIssue("response_shape")
+            if len(raw) > _MAX_RESPONSE_BYTES:
+                raise _WireIssue(
+                    "response_window",
+                    200,
+                    response_bytes_received=True,
+                )
+        except urllib.error.HTTPError as exc:
+            try:
+                http_status = int(exc.code)
+            finally:
+                exc.close()
+            _record_provider_failure(
+                state=state,
+                request=request,
+                suffix="http",
+                safe_failure_class="http_error",
+                http_status_class=_http_status_class(http_status),
+                response_bytes_received=False,
+            )
+            return RunnerObservation(
+                attempts=(
+                    AttemptObservation(
+                        attempt_id=f"attempt-{index:04d}",
+                        request_sha256=descriptor_hash,
+                        started_at=started_at,
+                        completed_at=_clock(),
+                        status="http_response_failure",
+                        http_status=http_status,
+                        response_bytes=None,
+                        response_sha256=None,
+                        content_type=None,
+                        retry_decision="not_retryable_http",
+                    ),
+                ),
+                retries=(),
+                response_phase=ResponsePhaseObservation(
+                    status="not_evaluated",
+                    failure_kind=None,
+                ),
+            )
         except _WireIssue as exc:
-            status = (
-                "http_response_failure"
-                if exc.kind == "http"
-                else "transport_failure"
+            if exc.kind == "http":
+                suffix = "http"
+                failure_class = "http_error"
+                status = "http_response_failure"
+                retry_decision = "not_retryable_http"
+            elif exc.kind == "response_window":
+                suffix = "result_window"
+                failure_class = "result_window_exhausted"
+                status = "transport_failure"
+                retry_decision = "retry_exhausted"
+            elif exc.kind == "response_shape":
+                suffix = "parse"
+                failure_class = "invalid_response_shape"
+                status = "transport_failure"
+                retry_decision = "retry_exhausted"
+            else:
+                suffix = "transport"
+                failure_class = "transport_error"
+                status = "transport_failure"
+                retry_decision = "retry_exhausted"
+            _record_provider_failure(
+                state=state,
+                request=request,
+                suffix=suffix,
+                safe_failure_class=failure_class,
+                http_status_class=_http_status_class(exc.http_status),
+                response_bytes_received=exc.response_bytes_received,
             )
             return RunnerObservation(
                 attempts=(
@@ -824,11 +1143,7 @@ def _acquire_observation(
                         response_bytes=None,
                         response_sha256=None,
                         content_type=None,
-                        retry_decision=(
-                            "not_retryable_http"
-                            if status == "http_response_failure"
-                            else "retry_exhausted"
-                        ),
+                        retry_decision=retry_decision,
                     ),
                 ),
                 retries=(),
@@ -838,6 +1153,13 @@ def _acquire_observation(
                 ),
             )
         except Exception:
+            _record_provider_failure(
+                state=state,
+                request=request,
+                suffix="transport",
+                safe_failure_class="transport_error",
+                response_bytes_received=False,
+            )
             return RunnerObservation(
                 attempts=(
                     AttemptObservation(
@@ -867,20 +1189,73 @@ def _acquire_observation(
         else:
             parsed = parse_amap_poi_response(raw)
         accepted = not parsed.problems and parsed.value is not None
-        if accepted:
-            response = parsed.value
-            accepted = response.status == "1" and response.infocode == "10000"
+        response: ParsedAmapDistrictResponse | ParsedAmapPoiResponse | None
+        response = parsed.value if accepted else None
+        if not accepted:
+            failure_class, amap_status, amap_infocode = (
+                _classified_parse_failure(raw)
+            )
+            _record_provider_failure(
+                state=state,
+                request=request,
+                suffix=(
+                    "api_status"
+                    if failure_class == "provider_api_error"
+                    else "parse"
+                ),
+                safe_failure_class=failure_class,
+                http_status_class="2xx",
+                amap_status=amap_status,
+                amap_infocode=amap_infocode,
+                response_bytes_received=True,
+            )
+        elif response.status != "1" or response.infocode != "10000":
+            accepted = False
+            _record_provider_failure(
+                state=state,
+                request=request,
+                suffix="api_status",
+                safe_failure_class="provider_api_error",
+                http_status_class="2xx",
+                amap_status=response.status,
+                amap_infocode=response.infocode,
+                response_bytes_received=True,
+            )
         if accepted and isinstance(response, ParsedAmapPoiResponse):
             try:
-                count = int(response.count) if response.count is not None else -1
+                if response.count is None:
+                    raise ValueError
+                count = int(response.count)
             except ValueError:
                 accepted = False
-            else:
-                accepted = (
-                    count == len(response.pois)
-                    and count <= _MAX_POIS
+                _record_provider_failure(
+                    state=state,
+                    request=request,
+                    suffix="parse",
+                    safe_failure_class="invalid_response_shape",
+                    http_status_class="2xx",
+                    amap_status=response.status,
+                    amap_infocode=response.infocode,
+                    response_bytes_received=True,
+                )
+            if accepted and (
+                count != len(response.pois)
+                or count > _MAX_POIS
+                or count < 0
+            ):
+                accepted = False
+                _record_provider_failure(
+                    state=state,
+                    request=request,
+                    suffix="result_window",
+                    safe_failure_class="result_window_exhausted",
+                    http_status_class="2xx",
+                    amap_status=response.status,
+                    amap_infocode=response.infocode,
+                    response_bytes_received=True,
                 )
         if accepted:
+            assert response is not None
             bound = bind_amap_observation_policy(
                 response,
                 mode=AmapObservationMode.EPHEMERAL_LIVE,
@@ -889,6 +1264,17 @@ def _acquire_observation(
             accepted = not bound.problems and bound.value is not None
             if accepted:
                 observation_holder.append(bound.value)
+            else:
+                _record_provider_failure(
+                    state=state,
+                    request=request,
+                    suffix="parse",
+                    safe_failure_class="invalid_response_shape",
+                    http_status_class="2xx",
+                    amap_status=response.status,
+                    amap_infocode=response.infocode,
+                    response_bytes_received=True,
+                )
         return RunnerObservation(
             attempts=(
                 AttemptObservation(
@@ -943,6 +1329,8 @@ def _acquire_observation(
     ):
         raise _RunIssue(AMAP_P2_CLEANUP_FAILED)
     if result.document.get("status") != "succeeded" or not observation_holder:
+        if state.provider_failure is None:
+            raise _RunIssue(AMAP_P2_PUBLIC_PARSER_INTEGRATION_BLOCKED)
         raise _RunIssue(AMAP_PROVIDER_FAILURE)
     observation = observation_holder[0]
     state.observations.append(observation)
@@ -1704,7 +2092,9 @@ def run_amap_ephemeral_live(
     output_root: Path,
     *,
     transport: AmapLiveTransport | None = None,
-) -> ValidationResult[AmapEphemeralLiveSummary]:
+) -> ValidationResult[
+    AmapEphemeralLiveSummary | AmapProviderFailureSummary
+]:
     """Resolve live places and install only the safe nine-file output."""
 
     try:
@@ -1847,6 +2237,7 @@ def run_amap_ephemeral_live(
         issue = _RunIssue(AMAP_P2_PUBLIC_PARSER_INTEGRATION_BLOCKED)
 
     cleanup_ok = _remove_tree(temp_root)
+    provider_failure = state.provider_failure
     credential = ""
     state.observations.clear()
     state.response_hashes.clear()
@@ -1855,6 +2246,11 @@ def run_amap_ephemeral_live(
         return _failure(AMAP_P2_CLEANUP_FAILED)
     if issue is not None:
         _remove_tree(safe_stage)
+        if (
+            issue.code == AMAP_PROVIDER_FAILURE
+            and provider_failure is not None
+        ):
+            return _provider_failure_result(provider_failure)
         return _failure(issue.code)
     if safe is None or safe_stage is None:
         _remove_tree(safe_stage)
@@ -1955,6 +2351,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output_root,
     )
     if result.problems:
+        if isinstance(result.value, AmapProviderFailureSummary):
+            summary = result.value
+            print(
+                json.dumps(
+                    {
+                        "failure_token": summary.failure_token,
+                        "failure_stage": summary.failure_stage,
+                        "district_attempts": summary.district_attempts,
+                        "poi_attempts": summary.poi_attempts,
+                        "total_network_attempts": (
+                            summary.total_network_attempts
+                        ),
+                        "http_status_class": summary.http_status_class,
+                        "amap_status": summary.amap_status,
+                        "amap_infocode": summary.amap_infocode,
+                        "safe_failure_class": summary.safe_failure_class,
+                        "response_bytes_received": (
+                            summary.response_bytes_received
+                        ),
+                        "fer_classification_completed": (
+                            summary.fer_classification_completed
+                        ),
+                        "final_output_installed": (
+                            summary.final_output_installed
+                        ),
+                        "raw_provider_residue": (
+                            summary.raw_provider_residue
+                        ),
+                        "normalized_provider_residue": (
+                            summary.normalized_provider_residue
+                        ),
+                        "temporary_residue": summary.temporary_residue,
+                        "key_leakage_detected": (
+                            summary.key_leakage_detected
+                        ),
+                        "retry_count": summary.retry_count,
+                        "fallback_count": summary.fallback_count,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+            )
+            return 1
         for problem in result.problems:
             print(
                 json.dumps(
@@ -1975,7 +2416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 1
     summary = result.value
-    if summary is None:
+    if not isinstance(summary, AmapEphemeralLiveSummary):
         return 1
     print(
         json.dumps(
@@ -2005,6 +2446,7 @@ __all__ = [
     "AMAP_P2_PUBLIC_PARSER_INTEGRATION_BLOCKED",
     "AmapEphemeralLiveConfig",
     "AmapEphemeralLiveSummary",
+    "AmapProviderFailureSummary",
     "AmapLiveRequest",
     "AmapLiveTransport",
     "SafeSeedResult",
