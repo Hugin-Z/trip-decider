@@ -1,31 +1,147 @@
 # trip-decider
 
-trip-decider 从模糊出游意图出发，选出现实可达的目的地，并排出一份真正走得通、能解释、能修改的行程。
+一个以证据边界和约束合同为核心的可审计旅行决策原型。
 
-当前仓库处于 v0 的 Work Unit 0：仓库基线、handbook 上下文、D0 prior-art，以及目录和工件的文档级契约。冻结产品定义见 [`PLAN.md`](PLAN.md)，当前执行范围见 [`plans/work-unit-0-bootstrap-d0.md`](plans/work-unit-0-bootstrap-d0.md)。
+trip-decider 不让 LLM 直接编行程。它先验证地点身份、证据边界和显式约束，再决定什么能够进入规划；不确定或未匹配的地点会作为 blocker 保留下来。
 
-## 当前能力边界
+## 当前演示
 
-当前没有业务实现：
+公开示例输入是一份包含江岭、李坑、篁岭和庆源的婺源两日请求。当前离线结果是：
 
-- 没有 POI 或高德 API 接入；
-- 没有实际 JSON Schema、领域模型或 validator；
-- 没有 fixture、测试、CLI 或配置加载；
-- 没有约束证明、行程求解、重排或 HTML 行程卡；
-- 没有能力 A（目的地发现）实现或 Web UI。
+| 输入地点 | 结果 |
+| --- | --- |
+| 江岭 | Day 1，进入条件化粗计划 |
+| 李坑 | Day 2，进入条件化粗计划 |
+| 篁岭 | identity ambiguous，等待确认 |
+| 庆源 | unmatched，当前候选池未匹配 |
 
-WU0 的文档契约不能被表述为上述能力已经可运行。
+计划状态是 `conditionally_feasible`，并保持 `publishable=false`。这是一份可审计的粗计划，不是最佳路线、完整旅游攻略或可直接发布的行程。
 
-## 工程纪律
+## 为什么这样设计
 
-- `PLAN.md` 是冻结的产品 Source of Truth，不直接修改；
-- 每个工作单元分别执行 Plan → Hugin 审核 → Execute → Review → Hugin 验收；
-- 事实状态不得高于证据实际支持；
-- 启发式没有找到方案不等于已经证明无解；
-- 语义和检索类真实 anchor 不由 AI 捏造；
-- 不提交 key、token、`.env`、真实旅行隐私或未授权真实 fixture；
-- 不自动创建远端、不 push、不提前开始下一个工作单元。
+普通旅行 Agent 容易在地点同名时静默选择一个身份，在缺少来源时仍给出确定结论，或在没有路线、营业时间证据时声称行程可行。另一个常见错误，是把当前算法的 `no_plan_found` 写成数学上已经证明的 `proven_infeasible`。
 
-## Secrets
+trip-decider 采用以下边界：
 
-WU0 不需要高德 key。未来高德适配器使用环境变量 `TRIP_DECIDER_AMAP_API_KEY`；真实 key 不得写入仓库或日志。
+- provider identity 原样保留，不在采集层静默合并；
+- Evidence Gate 决定事实能否支撑后续阶段；
+- `constraints.yaml` 是求解阶段唯一的约束 Source of Truth；
+- `conditionally_feasible` 明示草案依赖尚未解决的条件；
+- `no_plan_found != proven_infeasible`；
+- ambiguous 和 unmatched seed 会显式传播到规划结果。
+
+## 架构
+
+```mermaid
+flowchart LR
+    A[Real OSM Anchor] --> B[Offline Recovery]
+    B --> C[Evidence Runtime]
+    C --> D[Constraint Projection]
+    D --> E[Coarse Planner]
+    E --> F[Static HTML Report]
+```
+
+- **Real OSM Anchor**：提供已提交、可回放的真实开放数据字节。
+- **Offline Recovery**：恢复候选身份、seed accounting 和 record-local facts。
+- **Evidence Runtime**：在 candidate-local 边界内生成证据工件和准入状态。
+- **Constraint Projection**：只消费规范化约束，不从自然语言猜测求解条件。
+- **Coarse Planner**：产生可解释的按日粗分配，并保留 blocker。
+- **Static HTML Report**：把正式工件渲染为无脚本、可离线打开的报告。
+
+## Quick Start
+
+前置要求：
+
+- Windows PowerShell；
+- Python `>=3.11,<3.12`；
+- 从仓库根目录执行命令；
+- 项目 `.venv` 按 `requirements.lock` 准备。
+
+首次准备环境：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --requirement .\requirements.lock
+```
+
+运行婺源两日演示：
+
+```powershell
+$demoRoot = Join-Path $env:TEMP 'trip-decider-wuyuan-demo'
+
+if (Test-Path -LiteralPath $demoRoot) {
+    Remove-Item -LiteralPath $demoRoot -Recurse -Force
+}
+
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\run_wuyuan_demo.ps1 `
+  -OutputRoot $demoRoot `
+  -OpenReport
+```
+
+演示脚本本身不会删除或覆盖已有输出目录。上面的清理命令只删除用户可见、明确指定的系统临时演示目录。
+
+成功时 CLI 输出：
+
+```text
+status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=report/index.html
+```
+
+## 输出
+
+一次成功运行产生恰好 13 个文件：
+
+- `recovery/`：4 个候选恢复与 accounting 工件；
+- `evidence/`：3 个 Evidence Runtime 工件；
+- `planning/`：4 个计划、planning gate 与 violations 工件；
+- `report/index.html`：1 个静态行程报告；
+- `run-summary.json`：1 个顶层运行摘要。
+
+最值得查看的是：
+
+- `report/index.html`：面向人的离线报告；
+- `planning/plan.json`：条件化粗计划；
+- `planning/planning-gate.json`：未进入计划的 identity blocker；
+- `evidence/evidence.json`：正交化的证据状态；
+- `recovery/candidates.json`：未静默合并的 provider identities；
+- `run-summary.json`：阶段结果、输出引用和网络/LLM 计数。
+
+## 核心工程特点
+
+- 契约驱动、可追溯的 artifact 管线；
+- 真实开放数据 anchor 与离线 replay；
+- candidate identity 不静默合并；
+- support、derivation、freshness 和 source 正交表达；
+- 规范化 constraints 作为 solver SSOT；
+- 确定性输出、失败传播、事务安装与 rollback；
+- 演示全程不调用网络或 LLM。
+
+## 当前边界
+
+- 这是原型，不是生产系统；
+- 当前只有一个已提交的真实数据 anchor，不声称支持任意城市；
+- Evidence 的当前支持上限仍是 `unknown`，不代表来源已经核实；
+- 没有路线、交通时间、营业时间或活动时长；
+- 不包含地图、酒店、天气、费用、订票或景点推荐；
+- ambiguous 地点需要用户确认后才能进一步决策；
+- 当前 HTML 计划不可直接发布。
+
+## 验证状态
+
+当前仓库已机械复核：
+
+- tests：210；
+- schemas：11；
+- fixture directories / embedded documents / dirty cases：7 / 40 / 7；
+- 演示 network / LLM calls：0 / 0。
+
+## 项目结构
+
+- [`src/trip_decider/`](src/trip_decider/)：离线运行时与阶段边界；
+- [`schemas/`](schemas/)：artifact JSON Schema；
+- [`fixtures/`](fixtures/)：合成合同案例与真实 replay anchor；
+- [`examples/`](examples/)：可直接运行的公开输入；
+- [`scripts/`](scripts/)：演示和独立验证入口；
+- [`docs/reviews/`](docs/reviews/)：可复核的工作单元 Review 证据。
+
+项目以简洁的 Plan → Execute → Review 纪律推进；代码能力、文档声明和实际验证必须保持一致。
