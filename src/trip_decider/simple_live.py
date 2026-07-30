@@ -316,6 +316,102 @@ def _district_identity(
     }
 
 
+def query_destination_district(
+    destination: str,
+) -> dict[str, object]:
+    """Resolve one destination district without persisting provider bytes."""
+
+    anchor = destination.strip()
+    if not anchor:
+        raise ValueError("destination must be non-empty text")
+    credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
+    if not isinstance(credential, str) or not credential:
+        return {
+            "evidence_status": "missing",
+            "domain": "map",
+            "missing_reason": "amap_web_service_key_not_configured",
+            "network_attempts": 0,
+        }
+    response = _http_get(
+        operation="district",
+        endpoint_path=_DISTRICT_PATH,
+        parameters={
+            "extensions": "base",
+            "keywords": anchor,
+            "subdistrict": "0",
+        },
+        credential=credential,
+    )
+    observation = _parse_and_bind_district(response)
+    parsed = observation.response
+    if not isinstance(parsed, ParsedAmapDistrictResponse):
+        raise _LiveFailure(
+            stage="district_parse",
+            http_status=response.http_status,
+            amap_status=response.amap_status,
+            amap_infocode=response.amap_infocode,
+            python_exception_type="TypeError",
+            response_bytes_received=True,
+            attempts=response.attempts,
+        )
+    matches = [
+        item
+        for item in parsed.districts
+        if _normalized(item.name) == _normalized(anchor)
+    ]
+    retrieved_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    if not matches:
+        return {
+            "evidence_status": "missing",
+            "domain": "map",
+            "missing_reason": "exact_destination_district_not_found",
+            "network_attempts": response.attempts,
+            "retrieved_at": retrieved_at,
+        }
+    if len(matches) > 1:
+        return {
+            "evidence_status": "conflicting",
+            "domain": "map",
+            "conflict_details": [
+                "multiple_exact_destination_districts"
+            ],
+            "alternatives": [
+                {
+                    "name": item.name,
+                    "adcode": item.adcode,
+                    "level": item.level,
+                }
+                for item in matches
+            ],
+            "network_attempts": response.attempts,
+            "retrieved_at": retrieved_at,
+            "source": {
+                "provider": "高德地图 Web 服务",
+                "scope": "行政区查询",
+                "retrieved_at": retrieved_at,
+            },
+        }
+    match = matches[0]
+    return {
+        "evidence_status": "sourced",
+        "domain": "map",
+        "destination": {
+            "name": match.name,
+            "adcode": match.adcode,
+            "level": match.level,
+        },
+        "network_attempts": response.attempts,
+        "retrieved_at": retrieved_at,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": "行政区查询",
+            "retrieved_at": retrieved_at,
+        },
+    }
+
+
 def _plain(value: object) -> object:
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>trip-decider · 旅行决策工作台</title>
+  <title>trip-decider · 旅行规划工作台</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
@@ -16,217 +16,91 @@
         <small>旅行决策工作台</small>
       </span>
     </a>
-    <div class="stage-rail" aria-label="产品阶段">
-      <span class="stage-pill active" id="discover-stage-pill">1 · Discover</span>
-      <span class="stage-line"></span>
-      <span class="stage-pill" id="plan-stage-pill">2 · Plan</span>
-    </div>
-    <div class="runtime-status">
-      <span class="runtime-pill" id="ai-status">检查 AI 配置…</span>
-      <span class="runtime-pill" id="map-config-status">检查地图配置…</span>
-    </div>
+    <span class="runtime-pill" id="runtime-status">等待 Codex</span>
   </header>
 
-  <main class="product-shell">
-    <section id="recommendations-section" class="product-view discover-view" aria-live="polite">
-      <aside class="input-rail">
-        <div class="rail-heading">
-          <p class="eyebrow">Discover</p>
-          <h1>先确定现实可达的目的地</h1>
-          <p>表单是草稿；只有提交后，右侧才会生成与本次条件绑定的候选。</p>
-        </div>
-
-        <form id="discover-form" class="intent-panel">
-          <div class="field wide">
-            <label for="intent-text">用一句话描述想法（可选）</label>
-            <textarea id="intent-text" rows="2" placeholder="例如：想看山水古村，节奏不要太赶"></textarea>
-            <small class="field-help">配置 OpenAI 后可解析模糊偏好；数字仍以结构化字段为准。</small>
-          </div>
-          <div class="field wide">
-            <label for="origin">从哪里出发</label>
-            <input id="origin" name="origin" autocomplete="address-level2" required>
-          </div>
-          <div class="field wide">
-            <label for="earliest-departure-at">最早可出发</label>
-            <input id="earliest-departure-at" name="earliest-departure-at" type="datetime-local" required>
-          </div>
-          <div class="field wide">
-            <label for="latest-return-at">最晚需返回</label>
-            <input id="latest-return-at" name="latest-return-at" type="datetime-local" required>
-          </div>
-          <div class="duration-readout wide">
-            <span>自动计算可用时长</span>
-            <strong id="available-duration">请先选择完整时间窗</strong>
-          </div>
-          <div class="field">
-            <label for="budget">总预算</label>
-            <div class="unit-input">
-              <span>¥</span>
-              <input id="budget" name="budget" type="number" min="0" step="100" required>
-            </div>
-          </div>
-          <div class="field">
-            <label for="travelers">同行人数</label>
-            <div class="unit-input">
-              <input id="travelers" name="travelers" type="number" min="1" max="20" step="1" required>
-              <span>人</span>
-            </div>
-          </div>
-
-          <fieldset class="choice-group wide">
-            <legend>想看什么</legend>
-            <div class="chips">
-              <label><input type="checkbox" name="theme" value="山水"><span>山水</span></label>
-              <label><input type="checkbox" name="theme" value="海"><span>海</span></label>
-              <label><input type="checkbox" name="theme" value="古村"><span>古村</span></label>
-              <label><input type="checkbox" name="theme" value="城市"><span>城市</span></label>
-              <label><input type="checkbox" name="theme" value="人文"><span>人文</span></label>
-              <label><input type="checkbox" name="theme" value="美食"><span>美食</span></label>
-            </div>
-          </fieldset>
-
-          <fieldset class="choice-group wide">
-            <legend>旅行节奏</legend>
-            <div class="segmented">
-              <label><input type="radio" name="pace" value="轻松"><span>轻松</span></label>
-              <label><input type="radio" name="pace" value="适中"><span>适中</span></label>
-              <label><input type="radio" name="pace" value="紧凑"><span>紧凑</span></label>
-            </div>
-          </fieldset>
-
-          <fieldset class="choice-group wide">
-            <legend>交通偏好</legend>
-            <div class="chips compact">
-              <label><input type="checkbox" name="transport" value="高铁"><span>高铁</span></label>
-              <label><input type="checkbox" name="transport" value="自驾"><span>自驾</span></label>
-              <label><input type="checkbox" name="transport" value="飞机"><span>飞机</span></label>
-            </div>
-          </fieldset>
-
-          <button type="submit" class="button primary full">
-            验证并生成候选
-            <span aria-hidden="true">→</span>
-          </button>
-          <p class="form-status wide" id="form-status" role="status"></p>
-        </form>
-      </aside>
-
-      <section class="result-pane discover-results">
-        <div class="result-toolbar">
-          <div>
-            <p class="eyebrow">候选与证据</p>
-            <h2>目的地候选</h2>
-          </div>
-          <div class="legend">
-            <span><i class="dot sourced"></i>有来源</span>
-            <span><i class="dot pending"></i>缺失或待核验</span>
-          </div>
-        </div>
-
-        <div id="discover-empty" class="empty-state">
-          <strong>尚未提交旅行需求</strong>
-          <p>填写左侧时间窗、预算和偏好后，候选会在这里出现。</p>
-        </div>
-
-        <div id="query-progress" class="query-progress hidden" aria-live="polite">
-          <p class="progress-title">AI / 工具查询进度</p>
-          <ol>
-            <li data-progress="understand">正在理解需求</li>
-            <li data-progress="intercity">正在验证跨城交通</li>
-            <li data-progress="local_route">正在查询当地路线</li>
-            <li data-progress="facts">正在核验门票/开放时间</li>
-            <li data-progress="plan">正在生成可行方案</li>
-          </ol>
-        </div>
-
-        <div id="stale-results" class="stale-banner hidden">
-          左侧草稿已修改。以下结果已失效，请重新提交后再选择目的地。
-        </div>
-
-        <div id="discover-result-content" class="hidden">
-          <div class="request-summary" id="request-summary"></div>
-          <div class="destination-grid" id="destination-grid"></div>
-          <p class="honesty-note">候选状态只反映已经执行的数据检查；缺少真实来源的数字不会由 AI 补写。</p>
-        </div>
-      </section>
+  <main class="app-shell">
+    <section id="landing" class="landing">
+      <div class="landing-card">
+        <h1>请从 Codex 发起任务</h1>
+        <p class="page-status" id="landing-status" role="status"></p>
+      </div>
     </section>
 
-    <section id="plan-section" class="product-view plan-view hidden" aria-live="polite">
-      <aside class="workspace-column controls-column">
-        <div class="plan-nav">
-          <button type="button" class="button ghost" id="back-button">← 返回候选</button>
-          <span class="engine-badge">Plan</span>
+    <section id="confirmation" class="confirmation hidden" aria-live="polite">
+      <article class="confirmation-card">
+        <p class="eyebrow">需求确认</p>
+        <h1>请确认这次旅行条件</h1>
+        <p class="section-copy">
+          可直接补充或修改以下条件。字段完整并确认后，系统才会开始调用工具。
+        </p>
+        <form id="intent-form" class="intent-form">
+          <div id="intent-summary" class="intent-summary"></div>
+        </form>
+        <section id="missing-panel" class="missing-panel hidden">
+          <h2>还需要补充</h2>
+          <ul id="missing-questions"></ul>
+          <p>请直接在上方补充，完成后即可确认。</p>
+        </section>
+        <div class="action-row">
+          <button class="button primary" type="button" id="confirm-button">
+            确认并开始
+          </button>
         </div>
-        <div class="plan-title-block">
-          <p class="eyebrow">详细规划</p>
-          <h2 id="plan-title">详细行程</h2>
-          <p id="plan-subtitle"></p>
+        <p class="page-status" id="confirmation-status" role="status"></p>
+      </article>
+    </section>
+
+    <section id="workbench" class="workbench hidden" aria-live="polite">
+      <aside class="intent-column">
+        <div class="column-heading">
+          <span>已确认条件</span>
+          <strong id="mode-label"></strong>
         </div>
-        <div id="plan-stale-results" class="stale-banner hidden">
-          Discover 表单已修改，本计划已失效。
-        </div>
-        <div id="condition-panel"></div>
-        <div class="panel">
-          <div class="panel-heading">
-            <h3>当地必去地点</h3>
-            <span class="engine-badge">simple_live</span>
-          </div>
-          <p class="muted">使用现有高德 POI 消歧和真实路线能力；多候选必须由你明确选择。</p>
-          <label class="stacked-label" for="local-places">每行一个地点</label>
-          <textarea id="local-places" rows="4" placeholder="例如：&#10;江岭&#10;李坑&#10;篁岭"></textarea>
-          <div class="inline-fields">
-            <label>当地交通
-              <select id="local-mode">
-                <option value="driving">驾车</option>
-                <option value="walking">步行</option>
-              </select>
-            </label>
-            <label>单点时长
-              <select id="visit-minutes">
-                <option value="90">90 分钟</option>
-                <option value="120" selected>120 分钟</option>
-                <option value="180">180 分钟</option>
-              </select>
-            </label>
-          </div>
-          <button type="button" class="button secondary full" id="local-plan-button">解析地点并生成当地计划</button>
-          <p class="form-status" id="local-plan-status" role="status"></p>
-        </div>
+        <div id="confirmed-intent" class="panel"></div>
+        <button class="button secondary full-width" type="button" id="edit-button">
+          返回修改
+        </button>
       </aside>
 
-      <section class="workspace-column map-column">
-        <div class="column-header">
-          <span class="column-label">地图与路线</span>
-          <span id="map-runtime-status" class="engine-badge">读取配置…</span>
+      <section class="progress-column">
+        <div class="column-heading">
+          <span>规划进度</span>
+          <strong id="run-status">准备开始</strong>
         </div>
-        <div class="map-shell" id="map-shell">
-          <div id="amap-container" class="amap-container"></div>
-          <div class="map-state" id="map-state">
-            <strong>地图尚未加载</strong>
-            <p>选择目的地并取得带坐标的真实地点后显示。</p>
-          </div>
+
+        <ol class="progress-grid" id="progress-grid">
+          <li data-step="understand" data-state="waiting">
+            <span>1</span><strong>理解需求</strong><em>等待</em>
+          </li>
+          <li data-step="collect" data-state="waiting">
+            <span>2</span><strong>查询真实数据</strong><em>等待</em>
+          </li>
+          <li data-step="validate" data-state="waiting">
+            <span>3</span><strong>验证可行性</strong><em>等待</em>
+          </li>
+          <li data-step="plan" data-state="waiting">
+            <span>4</span><strong>生成行程</strong><em>等待</em>
+          </li>
+        </ol>
+
+        <div class="run-message" id="run-message">
+          <span class="working-dot"></span>
+          <p>确认后开始执行。</p>
         </div>
-        <div class="module-grid" id="module-grid"></div>
-        <div class="local-result hidden" id="local-result"></div>
+
+        <details class="execution-details">
+          <summary>执行详情</summary>
+          <div id="event-stream" class="event-stream"></div>
+        </details>
       </section>
 
-      <aside class="workspace-column timeline-column">
-        <div class="column-label">每日时间轴与费用</div>
-        <div id="plan-progress" class="query-progress compact-progress">
-          <ol>
-            <li data-plan-progress="understand">正在理解需求</li>
-            <li data-plan-progress="intercity">正在验证跨城交通</li>
-            <li data-plan-progress="local_route">正在查询当地路线</li>
-            <li data-plan-progress="facts">正在核验门票/开放时间</li>
-            <li data-plan-progress="plan">正在生成可行方案</li>
-          </ol>
+      <aside id="result-column" class="output-column hidden">
+        <div class="column-heading">
+          <span>规划结果</span>
+          <strong id="result-status"></strong>
         </div>
-        <div class="timeline" id="timeline"></div>
-        <div class="panel budget-panel" id="budget-panel"></div>
-        <div class="panel missing-panel">
-          <h3>失败、冲突与缺失项</h3>
-          <ul id="missing-sources"></ul>
-        </div>
+        <div id="result-area" class="result-area"></div>
       </aside>
     </section>
   </main>

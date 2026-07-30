@@ -17,7 +17,6 @@ from decimal import Decimal, InvalidOperation
 
 _RAIL_ORIGIN = "https://kyfw.12306.cn"
 _STATION_JS_PATH = "/otn/resources/js/framework/station_name.js"
-_LEFT_TICKET_PATH = "/otn/leftTicket/query"
 _PRICE_PATH = "/otn/leftTicket/queryTicketPrice"
 _TIMEOUT_SECONDS = 15
 _TRANSPORT_RETRIES = 1
@@ -95,6 +94,7 @@ class _RailClient:
             urllib.request.HTTPCookieProcessor(cookie_jar)
         )
         self.network_attempts = 0
+        self._left_ticket_path: str | None = None
 
     def initialize_web_session(self) -> None:
         body = self._get("/otn/leftTicket/init")
@@ -103,6 +103,21 @@ class _RailClient:
                 stage="rail_session_initialize",
                 python_exception_type="EmptyResponseError",
             )
+        try:
+            text = body.decode("utf-8")
+            match = re.search(
+                r"CLeftTicketUrl\s*=\s*'(leftTicket/query[A-Za-z0-9_]*)'",
+                text,
+            )
+            if match is None:
+                raise ValueError("left-ticket query path was not declared")
+            self._left_ticket_path = "/otn/" + match.group(1)
+        except (UnicodeError, ValueError) as error:
+            raise _RailFailure(
+                stage="rail_session_parse",
+                python_exception_type=type(error).__name__,
+                response_bytes_received=True,
+            ) from None
 
     def _get(
         self,
@@ -114,18 +129,32 @@ class _RailClient:
             if parameters
             else ""
         )
+        headers = {
+            "Accept": (
+                "text/html,application/xhtml+xml,*/*;q=0.8"
+                if path == "/otn/leftTicket/init"
+                else (
+                    "text/javascript,*/*;q=0.8"
+                    if path == _STATION_JS_PATH
+                    else "application/json,text/javascript,*/*;q=0.8"
+                )
+            ),
+            "Referer": _RAIL_ORIGIN + "/otn/leftTicket/init",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/138.0.0.0 Safari/537.36"
+            ),
+        }
+        if path not in {
+            "/otn/leftTicket/init",
+            _STATION_JS_PATH,
+        }:
+            headers["X-Requested-With"] = "XMLHttpRequest"
         request = urllib.request.Request(
             _RAIL_ORIGIN + path + query,
             method="GET",
-            headers={
-                "Accept": "application/json,text/javascript,*/*;q=0.8",
-                "Referer": _RAIL_ORIGIN + "/otn/leftTicket/init",
-                "User-Agent": (
-                    "Mozilla/5.0 trip-decider/0.1 "
-                    "(official-rail-live-query)"
-                ),
-                "X-Requested-With": "XMLHttpRequest",
-            },
+            headers=headers,
         )
         for retry_index in range(_TRANSPORT_RETRIES + 1):
             self.network_attempts += 1
@@ -212,8 +241,13 @@ class _RailClient:
         destination_code: str,
         station_names: dict[str, str],
     ) -> list[_Train]:
+        if self._left_ticket_path is None:
+            raise _RailFailure(
+                stage="rail_session_initialize",
+                python_exception_type="MissingQueryPathError",
+            )
         body = self._get(
-            _LEFT_TICKET_PATH,
+            self._left_ticket_path,
             {
                 "leftTicketDTO.train_date": travel_date.isoformat(),
                 "leftTicketDTO.from_station": origin_code,

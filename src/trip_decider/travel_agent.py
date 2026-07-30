@@ -13,17 +13,29 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import json
+import os
+from pathlib import Path
 from threading import Condition, RLock
 from typing import Any
 from uuid import uuid4
 
 
 _PROGRESS_STEPS = (
-    ("understand", "正在理解需求"),
-    ("intercity", "正在验证跨城交通"),
-    ("local_route", "正在查询当地路线"),
-    ("facts", "正在核验门票/开放时间"),
-    ("plan", "正在生成可行方案"),
+    ("understand", "理解需求"),
+    ("collect", "查询真实数据"),
+    ("validate", "验证可行性"),
+    ("plan", "生成行程"),
+)
+
+_REQUIRED_INTENT_FIELDS = (
+    "origin",
+    "earliest_departure_at",
+    "latest_return_at",
+    "travelers",
+    "total_budget_cny",
+    "pace",
+    "transport_preferences",
 )
 
 
@@ -39,11 +51,19 @@ class TaskMode(str, Enum):
     PLAN_AUDIT = "PLAN_AUDIT"
 
 
+class AgentRuntimeMode(str, Enum):
+    """How a structured intent reaches the model-neutral runtime."""
+
+    CODEX_HOSTED = "CODEX_HOSTED"
+    STANDALONE_WEB = "STANDALONE_WEB"
+
+
 class RunStatus(str, Enum):
     AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
     CONFIRMED = "CONFIRMED"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
+    BLOCKED = "BLOCKED"
     FAILED = "FAILED"
 
 
@@ -131,33 +151,84 @@ class TravelIntent:
             "custom",
         }:
             raise TravelAgentError("unsupported pace")
+        origin = _optional_text(value.get("origin"), "origin")
+        transport_preferences = _text_tuple(
+            value.get("transport_preferences", ()),
+            "transport_preferences",
+        )
+        supplied_missing = _text_tuple(
+            value.get("missing_fields", ()),
+            "missing_fields",
+        )
+        inferred_missing = [
+            field_name
+            for field_name, field_value in (
+                ("origin", origin),
+                ("earliest_departure_at", earliest),
+                ("latest_return_at", latest),
+                ("travelers", travelers),
+                (
+                    "total_budget_cny",
+                    float(budget) if budget is not None else None,
+                ),
+                ("pace", pace),
+                ("transport_preferences", transport_preferences),
+            )
+            if field_value is None or field_value == ()
+        ]
+        if (
+            parsed_mode is TaskMode.ANCHORED_PLAN
+            and destination is None
+        ):
+            inferred_missing.append("destination_anchor")
+        missing = tuple(
+            dict.fromkeys((*inferred_missing, *supplied_missing))
+        )
         return cls(
             task_mode=parsed_mode,
-            origin=_optional_text(value.get("origin"), "origin"),
+            origin=origin,
             destination_anchor=destination,
             earliest_departure_at=earliest,
             latest_return_at=latest,
             travelers=travelers,
             total_budget_cny=float(budget) if budget is not None else None,
             pace=pace,
-            transport_preferences=_text_tuple(
-                value.get("transport_preferences", ()),
-                "transport_preferences",
-            ),
+            transport_preferences=transport_preferences,
             themes=_text_tuple(value.get("themes", ()), "themes"),
             needs_confirmation=_text_tuple(
                 value.get("needs_confirmation", ()),
                 "needs_confirmation",
             ),
-            missing_fields=_text_tuple(
-                value.get("missing_fields", ()),
-                "missing_fields",
-            ),
+            missing_fields=missing,
             interpretation=str(value.get("interpretation", "")),
             classification_basis=str(
                 value.get("classification_basis", "caller_supplied")
             ),
         )
+
+    @property
+    def blocking_missing_fields(self) -> tuple[str, ...]:
+        """Return fields that prohibit confirmation and execution."""
+
+        values: dict[str, object] = {
+            "origin": self.origin,
+            "earliest_departure_at": self.earliest_departure_at,
+            "latest_return_at": self.latest_return_at,
+            "travelers": self.travelers,
+            "total_budget_cny": self.total_budget_cny,
+            "pace": self.pace,
+            "transport_preferences": self.transport_preferences,
+            "destination_anchor": self.destination_anchor,
+        }
+        required = list(_REQUIRED_INTENT_FIELDS)
+        if self.task_mode is TaskMode.ANCHORED_PLAN:
+            required.append("destination_anchor")
+        inferred = [
+            field_name
+            for field_name in required
+            if values[field_name] is None or values[field_name] == ()
+        ]
+        return tuple(dict.fromkeys((*inferred, *self.missing_fields)))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -474,15 +545,40 @@ RevisionExecutor = Callable[
 
 
 class InMemoryAgentStore:
-    """Process-local session/run/event storage for the local product."""
+    """Session/run/event storage with optional durable runtime files."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        runtime_root: Path | str | None = None,
+    ) -> None:
         self._lock = RLock()
         self._condition = Condition(self._lock)
         self._sessions: dict[str, AgentSession] = {}
         self._runs: dict[str, AgentRun] = {}
         self._events: dict[str, list[AgentEvent]] = {}
         self._sequence = 0
+        self._runtime_root = (
+            Path(runtime_root).resolve()
+            if runtime_root is not None
+            else None
+        )
+        if self._runtime_root is not None:
+            self._runtime_root.mkdir(parents=True, exist_ok=True)
+            self._load_runtime()
+
+    @property
+    def runtime_root(self) -> Path | None:
+        return self._runtime_root
+
+    def run_directory(self, run_id: str) -> Path | None:
+        if self._runtime_root is None:
+            return None
+        if not run_id or any(
+            character not in "0123456789abcdef-"
+            for character in run_id.lower()
+        ):
+            raise TravelAgentError("run_id is not safe for persistence")
+        return self._runtime_root / run_id
 
     def create(
         self,
@@ -542,6 +638,14 @@ class InMemoryAgentStore:
             except KeyError:
                 raise TravelAgentError("session does not exist") from None
 
+    def latest_run(self) -> AgentRun | None:
+        """Return the most recently created run, if one exists."""
+
+        with self._lock:
+            if not self._runs:
+                return None
+            return deepcopy(next(reversed(self._runs.values())))
+
     def confirm(
         self,
         run_id: str,
@@ -599,6 +703,25 @@ class InMemoryAgentStore:
             )
             return deepcopy(run)
 
+    def resume(self, run_id: str) -> AgentRun:
+        """Resume one completed run for an explicit evidence refresh."""
+
+        with self._condition:
+            run = self._required_run(run_id)
+            if run.status is not RunStatus.COMPLETED:
+                raise TravelAgentError(
+                    "only a completed run can resume evidence collection"
+                )
+            run.status = RunStatus.RUNNING
+            run.completed_at = None
+            self._append_unlocked(
+                run,
+                event_type="run.resumed",
+                status="running",
+                message="沿用当前会话和证据，开始显式重新查询。",
+            )
+            return deepcopy(run)
+
     def fail(self, run_id: str, error_code: str) -> AgentRun:
         with self._condition:
             run = self._required_run(run_id)
@@ -611,6 +734,31 @@ class InMemoryAgentStore:
                 status="failed",
                 message="旅行任务执行失败。",
                 details={"error_code": error_code},
+            )
+            return deepcopy(run)
+
+    def block(
+        self,
+        run_id: str,
+        result: Mapping[str, object],
+        reason_code: str,
+    ) -> AgentRun:
+        """Finish an action loop that cannot make honest progress."""
+
+        with self._condition:
+            run = self._required_run(run_id)
+            if run.status is not RunStatus.RUNNING:
+                raise TravelAgentError("run is not running")
+            run.status = RunStatus.BLOCKED
+            run.result = deepcopy(dict(result))
+            run.error_code = reason_code
+            run.completed_at = _now()
+            self._append_unlocked(
+                run,
+                event_type="run.blocked",
+                status="failed",
+                message="真实证据不足，当前运行已停止。",
+                details={"reason_code": reason_code},
             )
             return deepcopy(run)
 
@@ -699,11 +847,462 @@ class InMemoryAgentStore:
             details=deepcopy(dict(details or {})),
         )
         self._events[run.session_id].append(event)
+        self._persist_unlocked(run)
         self._condition.notify_all()
         return event
 
+    def _persist_unlocked(self, run: AgentRun) -> None:
+        run_directory = self.run_directory(run.run_id)
+        if run_directory is None:
+            return
+        run_directory.mkdir(parents=True, exist_ok=True)
+        session = self._sessions[run.session_id]
+        _atomic_json(run_directory / "session.json", session.to_dict())
+        _atomic_json(run_directory / "run.json", run.to_dict())
+        events = [
+            event.to_dict()
+            for event in self._events[run.session_id]
+            if event.run_id == run.run_id
+        ]
+        _atomic_json_lines(run_directory / "events.jsonl", events)
 
-DEFAULT_AGENT_STORE = InMemoryAgentStore()
+    def _load_runtime(self) -> None:
+        assert self._runtime_root is not None
+        loaded_events: dict[str, AgentEvent] = {}
+        loaded_runs: list[AgentRun] = []
+        for run_directory in sorted(self._runtime_root.iterdir()):
+            if not run_directory.is_dir():
+                continue
+            run_path = run_directory / "run.json"
+            session_path = run_directory / "session.json"
+            events_path = run_directory / "events.jsonl"
+            if not run_path.exists() and not session_path.exists():
+                continue
+            if not run_path.is_file() or not session_path.is_file():
+                raise TravelAgentError(
+                    "persisted runtime omitted run or session metadata"
+                )
+            run = _run_from_mapping(_read_json_object(run_path))
+            if run.run_id != run_directory.name:
+                raise TravelAgentError(
+                    "persisted run_id does not match its directory"
+                )
+            session = _session_from_mapping(
+                _read_json_object(session_path)
+            )
+            if run.session_id != session.session_id:
+                raise TravelAgentError(
+                    "persisted run and session linkage mismatch"
+                )
+            existing_session = self._sessions.get(session.session_id)
+            if (
+                existing_session is not None
+                and existing_session.created_at != session.created_at
+            ):
+                raise TravelAgentError(
+                    "persisted session creation time is inconsistent"
+                )
+            if (
+                existing_session is None
+                or len(session.run_ids) > len(existing_session.run_ids)
+            ):
+                self._sessions[session.session_id] = session
+            self._runs[run.run_id] = run
+            loaded_runs.append(run)
+            if events_path.exists():
+                for event in _read_json_lines(events_path):
+                    parsed = _event_from_mapping(event)
+                    if parsed.run_id != run.run_id:
+                        raise TravelAgentError(
+                            "persisted event belongs to another run"
+                        )
+                    loaded_events[parsed.event_id] = parsed
+        self._runs = {
+            run.run_id: run
+            for run in sorted(loaded_runs, key=lambda item: item.created_at)
+        }
+        runs_by_session: dict[str, list[AgentRun]] = {}
+        for run in self._runs.values():
+            runs_by_session.setdefault(run.session_id, []).append(run)
+        for session_id, session_runs in runs_by_session.items():
+            session = self._sessions[session_id]
+            ordered_ids = [run.run_id for run in session_runs]
+            session.run_ids = ordered_ids
+            session.current_run_id = ordered_ids[-1]
+        for event in sorted(
+            loaded_events.values(),
+            key=lambda item: item.sequence,
+        ):
+            self._events.setdefault(event.session_id, []).append(event)
+            self._sequence = max(self._sequence, event.sequence)
+        for session_id in self._sessions:
+            self._events.setdefault(session_id, [])
+
+
+def _read_json_object(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise TravelAgentError(
+            f"persisted runtime file is unreadable: {path.name}"
+        ) from error
+    if not isinstance(value, dict):
+        raise TravelAgentError(
+            f"persisted runtime file is not an object: {path.name}"
+        )
+    return value
+
+
+def _read_json_lines(path: Path) -> list[dict[str, object]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise TravelAgentError(
+            f"persisted runtime file is unreadable: {path.name}"
+        ) from error
+    values: list[dict[str, object]] = []
+    for line in lines:
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise TravelAgentError(
+                "persisted event line is invalid JSON"
+            ) from error
+        if not isinstance(value, dict):
+            raise TravelAgentError(
+                "persisted event line is not an object"
+            )
+        values.append(value)
+    return values
+
+
+def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _atomic_bytes(path, payload + b"\n")
+
+
+def _atomic_json_lines(
+    path: Path,
+    values: list[Mapping[str, object]],
+) -> None:
+    payload = b"".join(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+        for value in values
+    )
+    _atomic_bytes(path, payload)
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _loaded_optional_text(
+    value: object,
+    field_name: str,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TravelAgentError(
+            f"persisted {field_name} must be text or null"
+        )
+    stripped = value.strip()
+    return stripped or None
+
+
+def _loaded_required_text(value: object, field_name: str) -> str:
+    text = _loaded_optional_text(value, field_name)
+    if text is None:
+        raise TravelAgentError(f"persisted {field_name} is required")
+    return text
+
+
+def _loaded_text_tuple(
+    value: object,
+    field_name: str,
+) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise TravelAgentError(
+            f"persisted {field_name} must be an array of text"
+        )
+    return tuple(value)
+
+
+def _intent_from_persisted(
+    value: Mapping[str, object],
+) -> TravelIntent:
+    try:
+        task_mode = TaskMode(str(value["task_mode"]))
+    except (KeyError, ValueError):
+        raise TravelAgentError(
+            "persisted intent has invalid task_mode"
+        ) from None
+    travelers = value.get("travelers")
+    budget = value.get("total_budget_cny")
+    if travelers is not None and (
+        not isinstance(travelers, int)
+        or isinstance(travelers, bool)
+        or travelers < 1
+    ):
+        raise TravelAgentError(
+            "persisted intent has invalid travelers"
+        )
+    if budget is not None and (
+        not isinstance(budget, (int, float))
+        or isinstance(budget, bool)
+        or float(budget) <= 0
+    ):
+        raise TravelAgentError(
+            "persisted intent has invalid total_budget_cny"
+        )
+    return TravelIntent(
+        task_mode=task_mode,
+        origin=_loaded_optional_text(value.get("origin"), "origin"),
+        destination_anchor=_loaded_optional_text(
+            value.get("destination_anchor"),
+            "destination_anchor",
+        ),
+        earliest_departure_at=_loaded_optional_text(
+            value.get("earliest_departure_at"),
+            "earliest_departure_at",
+        ),
+        latest_return_at=_loaded_optional_text(
+            value.get("latest_return_at"),
+            "latest_return_at",
+        ),
+        travelers=travelers,
+        total_budget_cny=float(budget) if budget is not None else None,
+        pace=_loaded_optional_text(value.get("pace"), "pace"),
+        transport_preferences=_loaded_text_tuple(
+            value.get("transport_preferences", []),
+            "transport_preferences",
+        ),
+        themes=_loaded_text_tuple(value.get("themes", []), "themes"),
+        needs_confirmation=_loaded_text_tuple(
+            value.get("needs_confirmation", []),
+            "needs_confirmation",
+        ),
+        missing_fields=_loaded_text_tuple(
+            value.get("missing_fields", []),
+            "missing_fields",
+        ),
+        interpretation=_loaded_required_text(
+            value.get("interpretation", ""),
+            "interpretation",
+        )
+        if value.get("interpretation")
+        else "",
+        classification_basis=_loaded_required_text(
+            value.get("classification_basis"),
+            "classification_basis",
+        ),
+    )
+
+
+def _revision_from_persisted(
+    value: Mapping[str, object],
+) -> Revision:
+    forced_days = value.get("forced_days")
+    durations = value.get("event_duration_minutes")
+    if not isinstance(forced_days, Mapping) or not isinstance(
+        durations,
+        Mapping,
+    ):
+        raise TravelAgentError(
+            "persisted revision has invalid numeric mappings"
+        )
+    normalized_forced: dict[str, int] = {}
+    normalized_durations: dict[str, int] = {}
+    for source, target, field_name in (
+        (forced_days, normalized_forced, "forced_days"),
+        (durations, normalized_durations, "event_duration_minutes"),
+    ):
+        for key, item in source.items():
+            if (
+                not isinstance(key, str)
+                or not isinstance(item, int)
+                or isinstance(item, bool)
+            ):
+                raise TravelAgentError(
+                    f"persisted revision has invalid {field_name}"
+                )
+            target[key] = item
+    night_activity = value.get("night_activity")
+    if night_activity is not None and not isinstance(
+        night_activity,
+        bool,
+    ):
+        raise TravelAgentError(
+            "persisted revision has invalid night_activity"
+        )
+    return Revision(
+        removed_attraction_ids=_loaded_text_tuple(
+            value.get("removed_attraction_ids", []),
+            "removed_attraction_ids",
+        ),
+        forced_days=normalized_forced,
+        event_duration_minutes=normalized_durations,
+        locked_event_ids=_loaded_text_tuple(
+            value.get("locked_event_ids", []),
+            "locked_event_ids",
+        ),
+        must_visit=_loaded_text_tuple(
+            value.get("must_visit", []),
+            "must_visit",
+        ),
+        pace=_loaded_optional_text(value.get("pace"), "pace"),
+        night_activity=night_activity,
+        user_message=_loaded_optional_text(
+            value.get("user_message"),
+            "user_message",
+        ),
+    )
+
+
+def _run_from_mapping(value: Mapping[str, object]) -> AgentRun:
+    try:
+        status = RunStatus(str(value["status"]))
+    except (KeyError, ValueError):
+        raise TravelAgentError("persisted run has invalid status") from None
+    intent_raw = value.get("intent")
+    if not isinstance(intent_raw, Mapping):
+        raise TravelAgentError("persisted run omitted intent")
+    revision_raw = value.get("revision")
+    if revision_raw is not None and not isinstance(revision_raw, Mapping):
+        raise TravelAgentError("persisted run has invalid revision")
+    result = value.get("result")
+    if result is not None and not isinstance(result, Mapping):
+        raise TravelAgentError("persisted run has invalid result")
+    return AgentRun(
+        run_id=_loaded_required_text(value.get("run_id"), "run_id"),
+        session_id=_loaded_required_text(
+            value.get("session_id"),
+            "session_id",
+        ),
+        intent=_intent_from_persisted(intent_raw),
+        status=status,
+        created_at=_loaded_required_text(
+            value.get("created_at"),
+            "created_at",
+        ),
+        parent_run_id=_loaded_optional_text(
+            value.get("parent_run_id"),
+            "parent_run_id",
+        ),
+        revision=(
+            _revision_from_persisted(revision_raw)
+            if isinstance(revision_raw, Mapping)
+            else None
+        ),
+        confirmed_at=_loaded_optional_text(
+            value.get("confirmed_at"),
+            "confirmed_at",
+        ),
+        started_at=_loaded_optional_text(
+            value.get("started_at"),
+            "started_at",
+        ),
+        completed_at=_loaded_optional_text(
+            value.get("completed_at"),
+            "completed_at",
+        ),
+        result=deepcopy(dict(result)) if isinstance(result, Mapping) else None,
+        error_code=_loaded_optional_text(
+            value.get("error_code"),
+            "error_code",
+        ),
+    )
+
+
+def _session_from_mapping(value: Mapping[str, object]) -> AgentSession:
+    raw_run_ids = value.get("run_ids")
+    if (
+        not isinstance(raw_run_ids, list)
+        or any(not isinstance(item, str) for item in raw_run_ids)
+    ):
+        raise TravelAgentError("persisted session has invalid run_ids")
+    return AgentSession(
+        session_id=_loaded_required_text(
+            value.get("session_id"),
+            "session_id",
+        ),
+        created_at=_loaded_required_text(
+            value.get("created_at"),
+            "created_at",
+        ),
+        run_ids=list(raw_run_ids),
+        current_run_id=_loaded_required_text(
+            value.get("current_run_id"),
+            "current_run_id",
+        ),
+    )
+
+
+def _event_from_mapping(value: Mapping[str, object]) -> AgentEvent:
+    sequence = value.get("sequence")
+    details = value.get("details", {})
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or not isinstance(details, Mapping)
+    ):
+        raise TravelAgentError("persisted event has invalid shape")
+    return AgentEvent(
+        sequence=sequence,
+        event_id=_loaded_required_text(
+            value.get("event_id"),
+            "event_id",
+        ),
+        session_id=_loaded_required_text(
+            value.get("session_id"),
+            "session_id",
+        ),
+        run_id=_loaded_required_text(value.get("run_id"), "run_id"),
+        event_type=_loaded_required_text(
+            value.get("event_type"),
+            "event_type",
+        ),
+        status=_loaded_required_text(value.get("status"), "status"),
+        message=_loaded_required_text(value.get("message"), "message"),
+        occurred_at=_loaded_required_text(
+            value.get("occurred_at"),
+            "occurred_at",
+        ),
+        details=deepcopy(dict(details)),
+    )
+
+
+_DEFAULT_RUNTIME_ROOT = (
+    Path(__file__).resolve().parents[2] / "runtime" / "sessions"
+)
+DEFAULT_AGENT_STORE = InMemoryAgentStore(_DEFAULT_RUNTIME_ROOT)
 
 
 def create_run(
@@ -738,6 +1337,12 @@ def confirm_intent(
             else None
         )
     )
+    candidate = contract or store.get_run(run_id).intent
+    missing = candidate.blocking_missing_fields
+    if missing:
+        raise TravelAgentError(
+            "intent_missing_required_fields:" + ",".join(missing)
+        )
     return store.confirm(run_id, contract)
 
 
@@ -1003,10 +1608,11 @@ def runtime_status() -> dict[str, object]:
     """Describe the core without inspecting any model configuration."""
 
     return {
-        "mode": "structured_contract",
+        "mode": AgentRuntimeMode.CODEX_HOSTED.value,
+        "web_natural_language_enabled": False,
         "model_required": False,
         "model_adapter_loaded": False,
-        "display": "结构化 Agent 合同已就绪",
+        "display": "Codex 宿主模式",
         "fact_policy": "数字只能来自工具或用户显式输入。",
     }
 
@@ -1087,6 +1693,7 @@ def _now() -> str:
 
 __all__ = [
     "AgentEvent",
+    "AgentRuntimeMode",
     "AgentRun",
     "AgentSession",
     "DEFAULT_AGENT_STORE",

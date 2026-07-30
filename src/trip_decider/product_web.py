@@ -22,17 +22,23 @@ from trip_decider.destination_discovery import (
     rank_destination_candidates,
 )
 from trip_decider.destination_runtime import (
-    execute_destination_intent,
     revise_destination_result,
 )
+from trip_decider.agent_actions import (
+    execute_registered_action,
+    get_next_actions,
+    run_until_blocked,
+    start_action_loop,
+    submit_evidence,
+)
 from trip_decider.travel_agent import (
+    AgentRuntimeMode,
     DEFAULT_AGENT_STORE,
     Revision,
     RunStatus,
     TravelAgentError,
     confirm_intent,
     create_run,
-    execute_run,
     progress_contract,
     revise_run,
     runtime_status,
@@ -109,9 +115,8 @@ def _progress_result(
 ) -> list[dict[str, str]]:
     states = {
         "understand": ai_interpretation,
-        "intercity": intercity_status,
-        "local_route": "not_started",
-        "facts": "not_started",
+        "collect": intercity_status,
+        "validate": "not_started",
         "plan": "not_started",
     }
     result = progress_contract()
@@ -129,9 +134,13 @@ def _client_configuration() -> dict[str, object]:
         "ai": {
             **contract_status,
             "configured": False,
-            "display": "模型适配器未加载",
+            "display": "Codex 宿主模式",
             "missing": [],
-            "codex_mode": "pass_structured_travel_intent",
+            "available_modes": [
+                AgentRuntimeMode.CODEX_HOSTED.value,
+                AgentRuntimeMode.STANDALONE_WEB.value,
+            ],
+            "web_natural_language_enabled": False,
         },
         "amap_js": {
             "configured": map_configured,
@@ -163,13 +172,9 @@ def _json_bytes(value: object) -> bytes:
 
 def _api_response(path: str, payload: dict[str, object]) -> dict[str, object]:
     if path == "/api/interpret-intent":
-        return {
-            "status": "MODEL_ADAPTER_NOT_LOADED",
-            "display": (
-                "核心不解析自然语言；请由Codex或可选模型适配器传入"
-                "结构化TravelIntent。"
-            ),
-        }
+        raise ProductRequestError(
+            "当前为 CODEX_HOSTED；网页自然语言输入未启用。"
+        )
     if path == "/api/discover":
         discovery_payload, window = _product_discovery_request(payload)
         result = rank_destination_candidates(discovery_payload)
@@ -232,9 +237,14 @@ def _agent_post(
 ) -> tuple[HTTPStatus, dict[str, object]]:
     if path == "/api/agent/runs":
         intent = payload.get("intent")
+        text = payload.get("text")
+        if isinstance(text, str):
+            raise ProductRequestError(
+                "当前为 CODEX_HOSTED；请由 Codex 提供结构化 TravelIntent。"
+            )
         if not isinstance(intent, Mapping):
             raise ProductRequestError(
-                "intent must be a structured TravelIntent object"
+                "必须提供结构化 TravelIntent。"
             )
         run = create_run(intent)
         return HTTPStatus.CREATED, _run_response(run.run_id)
@@ -255,22 +265,59 @@ def _agent_post(
             raise ProductRequestError(
                 "run must be confirmed before execution"
             )
-        thread = threading.Thread(
-            target=_execute_agent_background,
-            args=(run_id,),
-            name=f"trip-decider-run-{run_id}",
-            daemon=True,
-        )
-        thread.start()
-        return HTTPStatus.ACCEPTED, _run_response(run_id)
+        if run.intent.blocking_missing_fields:
+            raise ProductRequestError(
+                "旅行条件不完整，不能执行。"
+            )
+        action_state = start_action_loop(run_id)
+        response = _run_response(run_id)
+        response["action_loop"] = action_state
+        return HTTPStatus.ACCEPTED, response
+    if action == "retry":
+        previous = DEFAULT_AGENT_STORE.get_run(run_id)
+        if previous.status not in {RunStatus.COMPLETED, RunStatus.FAILED}:
+            raise ProductRequestError(
+                "only a completed or blocked run can be queried again"
+            )
+        replacement = create_run(previous.intent)
+        confirm_intent(replacement.run_id)
+        action_state = start_action_loop(replacement.run_id)
+        response = _run_response(replacement.run_id)
+        response["action_loop"] = action_state
+        return HTTPStatus.ACCEPTED, response
+    if action == "run-action":
+        action_id = payload.get("action_id")
+        if not isinstance(action_id, str):
+            raise ProductRequestError("action_id must be text")
+        action_state = execute_registered_action(run_id, action_id)
+        response = _run_response(run_id)
+        response["action_loop"] = action_state
+        return HTTPStatus.OK, response
+    if action == "run-until-blocked":
+        action_state = run_until_blocked(run_id)
+        response = _run_response(run_id)
+        response["action_loop"] = action_state
+        return HTTPStatus.OK, response
+    if action == "evidence":
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, Mapping):
+            raise ProductRequestError("evidence must be an object")
+        action_state = submit_evidence(run_id, evidence)
+        response = _run_response(run_id)
+        response["action_loop"] = action_state
+        return HTTPStatus.OK, response
     if action == "revise":
         revision = payload.get("revision")
+        previous = DEFAULT_AGENT_STORE.get_run(run_id)
+        if isinstance(payload.get("text"), str):
+            raise ProductRequestError(
+                "当前为 CODEX_HOSTED；请由 Codex 提供结构化 Revision。"
+            )
         if not isinstance(revision, Mapping):
             raise ProductRequestError(
-                "revision must be a structured Revision object"
+                "必须提供结构化 Revision。"
             )
         contract = Revision.from_mapping(revision)
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
         if previous.status is not RunStatus.COMPLETED:
             raise ProductRequestError(
                 "only a completed run can be revised"
@@ -284,14 +331,6 @@ def _agent_post(
         thread.start()
         return HTTPStatus.ACCEPTED, _run_response(run_id)
     raise ProductRequestError("unknown agent run action")
-
-
-def _execute_agent_background(run_id: str) -> None:
-    try:
-        execute_run(run_id, executor=execute_destination_intent)
-    except Exception:
-        # The runtime has already persisted a stable failure event.
-        return
 
 
 def _revise_agent_background(
@@ -354,6 +393,19 @@ class ProductHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/agent/current":
+            current = DEFAULT_AGENT_STORE.latest_run()
+            if current is None:
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"session": None, "run": None, "events": []},
+                )
+            else:
+                self._send_json(
+                    HTTPStatus.OK,
+                    _run_response(current.run_id),
+                )
+            return
         if path.startswith("/api/agent/sessions/") and path.endswith(
             "/events"
         ):
@@ -361,6 +413,25 @@ class ProductHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/agent/runs/"):
             parts = [part for part in path.split("/") if part]
+            if (
+                len(parts) == 5
+                and parts[:3] == ["api", "agent", "runs"]
+                and parts[4] == "actions"
+            ):
+                try:
+                    self._send_json(
+                        HTTPStatus.OK,
+                        get_next_actions(parts[3]),
+                    )
+                except TravelAgentError as error:
+                    self._send_json(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {
+                            "error": "agent_action_failed",
+                            "message": str(error),
+                        },
+                    )
+                return
             if len(parts) == 4 and parts[:3] == ["api", "agent", "runs"]:
                 try:
                     self._send_json(
@@ -492,6 +563,7 @@ class ProductHandler(BaseHTTPRequestHandler):
                 )
                 if current.status in {
                     RunStatus.COMPLETED,
+                    RunStatus.BLOCKED,
                     RunStatus.FAILED,
                 }:
                     return
