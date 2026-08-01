@@ -1,0 +1,320 @@
+"""Protocol-neutral queries over the authoritative trip runtime.
+
+This module is the shared query boundary for REST, SSE, and future host
+adapters.  It owns Store reads and user-level projections, but never mutates a
+run and never creates an alternative runtime.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from copy import deepcopy
+import json
+
+from trip_decider.trip_application import (
+    DEFAULT_TRIP_APPLICATION_SERVICE,
+    TripApplicationService,
+)
+from trip_decider.trip_read_model import (
+    _map_payload_contract,
+    _planning_draft_read_model,
+    _presentation_contract,
+)
+from trip_decider.travel_agent import (
+    DEFAULT_AGENT_STORE,
+    InMemoryAgentStore,
+    RunStatus,
+    TaskMode,
+    TravelAgentError,
+)
+
+
+class TripQueryError(ValueError):
+    """The requested user-level read model is not available."""
+
+
+class TripQueryService:
+    """Read the single authoritative run/evidence/plan state."""
+
+    def __init__(
+        self,
+        *,
+        store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+        application_service: TripApplicationService = (
+            DEFAULT_TRIP_APPLICATION_SERVICE
+        ),
+    ) -> None:
+        if application_service.store is not store:
+            raise ValueError(
+                "query and application services must share one run store"
+            )
+        self.store = store
+        self.application_service = application_service
+
+    def trip(self, run_id: str) -> dict[str, object]:
+        """Return the canonical user-level run read model."""
+
+        run = self.store.get_run(run_id)
+        session = self.store.get_session(run.session_id)
+        run_value = run.to_dict()
+        events = self.events(run_id)
+        installed = self._current_plan_payload(run_id)
+        plan_version = (
+            installed.get("plan_version")
+            if isinstance(installed, Mapping)
+            and isinstance(installed.get("plan_version"), int)
+            else None
+        )
+        read_run_value = deepcopy(run_value)
+        current_result = run_value.get("result")
+        if isinstance(installed, Mapping) and isinstance(
+            installed.get("plan"),
+            Mapping,
+        ):
+            read_run_value["result"] = {
+                "plan": deepcopy(installed["plan"]),
+                "context": deepcopy(installed.get("context", {})),
+            }
+        elif isinstance(current_result, Mapping) and (
+            "planning_draft" in current_result or "plan" in current_result
+        ):
+            read_run_value["result"] = None
+
+        evidence = self.application_service.current_run_evidence(run_id)
+        presentation = _presentation_contract(
+            read_run_value,
+            events,
+            evidence=evidence,
+        )
+        presentation["plan_version"] = plan_version
+        if not isinstance(installed, Mapping):
+            presentation["budget_summary"] = None
+        presentation["planning_draft"] = _planning_draft_read_model(
+            run_value
+        )
+        presentation["map_payload"] = _map_payload_contract(
+            read_run_value,
+            plan_version=plan_version,
+        )
+        response: dict[str, object] = {
+            "session": session.to_dict(),
+            "run": read_run_value,
+            "presentation": presentation,
+            "events": events,
+        }
+        if run.status is RunStatus.RUNNING:
+            try:
+                action_loop = self.application_service.next_actions(run_id)
+                response["action_loop"] = action_loop
+                draft_source = {
+                    "result": (
+                        action_loop.get("result")
+                        if isinstance(action_loop, Mapping)
+                        else None
+                    )
+                }
+                draft_read_model = _planning_draft_read_model(draft_source)
+                if draft_read_model is not None:
+                    presentation["planning_draft"] = draft_read_model
+            except TravelAgentError:
+                pass
+        return response
+
+    def trips(self) -> dict[str, object]:
+        runs = self.store.list_runs()
+        return {
+            "runs": [
+                {
+                    "run_id": run.run_id,
+                    "created_at": run.created_at,
+                    "status": run.status.value,
+                    "task_mode": run.intent.task_mode.value,
+                    "origin": run.intent.origin,
+                    "destination": run.intent.destination_anchor,
+                    "themes": list(run.intent.themes),
+                }
+                for run in runs
+            ],
+            "continue_run_id": runs[0].run_id if runs else None,
+        }
+
+    def candidates(self, run_id: str) -> dict[str, object]:
+        run = self.store.get_run(run_id)
+        result = run.result
+        if isinstance(result, Mapping) and result.get("stage") in {
+            "open_discovery",
+            "guided_discovery",
+        }:
+            options = result.get("options")
+            if not isinstance(options, list):
+                raise TripQueryError("candidate comparison omitted options")
+            stage = result.get("stage")
+            comparison_completed = True
+        elif (
+            run.status is RunStatus.RUNNING
+            and run.intent.task_mode
+            in {TaskMode.OPEN_DISCOVERY, TaskMode.GUIDED_DISCOVERY}
+        ):
+            by_id: dict[str, dict[str, object]] = {}
+            for event in self.events(run_id):
+                if not str(event.get("event_type", "")).endswith(
+                    ".candidate.completed"
+                ):
+                    continue
+                details = event.get("details")
+                option = (
+                    details.get("option")
+                    if isinstance(details, Mapping)
+                    else None
+                )
+                destination_id = (
+                    option.get("destination_id")
+                    if isinstance(option, Mapping)
+                    else None
+                )
+                if isinstance(destination_id, str):
+                    by_id[destination_id] = deepcopy(dict(option))
+            options = list(by_id.values())
+            stage = "candidate_comparison"
+            comparison_completed = False
+        else:
+            raise TripQueryError(
+                "candidate comparison is not available for this run"
+            )
+        return {
+            "run_id": run_id,
+            "task_mode": run.intent.task_mode.value,
+            "stage": stage,
+            "comparison_completed": comparison_completed,
+            "selection_required": True,
+            "candidates": deepcopy(options),
+        }
+
+    def current_plan(self, run_id: str) -> dict[str, object]:
+        value = self._current_plan_payload(run_id)
+        if value is None:
+            raise TripQueryError("current plan does not exist")
+        return value
+
+    def current_plan_version(self, run_id: str) -> int | None:
+        value = self._current_plan_payload(run_id)
+        version = (
+            value.get("plan_version")
+            if isinstance(value, Mapping)
+            else None
+        )
+        return (
+            version
+            if isinstance(version, int) and not isinstance(version, bool)
+            else None
+        )
+
+    def map_payload(self, run_id: str) -> dict[str, object]:
+        presentation = self.trip(run_id).get("presentation")
+        payload = (
+            presentation.get("map_payload")
+            if isinstance(presentation, Mapping)
+            else None
+        )
+        return deepcopy(dict(payload)) if isinstance(payload, Mapping) else {}
+
+    def missing_information(self, run_id: str) -> dict[str, object]:
+        presentation = self.trip(run_id).get("presentation")
+        draft = (
+            presentation.get("planning_draft")
+            if isinstance(presentation, Mapping)
+            else None
+        )
+        return deepcopy(dict(draft)) if isinstance(draft, Mapping) else {}
+
+    def audit_result(self, run_id: str) -> dict[str, object]:
+        run = self.store.get_run(run_id)
+        result = run.result
+        if (
+            run.intent.task_mode is not TaskMode.PLAN_AUDIT
+            or not isinstance(result, Mapping)
+            or result.get("stage") != "plan_audit"
+        ):
+            raise TripQueryError("audit result is not available for this run")
+        return deepcopy(dict(result))
+
+    def events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[dict[str, object]]:
+        run = self.store.get_run(run_id)
+        return [
+            event.to_dict()
+            for event in self.store.events_after(
+                run.session_id,
+                after_sequence,
+            )
+            if event.run_id == run_id
+        ]
+
+    def wait_for_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int,
+        timeout: float,
+    ) -> dict[str, object]:
+        run = self.store.get_run(run_id)
+        events = [
+            event.to_dict()
+            for event in self.store.wait_for_events(
+                run.session_id,
+                after_sequence,
+                timeout,
+            )
+            if event.run_id == run_id
+        ]
+        current = self.store.get_run(run_id)
+        return {
+            "run_id": run_id,
+            "session_id": run.session_id,
+            "events": events,
+            "terminal": current.status
+            in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.BLOCKED},
+            "status": current.status.value,
+        }
+
+    def _current_plan_payload(
+        self,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        run_directory = self.store.run_directory(run_id)
+        if run_directory is None:
+            return None
+        path = run_directory / "plan-version.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, Mapping):
+            return None
+        plan = value.get("plan")
+        planning_state = value.get("planning_state")
+        if (
+            planning_state not in {"PARTIAL_READY", "PLAN_READY"}
+            or not isinstance(plan, Mapping)
+            or plan.get("artifact_kind") != "PlanVersion"
+            or plan.get("planning_state") != planning_state
+            or plan.get("displayable") is not True
+        ):
+            return None
+        return deepcopy(dict(value))
+
+
+DEFAULT_TRIP_QUERY_SERVICE = TripQueryService()
+
+
+__all__ = [
+    "DEFAULT_TRIP_QUERY_SERVICE",
+    "TripQueryError",
+    "TripQueryService",
+]

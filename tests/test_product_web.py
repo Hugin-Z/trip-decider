@@ -44,7 +44,6 @@ from trip_decider.destination_runtime import (
 )
 from trip_decider.guided_discovery import (
     build_guided_comparison,
-    guided_region_seeds,
 )
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.travel_agent import (
@@ -68,6 +67,31 @@ from trip_decider.travel_agent import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _guided_test_seeds() -> list[dict[str, object]]:
+    """Deterministic source-shaped seeds; candidate generation is not under test."""
+
+    return [
+        {
+            "id": "candidate-a",
+            "name": "候选甲",
+            "region_label": "测试区域",
+            "planning_city": "候选甲",
+            "rail_gateway": "候选甲站",
+            "themes": ["山水"],
+            "intensity": "moderate",
+        },
+        {
+            "id": "candidate-b",
+            "name": "候选乙",
+            "region_label": "测试区域",
+            "planning_city": "候选乙",
+            "rail_gateway": "候选乙站",
+            "themes": ["古村"],
+            "intensity": "light",
+        },
+    ]
 
 
 class ProductWebContractTests(unittest.TestCase):
@@ -383,10 +407,6 @@ class ProductWebContractTests(unittest.TestCase):
             }
         )
         self.assertEqual(intent.task_mode, TaskMode.GUIDED_DISCOVERY)
-        self.assertEqual(
-            [item["name"] for item in guided_region_seeds(intent)],
-            ["婺源", "三清山"],
-        )
 
     def test_guided_options_are_coarse_checked_before_display(self) -> None:
         intent = TravelIntent.from_mapping(
@@ -441,10 +461,14 @@ class ProductWebContractTests(unittest.TestCase):
                 ),
             )
 
-        result = build_guided_comparison(
-            intent,
-            railway_collector=railway,
-        )
+        with patch(
+            "trip_decider.guided_discovery.guided_region_seeds",
+            return_value=_guided_test_seeds(),
+        ):
+            result = build_guided_comparison(
+                intent,
+                railway_collector=railway,
+            )
         self.assertEqual(result["option_count"], 2)
         self.assertEqual(len(checked), 2)
         self.assertEqual(
@@ -486,7 +510,9 @@ class ProductWebContractTests(unittest.TestCase):
 
         def railway(contract: TravelIntent) -> EvidenceItem:
             time.sleep(
-                0.03 if contract.destination_anchor == "婺源" else 0.15
+                0.03
+                if contract.destination_anchor == "候选甲站"
+                else 0.15
             )
             return EvidenceItem(
                 evidence_id="rail",
@@ -497,7 +523,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "roundtrip_fare_cny": 200,
                     "snapshot": {
                         "status": "LIVE",
-                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                        "retrieved_at": "2026-07-30T12:00:00+00:00",
                     },
                 },
                 sources=(
@@ -514,11 +540,15 @@ class ProductWebContractTests(unittest.TestCase):
             if status == "candidate_completed":
                 streamed.append((destination, time.monotonic() - started))
 
-        result = build_guided_comparison(
-            intent,
-            railway_collector=railway,
-            progress=progress,
-        )
+        with patch(
+            "trip_decider.guided_discovery.guided_region_seeds",
+            return_value=_guided_test_seeds(),
+        ):
+            result = build_guided_comparison(
+                intent,
+                railway_collector=railway,
+                progress=progress,
+            )
         elapsed = time.monotonic() - started
         self.assertEqual(result["option_count"], 2)
         self.assertEqual(len(streamed), 2)
@@ -553,11 +583,15 @@ class ProductWebContractTests(unittest.TestCase):
             )
 
         started = time.monotonic()
-        result = build_guided_comparison(
-            intent,
-            railway_collector=slow_railway,
-            timeouts={"railway": 0.02},
-        )
+        with patch(
+            "trip_decider.guided_discovery.guided_region_seeds",
+            return_value=_guided_test_seeds(),
+        ):
+            result = build_guided_comparison(
+                intent,
+                railway_collector=slow_railway,
+                timeouts={"railway": 0.02},
+            )
         self.assertLess(time.monotonic() - started, 0.12)
         self.assertEqual(result["option_count"], 2)
         for option in result["options"]:
@@ -616,7 +650,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "roundtrip_fare_cny": 200,
                     "snapshot": {
                         "status": "LIVE",
-                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                        "retrieved_at": "2026-07-30T12:00:00+00:00",
                     },
                 },
                 sources=(
@@ -629,18 +663,22 @@ class ProductWebContractTests(unittest.TestCase):
                 ),
             )
 
-        build_guided_comparison(
-            intent,
-            railway_collector=railway,
-            run_id="guided-run-one",
-            evidence_broker=broker,
-        )
-        reused = build_guided_comparison(
-            intent,
-            railway_collector=railway,
-            run_id="guided-run-two",
-            evidence_broker=broker,
-        )
+        with patch(
+            "trip_decider.guided_discovery.guided_region_seeds",
+            return_value=_guided_test_seeds(),
+        ):
+            build_guided_comparison(
+                intent,
+                railway_collector=railway,
+                run_id="guided-run-one",
+                evidence_broker=broker,
+            )
+            reused = build_guided_comparison(
+                intent,
+                railway_collector=railway,
+                run_id="guided-run-two",
+                evidence_broker=broker,
+            )
         self.assertEqual(calls, 4)
         for option in reused["options"]:
             self.assertEqual(
@@ -652,7 +690,7 @@ class ProductWebContractTests(unittest.TestCase):
             )
             self.assertEqual(
                 option["roundtrip_transport"]["retrieved_at"],
-                "2026-07-30T12:00:00+08:00",
+                "2026-07-30T12:00:00+00:00",
             )
 
     def test_guided_selection_continues_in_same_run(self) -> None:
@@ -928,7 +966,11 @@ class ProductWebContractTests(unittest.TestCase):
                 run.run_id,
                 Revision(pace="standard"),
                 executor=lambda previous, revision, emit: {
+                    "planning_state": "PARTIAL_READY",
                     "plan": {
+                        "artifact_kind": "PlanVersion",
+                        "planning_state": "PARTIAL_READY",
+                        "displayable": True,
                         "pace": revision.pace,
                         "days": [{"day": 1, "events": []}],
                     },
@@ -1154,13 +1196,13 @@ class ProductWebContractTests(unittest.TestCase):
         )
         self.assertEqual(payload["route_polylines"][0]["polyline"], [])
 
-    def test_default_runtime_is_codex_hosted_without_web_nlp(self) -> None:
+    def test_default_runtime_reports_standalone_web_capability(self) -> None:
         status = runtime_status()
         self.assertEqual(
             status["mode"],
-            AgentRuntimeMode.CODEX_HOSTED.value,
+            AgentRuntimeMode.STANDALONE_WEB.value,
         )
-        self.assertFalse(status["web_natural_language_enabled"])
+        self.assertTrue(status["web_natural_language_enabled"])
         self.assertFalse(status["model_adapter_loaded"])
 
     def test_incomplete_intent_cannot_be_confirmed(self) -> None:
@@ -1612,10 +1654,8 @@ class ProductWebContractTests(unittest.TestCase):
                 store=store,
             )
         self.assertEqual(ready["status"], "NEED_USER_INPUT")
-        self.assertIn(
-            "cross_city_transport",
-            ready["missing_requirements"],
-        )
+        self.assertIn("outbound_transport", ready["missing_requirements"])
+        self.assertIn("return_transport", ready["missing_requirements"])
         self.assertIn("attraction", ready["missing_requirements"])
         self.assertIn("local_transit", ready["missing_requirements"])
         self.assertIn("accommodation_base", ready["missing_requirements"])
@@ -1664,15 +1704,16 @@ class ProductWebContractTests(unittest.TestCase):
             RunStatus.RUNNING,
         )
 
-    def test_agent_run_endpoint_rejects_web_natural_language(self) -> None:
-        with self.assertRaisesRegex(
-            Exception,
-            "CODEX_HOSTED",
-        ):
-            _trip_post(
-                "/api/trips",
-                {"text": "请规划一次旅行"},
-            )
+    def test_agent_run_endpoint_accepts_web_natural_language(self) -> None:
+        status, response = _trip_post(
+            "/api/trips",
+            {"text": "请规划一次旅行"},
+        )
+        self.assertEqual(status.value, 201)
+        self.assertEqual(
+            response["run"]["status"],
+            RunStatus.AWAITING_CONFIRMATION.value,
+        )
 
     def test_acceptance_intent_is_complete_and_waits_for_confirmation(
         self,
