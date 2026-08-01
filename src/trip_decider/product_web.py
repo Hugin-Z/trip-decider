@@ -207,22 +207,58 @@ def _run_response(run_id: str) -> dict[str, object]:
         )
         if event.run_id == run.run_id
     ]
-    plan_version = _current_plan_version(run_id)
-    presentation = _presentation_contract(run_value, events)
+    installed = _current_plan_payload(run_id)
+    plan_version = (
+        installed.get("plan_version")
+        if isinstance(installed, Mapping)
+        and isinstance(installed.get("plan_version"), int)
+        else None
+    )
+    read_run_value = deepcopy(run_value)
+    current_result = run_value.get("result")
+    if isinstance(installed, Mapping) and isinstance(
+        installed.get("plan"),
+        Mapping,
+    ):
+        read_run_value["result"] = {
+            "plan": deepcopy(installed["plan"]),
+            "context": deepcopy(installed.get("context", {})),
+        }
+    elif isinstance(current_result, Mapping) and (
+        "planning_draft" in current_result or "plan" in current_result
+    ):
+        read_run_value["result"] = (
+            None
+        )
+    presentation = _presentation_contract(read_run_value, events)
     presentation["plan_version"] = plan_version
+    if not isinstance(installed, Mapping):
+        presentation["budget_summary"] = None
+    presentation["planning_draft"] = _planning_draft_read_model(
+        run_value
+    )
     presentation["map_payload"] = _map_payload_contract(
-        run_value,
+        read_run_value,
         plan_version=plan_version,
     )
     response = {
         "session": session.to_dict(),
-        "run": run_value,
+        "run": read_run_value,
         "presentation": presentation,
         "events": events,
     }
     if run.status is RunStatus.RUNNING:
         try:
-            response["action_loop"] = get_next_actions(run_id)
+            action_loop = get_next_actions(run_id)
+            response["action_loop"] = action_loop
+            draft_source = {
+                "result": action_loop.get("result")
+                if isinstance(action_loop, Mapping)
+                else None
+            }
+            draft_read_model = _planning_draft_read_model(draft_source)
+            if draft_read_model is not None:
+                presentation["planning_draft"] = draft_read_model
         except TravelAgentError:
             pass
     return response
@@ -300,22 +336,23 @@ def _candidate_response(run_id: str) -> dict[str, object]:
 
 
 def _current_plan_response(run_id: str) -> dict[str, object]:
-    run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
-    if run_directory is None:
-        raise ProductRequestError("plan persistence is unavailable")
-    path = run_directory / "plan-version.json"
-    if not path.is_file():
+    value = _current_plan_payload(run_id)
+    if value is None:
         raise ProductRequestError("current plan does not exist")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ProductRequestError("current plan cannot be read") from error
-    if not isinstance(value, Mapping):
-        raise ProductRequestError("current plan is invalid")
-    return deepcopy(dict(value))
+    return value
 
 
 def _current_plan_version(run_id: str) -> int | None:
+    value = _current_plan_payload(run_id)
+    version = value.get("plan_version") if isinstance(value, Mapping) else None
+    return (
+        version
+        if isinstance(version, int) and not isinstance(version, bool)
+        else None
+    )
+
+
+def _current_plan_payload(run_id: str) -> dict[str, object] | None:
     run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
     if run_directory is None:
         return None
@@ -326,12 +363,90 @@ def _current_plan_version(run_id: str) -> int | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    version = value.get("plan_version") if isinstance(value, Mapping) else None
-    return (
-        version
-        if isinstance(version, int) and not isinstance(version, bool)
+    if not isinstance(value, Mapping):
+        return None
+    plan = value.get("plan")
+    planning_state = value.get("planning_state")
+    if (
+        planning_state not in {"PARTIAL_READY", "PLAN_READY"}
+        or not isinstance(plan, Mapping)
+        or plan.get("artifact_kind") != "PlanVersion"
+        or plan.get("planning_state") != planning_state
+        or plan.get("displayable") is not True
+    ):
+        return None
+    return deepcopy(dict(value))
+
+
+def _planning_draft_read_model(
+    run: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Expose draft progress without exposing draft itinerary projections."""
+
+    result = run.get("result")
+    draft = (
+        result.get("planning_draft")
+        if isinstance(result, Mapping)
+        and isinstance(result.get("planning_draft"), Mapping)
         else None
     )
+    if not isinstance(draft, Mapping):
+        return None
+    requirements = draft.get("display_requirements")
+    missing = draft.get("missing_requirements")
+    blockers = draft.get("conditional_blockers")
+    planning_input = (
+        draft.get("planning_input")
+        if isinstance(draft.get("planning_input"), Mapping)
+        else {}
+    )
+    return {
+        "planning_state": result.get("planning_state"),
+        "missing_requirements": (
+            deepcopy(missing) if isinstance(missing, list) else []
+        ),
+        "collected_information": {
+            "destination_resolved": (
+                requirements.get("destination_resolved") is True
+                if isinstance(requirements, Mapping)
+                else False
+            ),
+            "outbound_transport": (
+                requirements.get("outbound_transport") is True
+                if isinstance(requirements, Mapping)
+                else False
+            ),
+            "return_transport": (
+                requirements.get("return_transport") is True
+                if isinstance(requirements, Mapping)
+                else False
+            ),
+            "attraction_count": len(
+                planning_input.get("attraction_events", [])
+                if isinstance(planning_input.get("attraction_events"), list)
+                else []
+            ),
+            "local_transit_count": len(
+                planning_input.get("local_transit_events", [])
+                if isinstance(planning_input.get("local_transit_events"), list)
+                else []
+            ),
+            "accommodation_base": (
+                requirements.get("accommodation_base") is True
+                if isinstance(requirements, Mapping)
+                else False
+            ),
+        },
+        "blockers": (
+            [
+                deepcopy(dict(item))
+                for item in blockers
+                if isinstance(item, Mapping)
+            ]
+            if isinstance(blockers, list)
+            else []
+        ),
+    }
 
 
 def _map_position(value: object) -> dict[str, object] | None:

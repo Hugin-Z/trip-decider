@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import trip_decider.agent_actions as agent_actions
+import trip_decider.product_web as product_web
 from trip_decider.agent_actions import (
     execute_registered_action,
     get_next_actions,
@@ -109,6 +110,14 @@ def _map(destination: str) -> EvidenceItem:
                     "duration_seconds": 1800,
                     "distance_meters": 12000,
                     "fare": {"status": "unknown", "amount_cny": None},
+                },
+                {
+                    "route_id": "local-route-2",
+                    "from": "住宿片区",
+                    "to": "景点甲",
+                    "duration_seconds": 1200,
+                    "distance_meters": 6000,
+                    "fare": {"status": "unknown", "amount_cny": None},
                 }
             ],
         },
@@ -181,6 +190,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 },
             )
             self.assertTrue(compiled["displayable"])
+            self.assertEqual(compiled["planning_state"], "PLAN_READY")
             self.assertEqual(
                 compiled["display_status"],
                 "DISPLAYABLE_CONDITIONAL_ITINERARY",
@@ -328,6 +338,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ready["result"]["plan"]["status"],
             "PARTIAL_PLAN_WITH_BLOCKERS",
         )
+        self.assertEqual(ready["result"]["planning_state"], "PARTIAL_READY")
         self.assertTrue(ready["result"]["plan"]["displayable"])
         self.assertIn(
             "具体酒店未选择",
@@ -387,14 +398,141 @@ class PlanningInputCompilerTests(unittest.TestCase):
         self.assertEqual(
             compiled["display_requirements"],
             {
-                "cross_city_transport": False,
+                "destination_resolved": False,
+                "outbound_transport": False,
+                "return_transport": False,
                 "attraction": False,
                 "local_transit": False,
+                "attraction_transit_coverage": False,
                 "accommodation_base": False,
+                "hard_constraints_clear": True,
+                "cross_city_transport": False,
             },
         )
+        self.assertEqual(compiled["planning_state"], "COLLECTING_EVIDENCE")
+        self.assertEqual(compiled["artifact_kind"], "PlanningDraft")
         self.assertTrue(compiled["meal_events"])
         self.assertTrue(compiled["rest_events"])
+        with TemporaryDirectory() as temporary:
+            store = InMemoryAgentStore(Path(temporary) / "sessions")
+            run = create_run(intent, store=store)
+            confirm_intent(run.run_id, store=store)
+            start_action_loop(run.run_id, store=store)
+            for item in context.evidence:
+                if item.domain not in {"railway", "map", "web"}:
+                    continue
+                submit_evidence(
+                    run.run_id,
+                    {**item.to_dict(), "action_id": item.domain},
+                    store=store,
+                )
+            result = execute_registered_action(
+                run.run_id,
+                "planner",
+                store=store,
+            )
+            self.assertEqual(result["status"], "NEED_USER_INPUT")
+            self.assertNotIn("plan", result["result"])
+            self.assertTrue(
+                result["result"]["planning_draft"]["planning_input"][
+                    "meal_events"
+                ]
+            )
+            self.assertTrue(
+                result["result"]["planning_draft"]["planning_input"][
+                    "rest_events"
+                ]
+            )
+            self.assertFalse(
+                (store.run_directory(run.run_id) / "plan-version.json").exists()
+            )
+
+    def test_missing_required_attraction_transit_keeps_draft_uninstalled(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            store = InMemoryAgentStore(Path(temporary) / "sessions")
+            run = create_run(_intent("乙地"), store=store)
+            confirm_intent(run.run_id, store=store)
+            start_action_loop(run.run_id, store=store)
+            incomplete_map = _map("乙地").to_dict()
+            incomplete_map["value"]["local_transit"] = incomplete_map[
+                "value"
+            ]["local_transit"][:1]
+            for action_id, item in (
+                ("railway", _railway().to_dict()),
+                ("web", _web("乙地").to_dict()),
+                ("map", incomplete_map),
+            ):
+                submit_evidence(
+                    run.run_id,
+                    {**item, "action_id": action_id},
+                    store=store,
+                )
+            result = execute_registered_action(
+                run.run_id,
+                "planner",
+                store=store,
+            )
+            self.assertEqual(result["status"], "NEED_USER_INPUT")
+            self.assertEqual(
+                result["result"]["planning_state"],
+                "COLLECTING_EVIDENCE",
+            )
+            self.assertNotIn("plan", result["result"])
+            draft = result["result"]["planning_draft"]
+            self.assertEqual(draft["artifact_kind"], "PlanningDraft")
+            inputs = draft["planning_input"]
+            self.assertEqual(len(inputs["cross_city_rail_events"]), 2)
+            self.assertEqual(len(inputs["attraction_events"]), 1)
+            self.assertEqual(len(inputs["local_transit_events"]), 1)
+            self.assertIn(
+                "attraction_transit_coverage",
+                draft["missing_requirements"],
+            )
+            self.assertIn(
+                "local_transit_manual",
+                {
+                    action["action_id"]
+                    for action in result["actions"]
+                },
+            )
+            self.assertFalse(
+                (store.run_directory(run.run_id) / "plan-version.json").exists()
+            )
+            with patch.object(
+                product_web,
+                "DEFAULT_AGENT_STORE",
+                store,
+            ), patch.object(
+                product_web,
+                "get_next_actions",
+                side_effect=lambda value: get_next_actions(
+                    value,
+                    store=store,
+                ),
+            ):
+                response = product_web._run_response(run.run_id)
+            self.assertIsNone(response["run"]["result"])
+            self.assertEqual(response["presentation"]["day_count"], 0)
+            self.assertEqual(response["presentation"]["event_count"], 0)
+            self.assertIsNone(response["presentation"]["budget_summary"])
+            self.assertEqual(
+                response["presentation"]["map_payload"]["markers"],
+                [],
+            )
+            self.assertEqual(
+                response["presentation"]["map_payload"][
+                    "route_polylines"
+                ],
+                [],
+            )
+            self.assertEqual(
+                response["presentation"]["planning_draft"][
+                    "collected_information"
+                ]["attraction_count"],
+                1,
+            )
 
     def test_runtime_restart_restores_session_evidence_and_plan_version(
         self,
@@ -438,6 +576,14 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 store=restored,
             )
             self.assertEqual(ready["status"], "READY")
+            self.assertEqual(
+                ready["result"]["planning_state"],
+                "PLAN_READY",
+            )
+            self.assertEqual(
+                ready["result"]["plan"]["artifact_kind"],
+                "PlanVersion",
+            )
 
             run_directory = runtime_root / run.run_id
             for relative in (
@@ -451,6 +597,18 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 "plans/plan-0001.json",
             ):
                 self.assertTrue((run_directory / relative).is_file())
+            with patch.object(
+                product_web,
+                "DEFAULT_AGENT_STORE",
+                restored,
+            ):
+                installed = product_web._current_plan_response(run.run_id)
+                response = product_web._run_response(run.run_id)
+            self.assertEqual(installed["planning_state"], "PLAN_READY")
+            self.assertGreater(response["presentation"]["day_count"], 0)
+            self.assertIsNotNone(
+                response["presentation"]["budget_summary"]
+            )
             evidence = json.loads(
                 (run_directory / "evidence" / "current.json").read_text(
                     encoding="utf-8"

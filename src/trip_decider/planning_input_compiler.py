@@ -18,6 +18,9 @@ from trip_decider.itinerary_planner import (
 from trip_decider.travel_agent import DestinationContext
 
 
+_INSTALLABLE_STATES = {"PARTIAL_READY", "PLAN_READY"}
+
+
 class PlanningInputCompiler:
     """Compile evidence-backed inputs for the existing itinerary planner."""
 
@@ -133,6 +136,24 @@ class PlanningInputCompiler:
             dependencies=dependencies,
         )
         _record_evidence_blockers(evidence, blockers)
+        raw_hard_conflicts = payload.get("hard_constraint_conflicts")
+        if isinstance(raw_hard_conflicts, Sequence) and not isinstance(
+            raw_hard_conflicts,
+            (str, bytes, bytearray),
+        ):
+            for index, conflict in enumerate(raw_hard_conflicts, start=1):
+                blockers.append(
+                    _blocker(
+                        f"HARD_CONSTRAINT_CONFLICT_{index}",
+                        "constraints",
+                        reason=(
+                            conflict
+                            if isinstance(conflict, str)
+                            else "unresolved hard constraint conflict"
+                        ),
+                        severity="hard",
+                    )
+                )
 
         for day in days:
             day["events"].sort(
@@ -158,19 +179,60 @@ class PlanningInputCompiler:
             for event in events_by_type["transit"]
             if not str(event.get("event_id", "")).startswith("rail-")
         ]
+        destination_resolved = _destination_resolved(map_item, web_item)
+        attraction_transit_coverage = all(
+            isinstance(event.get("inbound_transit_event_id"), str)
+            and bool(str(event["inbound_transit_event_id"]).strip())
+            for event in events_by_type["attraction"]
+        ) and bool(events_by_type["attraction"])
+        hard_constraints_clear = not any(
+            blocker.get("severity") == "hard" for blocker in unique_blockers
+        )
         display_requirements = {
-            "cross_city_transport": bool(rail_events),
+            "destination_resolved": destination_resolved,
+            "outbound_transport": any(
+                event.get("event_id") == "rail-outbound"
+                for event in rail_events
+            ),
+            "return_transport": any(
+                event.get("event_id") == "rail-return"
+                for event in rail_events
+            ),
             "attraction": bool(events_by_type["attraction"]),
             "local_transit": bool(local_transit_events),
+            "attraction_transit_coverage": attraction_transit_coverage,
             "accommodation_base": hotel_area is not None,
+            "hard_constraints_clear": hard_constraints_clear,
         }
-        displayable = all(display_requirements.values())
+        display_requirements["cross_city_transport"] = (
+            display_requirements["outbound_transport"]
+            and display_requirements["return_transport"]
+        )
+        missing_requirements = [
+            name
+            for name, present in display_requirements.items()
+            if present is not True and name != "cross_city_transport"
+        ]
+        if not hard_constraints_clear:
+            planning_state = "BLOCKED"
+        elif missing_requirements:
+            planning_state = "COLLECTING_EVIDENCE"
+        elif any(
+            blocker.get("severity") != "advisory"
+            for blocker in unique_blockers
+        ):
+            planning_state = "PARTIAL_READY"
+        else:
+            planning_state = "PLAN_READY"
+        displayable = planning_state in _INSTALLABLE_STATES
         status = (
             "PARTIAL_PLAN_WITH_BLOCKERS"
             if unique_blockers
             else "CONDITIONALLY_FEASIBLE"
         )
         return {
+            "artifact_kind": "PlanningDraft",
+            "planning_state": planning_state,
             "status": status,
             "displayable": displayable,
             "display_status": (
@@ -179,6 +241,7 @@ class PlanningInputCompiler:
                 else "SUPPLEMENTING_DATA"
             ),
             "display_requirements": display_requirements,
+            "missing_requirements": missing_requirements,
             "days": days,
             "cross_city_rail_events": rail_events,
             "attraction_events": events_by_type["attraction"],
@@ -514,6 +577,16 @@ def _compile_attractions(
                         ),
                     ),
                 )
+        else:
+            blockers.append(
+                _blocker(
+                    "ATTRACTION_TRANSIT_MISSING",
+                    "map",
+                    reason=(
+                        f"{attraction.get('name')}缺少对应的到达交通证据"
+                    ),
+                )
+            )
         end_at = min(start_at + timedelta(minutes=minutes), latest)
         payload = {
             "id": str(
@@ -554,6 +627,11 @@ def _compile_attractions(
             }
         )
         event["evidence_dependencies"] = [evidence_id]
+        event["inbound_transit_event_id"] = (
+            matching_route.get("event_id")
+            if matching_route is not None
+            else None
+        )
         _add_event(days, event)
         events_by_type["attraction"].append(event)
         dependencies["attraction"].append(evidence_id)
@@ -1169,6 +1247,33 @@ def _hotel_area(evidence: Mapping[str, object] | None) -> str | None:
     hotel = value.get("hotel_area") if isinstance(value, Mapping) else None
     name = hotel.get("name") if isinstance(hotel, Mapping) else None
     return name.strip() if isinstance(name, str) and name.strip() else None
+
+
+def _destination_resolved(
+    map_item: Mapping[str, object] | None,
+    web_item: Mapping[str, object] | None,
+) -> bool:
+    """Return true only when sourced evidence identifies the destination."""
+
+    if map_item is not None and map_item.get("status") == "sourced":
+        value = map_item.get("value")
+        destination = value.get("destination") if isinstance(value, Mapping) else None
+        if isinstance(destination, Mapping) and any(
+            isinstance(destination.get(field), str)
+            and bool(str(destination[field]).strip())
+            for field in ("name", "adcode", "provider_record_id")
+        ):
+            return True
+    if web_item is not None and web_item.get("status") == "sourced":
+        value = web_item.get("value")
+        name = (
+            value.get("destination_official_name")
+            if isinstance(value, Mapping)
+            else None
+        )
+        if isinstance(name, str) and name.strip():
+            return True
+    return False
 
 
 def _day_shells(

@@ -421,6 +421,18 @@ def get_next_actions(
     if state.action_status["planner"] == "completed":
         if _result_is_displayable(state.result):
             return _snapshot(run_id, "READY", [], result=state.result)
+        if _result_planning_state(state.result) == "BLOCKED":
+            return _snapshot(
+                run_id,
+                "BLOCKED",
+                [],
+                reason="unresolved_hard_constraint_conflict",
+                result=state.result,
+                missing_requirements=_missing_display_requirements(
+                    state.result
+                ),
+                blockers=_result_blockers(state.result),
+            )
         return _snapshot(
             run_id,
             "NEED_USER_INPUT",
@@ -445,7 +457,7 @@ def get_next_actions(
             )
         )
     if state.action_status["web"] == "waiting":
-        actions.append(_registered_action("web", run.intent))
+        actions.append(_web_action(run.intent))
     map_action: dict[str, object] | None = None
     if (
         state.action_status["map"] == "waiting"
@@ -557,12 +569,17 @@ def execute_registered_action(
         state.result = result
         state.action_status[action_id] = "completed"
         _persist_loop_state(run_id, state, store)
-        store.persist_plan_version(run_id, result)
+        if _result_is_displayable(result):
+            store.persist_plan_version(run_id, result)
         store.append_event(
             run_id,
             event_type="tool.completed",
             status="completed",
-            message="Planner完成并通过证据边界校验。",
+            message=(
+                "计划版本已通过证据门并安装。"
+                if _result_is_displayable(result)
+                else "规划草稿已生成，仍在补充最低真实证据。"
+            ),
             details={
                 "tool": "planner",
                 "duration_ms": round(
@@ -958,9 +975,11 @@ def _planner_handler(
         (user, *(state.evidence[domain] for domain in _DOMAINS)),
     )
     compiled = PlanningInputCompiler().compile(context)
-    plan = plan_destination_context(context.to_dict())
-    plan = {
-        **plan,
+    planning_draft = plan_destination_context(context.to_dict())
+    planning_draft = {
+        **planning_draft,
+        "artifact_kind": "PlanningDraft",
+        "planning_state": compiled["planning_state"],
         "status": compiled["status"],
         "days": compiled["days"],
         "planning_input": {
@@ -987,6 +1006,9 @@ def _planner_handler(
         "display_requirements": deepcopy(
             compiled["display_requirements"]
         ),
+        "missing_requirements": deepcopy(
+            compiled["missing_requirements"]
+        ),
         "accommodation_notice": (
             "具体酒店未选择，当前使用住宿片区或交通枢纽；"
             "首末段交通待细化。"
@@ -994,23 +1016,29 @@ def _planner_handler(
             else None
         ),
     }
-    validation = validate_destination_plan(context.to_dict(), plan)
+    validation = validate_destination_plan(
+        context.to_dict(),
+        planning_draft,
+    )
     if validation.get("valid") is not True:
         raise TravelAgentError("planner output failed context validation")
-    days = plan.get("days")
+    days = planning_draft.get("days")
     if not isinstance(days, list) or not days:
         raise TravelAgentError(
             "planner did not produce a non-empty itinerary"
         )
-    return {
+    installable = compiled["planning_state"] in {
+        "PARTIAL_READY",
+        "PLAN_READY",
+    }
+    result: dict[str, object] = {
         "action_loop_status": (
-            "READY"
-            if compiled["displayable"]
-            else "NEED_USER_INPUT"
+            "READY" if installable else compiled["planning_state"]
         ),
+        "planning_state": compiled["planning_state"],
         "task_mode": intent.task_mode.value,
         "context": context.to_dict(),
-        "plan": deepcopy(dict(plan)),
+        "planning_draft": deepcopy(dict(planning_draft)),
         "validation": deepcopy(dict(validation)),
         "pipeline": [
             "parse_intent",
@@ -1020,6 +1048,12 @@ def _planner_handler(
             "validate",
         ],
     }
+    if installable:
+        result["plan"] = {
+            **deepcopy(dict(planning_draft)),
+            "artifact_kind": "PlanVersion",
+        }
+    return result
 
 
 _TOOL_REGISTRY: dict[str, dict[str, Any]] = {
@@ -1694,7 +1728,22 @@ def _result_is_displayable(
     if not isinstance(result, Mapping):
         return False
     plan = result.get("plan")
-    return isinstance(plan, Mapping) and plan.get("displayable") is True
+    return (
+        result.get("planning_state") in {"PARTIAL_READY", "PLAN_READY"}
+        and isinstance(plan, Mapping)
+        and plan.get("artifact_kind") == "PlanVersion"
+        and plan.get("planning_state") == result.get("planning_state")
+        and plan.get("displayable") is True
+    )
+
+
+def _result_planning_state(
+    result: Mapping[str, object] | None,
+) -> str | None:
+    if not isinstance(result, Mapping):
+        return None
+    value = result.get("planning_state")
+    return str(value) if isinstance(value, str) else None
 
 
 def _missing_display_requirements(
@@ -1707,7 +1756,12 @@ def _missing_display_requirements(
             "local_transit",
             "accommodation_base",
         ]
-    plan = result.get("plan")
+    plan = result.get("planning_draft")
+    if not isinstance(plan, Mapping):
+        plan = result.get("plan")
+    missing = plan.get("missing_requirements") if isinstance(plan, Mapping) else None
+    if isinstance(missing, list):
+        return [str(name) for name in missing]
     requirements = (
         plan.get("display_requirements")
         if isinstance(plan, Mapping)
@@ -1727,7 +1781,9 @@ def _result_blockers(
 ) -> list[object]:
     if not isinstance(result, Mapping):
         return []
-    plan = result.get("plan")
+    plan = result.get("planning_draft")
+    if not isinstance(plan, Mapping):
+        plan = result.get("plan")
     raw = plan.get("conditional_blockers") if isinstance(plan, Mapping) else []
     return deepcopy(raw) if isinstance(raw, list) else []
 
@@ -1738,21 +1794,23 @@ def _plan_followup_actions(
 ) -> list[dict[str, object]]:
     missing = set(_missing_display_requirements(state.result))
     actions: list[dict[str, object]] = []
-    if "cross_city_transport" in missing:
+    if missing & {
+        "cross_city_transport",
+        "outbound_transport",
+        "return_transport",
+    }:
         actions.extend(
             (
                 _registered_action(intent=intent, action_id="railway", mode="requery"),
                 _manual_railway_action(intent),
             )
         )
-    if missing & {"attraction", "accommodation_base"}:
-        actions.append(
-            _registered_action(
-                "web",
-                intent,
-                mode="supplement",
-            )
-        )
+    if missing & {
+        "destination_resolved",
+        "attraction",
+        "accommodation_base",
+    }:
+        actions.append(_web_action(intent))
     if "accommodation_base" in missing:
         actions.extend(
             (
@@ -1767,7 +1825,7 @@ def _plan_followup_actions(
             )
         )
     if (
-        "local_transit" in missing
+        missing & {"local_transit", "attraction_transit_coverage"}
         and _can_collect_local_transit(state)
     ):
         actions.append(
@@ -1778,7 +1836,7 @@ def _plan_followup_actions(
                 mode="local_transit",
             )
         )
-    elif "local_transit" in missing:
+    elif missing & {"local_transit", "attraction_transit_coverage"}:
         actions.append(
             {
                 "action_id": "local_transit_manual",

@@ -951,14 +951,33 @@ class InMemoryAgentStore:
         plan = result.get("plan")
         if not isinstance(plan, Mapping):
             raise TravelAgentError("planner result omitted plan")
+        planning_state = result.get("planning_state")
+        if not isinstance(planning_state, str):
+            planning_state = plan.get("planning_state")
+        if planning_state not in {"PARTIAL_READY", "PLAN_READY"}:
+            raise TravelAgentError(
+                "planner result is not eligible for plan installation"
+            )
+        if (
+            plan.get("artifact_kind") != "PlanVersion"
+            or plan.get("displayable") is not True
+            or plan.get("planning_state") != planning_state
+        ):
+            raise TravelAgentError(
+                "planner result omitted the PlanVersion installation contract"
+            )
         versions = run_directory / "plans"
         versions.mkdir(parents=True, exist_ok=True)
         version = len(list(versions.glob("plan-*.json"))) + 1
         payload = {
             "run_id": run_id,
             "plan_version": version,
+            "planning_state": planning_state,
             "plan": deepcopy(dict(plan)),
         }
+        context = result.get("context")
+        if isinstance(context, Mapping):
+            payload["context"] = deepcopy(dict(context))
         _atomic_json(
             versions / f"plan-{version:04d}.json",
             payload,
