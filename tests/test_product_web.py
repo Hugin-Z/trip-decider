@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
@@ -42,10 +43,10 @@ from trip_decider.destination_runtime import (
     execute_destination_intent,
 )
 from trip_decider.guided_discovery import (
-    GuidedEvidenceCache,
     build_guided_comparison,
     guided_region_seeds,
 )
+from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
     DEFAULT_AGENT_STORE,
@@ -434,6 +435,8 @@ class ProductWebContractTests(unittest.TestCase):
                     {
                         "source_type": "official_api",
                         "locator": "test",
+                        "provider": "中国铁路12306",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
                     },
                 ),
             )
@@ -501,6 +504,8 @@ class ProductWebContractTests(unittest.TestCase):
                     {
                         "source_type": "official_api",
                         "locator": "test",
+                        "provider": "中国铁路12306",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
                     },
                 ),
             )
@@ -513,7 +518,6 @@ class ProductWebContractTests(unittest.TestCase):
             intent,
             railway_collector=railway,
             progress=progress,
-            cache=GuidedEvidenceCache(),
         )
         elapsed = time.monotonic() - started
         self.assertEqual(result["option_count"], 2)
@@ -553,7 +557,6 @@ class ProductWebContractTests(unittest.TestCase):
             intent,
             railway_collector=slow_railway,
             timeouts={"railway": 0.02},
-            cache=GuidedEvidenceCache(),
         )
         self.assertLess(time.monotonic() - started, 0.12)
         self.assertEqual(result["option_count"], 2)
@@ -566,7 +569,7 @@ class ProductWebContractTests(unittest.TestCase):
             self.assertEqual(rail["status"], "MISSING")
             self.assertTrue(rail["timed_out"])
 
-    def test_guided_cache_reuses_exact_request_and_marks_stale(self) -> None:
+    def test_guided_broker_queries_live_before_exact_stale_fallback(self) -> None:
         intent = TravelIntent.from_mapping(
             {
                 "task_mode": "GUIDED_DISCOVERY",
@@ -582,11 +585,28 @@ class ProductWebContractTests(unittest.TestCase):
             }
         )
         calls = 0
-        cache = GuidedEvidenceCache(live_seconds=0, stale_seconds=60)
+        broker = EvidenceBroker(
+            clock=lambda: datetime(
+                2026,
+                7,
+                30,
+                12,
+                30,
+                tzinfo=timezone.utc,
+            )
+        )
 
         def railway(contract: TravelIntent) -> EvidenceItem:
             nonlocal calls
             calls += 1
+            if calls > 2:
+                return EvidenceItem(
+                    evidence_id="refresh-failed",
+                    domain="railway",
+                    status=EvidenceStatus.MISSING,
+                    value={"attempted_at": "2026-07-30T12:30:00+00:00"},
+                    missing_reason="rail_http",
+                )
             return EvidenceItem(
                 evidence_id=str(contract.destination_anchor),
                 domain="railway",
@@ -603,6 +623,8 @@ class ProductWebContractTests(unittest.TestCase):
                     {
                         "source_type": "official_api",
                         "locator": "test",
+                        "provider": "中国铁路12306",
+                        "retrieved_at": "2026-07-30T12:00:00+00:00",
                     },
                 ),
             )
@@ -610,15 +632,16 @@ class ProductWebContractTests(unittest.TestCase):
         build_guided_comparison(
             intent,
             railway_collector=railway,
-            cache=cache,
+            run_id="guided-run-one",
+            evidence_broker=broker,
         )
-        time.sleep(0.01)
         reused = build_guided_comparison(
             intent,
             railway_collector=railway,
-            cache=cache,
+            run_id="guided-run-two",
+            evidence_broker=broker,
         )
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 4)
         for option in reused["options"]:
             self.assertEqual(
                 option["roundtrip_transport"]["status"],

@@ -445,13 +445,14 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 "run.json",
                 "events.jsonl",
                 "action-loop.json",
-                "evidence.json",
+                "evidence/namespace.json",
+                "evidence/current.json",
                 "plan-version.json",
                 "plans/plan-0001.json",
             ):
                 self.assertTrue((run_directory / relative).is_file())
             evidence = json.loads(
-                (run_directory / "evidence.json").read_text(
+                (run_directory / "evidence" / "current.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -503,7 +504,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             persisted = json.loads(
                 (
-                    runtime_root / run.run_id / "evidence.json"
+                    runtime_root / run.run_id / "evidence" / "current.json"
                 ).read_text(encoding="utf-8")
             )
             railway = next(

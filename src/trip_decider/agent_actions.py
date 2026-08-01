@@ -25,6 +25,12 @@ from trip_decider.destination_runtime import (
     collect_railway_evidence,
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
+from trip_decider.evidence_broker import (
+    DEFAULT_EVIDENCE_BROKER,
+    EvidenceBroker,
+    evidence_collected_at,
+    query_for_intent_domain,
+)
 from trip_decider.itinerary_planner import (
     plan_destination_context,
     validate_destination_plan,
@@ -482,6 +488,7 @@ def execute_registered_action(
     action_id: str,
     *,
     store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
 ) -> dict[str, object]:
     """Execute one registered 12306, AMap, or Planner action."""
 
@@ -582,18 +589,41 @@ def execute_registered_action(
 
     if not isinstance(outcome, EvidenceItem):
         raise TravelAgentError("evidence action returned an invalid value")
-    if (
-        outcome.status is not EvidenceStatus.SOURCED
-        and action_id not in state.last_sourced_evidence
-    ):
-        previous = _recent_sourced_evidence(
-            run_id,
-            run.intent,
-            action_id,
-            store=store,
+    query = _broker_query(run.intent, action_id, state)
+    usable_live = _is_usable_action_evidence(action_id, query.data_type, outcome)
+    if usable_live:
+        collected_at = evidence_collected_at(outcome)
+        if collected_at is not None:
+            try:
+                evidence_broker.publish(
+                    run_id=run_id,
+                    query=query,
+                    evidence=outcome,
+                    collected_at=collected_at,
+                )
+            except TravelAgentError:
+                store.append_event(
+                    run_id,
+                    event_type="evidence.cache_rejected",
+                    status="completed",
+                    message="本次证据可使用，但不满足跨任务缓存条件。",
+                    details={"tool": action_id},
+                )
+    elif action_id in state.last_sourced_evidence:
+        previous = state.last_sourced_evidence[action_id]
+        outcome = (
+            _stale_railway_evidence(previous, outcome)
+            if action_id == "railway"
+            else _stale_generic_evidence(previous, outcome)
         )
-        if previous is not None:
-            state.last_sourced_evidence[action_id] = previous
+    else:
+        stale = evidence_broker.stale_after_failure(
+            run_id=run_id,
+            query=query,
+            live_failure=outcome,
+        )
+        if stale is not None:
+            outcome = stale
     store.append_event(
         run_id,
         event_type="tool.timed",
@@ -1148,6 +1178,38 @@ def _stale_generic_evidence(
     value["refresh_failure"] = {
         "missing_reason": failed_refresh.missing_reason,
     }
+    routes = value.get("local_transit")
+    if isinstance(routes, list):
+        stale_routes: list[object] = []
+        for route in routes:
+            if not isinstance(route, Mapping):
+                stale_routes.append(deepcopy(route))
+                continue
+            normalized_route = deepcopy(dict(route))
+            normalized_route["evidence_status"] = "STALE"
+            normalized_route["schedule_status"] = "STALE"
+            if "fare" in normalized_route:
+                normalized_route["fare"] = {
+                    "status": "unknown",
+                    "amount_cny": None,
+                }
+            stale_routes.append(normalized_route)
+        value["local_transit"] = stale_routes
+    hotels = value.get("hotel_candidates")
+    if isinstance(hotels, list):
+        sanitized_hotels: list[object] = []
+        for hotel in hotels:
+            if not isinstance(hotel, Mapping):
+                sanitized_hotels.append(deepcopy(hotel))
+                continue
+            sanitized = deepcopy(dict(hotel))
+            for key in tuple(sanitized):
+                if "price" in str(key).lower():
+                    sanitized[key] = None
+            sanitized["price_status"] = "UNKNOWN"
+            sanitized_hotels.append(sanitized)
+        value["hotel_candidates"] = sanitized_hotels
+        value["hotel_price_status"] = "UNKNOWN"
     return EvidenceItem(
         evidence_id=previous.evidence_id,
         domain=previous.domain,
@@ -1307,53 +1369,39 @@ def _latest_retrieved_at(
     return max(values) if values else None
 
 
-def _recent_sourced_evidence(
-    run_id: str,
+def _broker_query(
     intent: TravelIntent,
-    domain: str,
-    *,
-    store: InMemoryAgentStore,
-) -> EvidenceItem | None:
-    for previous_run in store.list_runs():
-        if previous_run.run_id == run_id:
-            continue
-        if domain == "railway":
-            if any(
-                getattr(previous_run.intent, field_name)
-                != getattr(intent, field_name)
-                for field_name in (
-                    "origin",
-                    "destination_anchor",
-                    "earliest_departure_at",
-                    "latest_return_at",
-                )
-            ):
-                continue
-        elif (
-            previous_run.intent.destination_anchor
-            != intent.destination_anchor
-        ):
-            continue
-        previous_state = _STATES.get(previous_run.run_id)
-        if previous_state is None:
-            previous_state = _load_loop_state(
-                previous_run.run_id,
-                store,
-            )
-        if previous_state is None:
-            continue
-        item = previous_state.last_sourced_evidence.get(domain)
-        if item is None:
-            candidate = previous_state.evidence.get(domain)
-            item = (
-                candidate
-                if candidate is not None
-                and candidate.status is EvidenceStatus.SOURCED
-                else None
-            )
-        if item is not None:
-            return item
-    return None
+    action_id: str,
+    state: _LoopState,
+):
+    return query_for_intent_domain(
+        intent,
+        action_id,
+        route_inputs=(
+            _web_route_inputs(state.evidence.get("web"))
+            if action_id == "map"
+            else None
+        ),
+    )
+
+
+def _is_usable_action_evidence(
+    action_id: str,
+    data_type: str,
+    evidence: EvidenceItem,
+) -> bool:
+    if evidence.status is not EvidenceStatus.SOURCED:
+        return False
+    if action_id != "map" or data_type != "route_duration":
+        return True
+    value = evidence.value
+    return (
+        isinstance(value, Mapping)
+        and value.get("local_transit_result_status")
+        in {"AVAILABLE", "PARTIAL"}
+        and isinstance(value.get("local_transit"), list)
+        and bool(value["local_transit"])
+    )
 
 
 def _web_route_inputs(
@@ -1895,7 +1943,7 @@ def _persist_loop_state(
         state.to_dict(),
     )
     _atomic_runtime_json(
-        run_directory / "evidence.json",
+        run_directory / "evidence" / "current.json",
         state.evidence_dict(run_id),
     )
 
@@ -1908,7 +1956,10 @@ def _load_loop_state(
     if run_directory is None:
         return None
     action_path = run_directory / "action-loop.json"
-    evidence_path = run_directory / "evidence.json"
+    evidence_path = run_directory / "evidence" / "current.json"
+    legacy_evidence_path = run_directory / "evidence.json"
+    if not evidence_path.exists() and legacy_evidence_path.is_file():
+        evidence_path = legacy_evidence_path
     if not action_path.exists() and not evidence_path.exists():
         return None
     if not action_path.is_file() or not evidence_path.is_file():

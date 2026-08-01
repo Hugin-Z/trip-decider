@@ -1103,6 +1103,18 @@ class InMemoryAgentStore:
         if run_directory is None:
             return
         run_directory.mkdir(parents=True, exist_ok=True)
+        evidence_directory = run_directory / "evidence"
+        evidence_directory.mkdir(parents=True, exist_ok=True)
+        namespace_path = evidence_directory / "namespace.json"
+        if not namespace_path.exists():
+            _atomic_json(
+                namespace_path,
+                {
+                    "schema_version": "1",
+                    "run_id": run.run_id,
+                    "created_at": run.created_at,
+                },
+            )
         session = self._sessions[run.session_id]
         _atomic_json(run_directory / "session.json", session.to_dict())
         _atomic_json(run_directory / "run.json", run.to_dict())

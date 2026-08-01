@@ -613,7 +613,7 @@ function showMapRouteStatus(route) {
   if (route.evidence_status === "STALE") {
     setStatus(
       status,
-      `${route.from} → ${route.to}：${mode}历史快照，采集于 ${
+      `${route.from} → ${route.to}：${mode}较早数据，采集于 ${
         formatDateTime(route.retrieved_at)
       }；路线以虚线显示。`,
     );
@@ -690,7 +690,7 @@ function renderRailwayMapCards(payload) {
       const note = document.createElement("small");
       note.textContent = (
         segment.evidence_status === "STALE" && segment.retrieved_at
-          ? `历史快照，采集于 ${formatDateTime(segment.retrieved_at)}；不绘制铁路轨迹`
+          ? `较早数据，采集于 ${formatDateTime(segment.retrieved_at)}；不绘制铁路轨迹`
           : "仅显示车站和时间费用，不绘制铁路轨迹"
       );
       card.addEventListener("click", () => {
@@ -914,7 +914,7 @@ async function renderMapPanel(payload) {
       setStatus(
         status,
         `已显示 ${drawableMarkers} 个地点、${drawableRoutes} 段路线${
-          staleRoutes ? `；${staleRoutes} 段为历史快照虚线` : ""
+          staleRoutes ? `；${staleRoutes} 段为较早数据虚线` : ""
         }。`,
       );
     }
@@ -1100,8 +1100,8 @@ function renderEvidenceStatuses(target, presentation) {
     const row = document.createElement("li");
     const status = {
       LIVE: "本次查询",
-      STALE: "历史快照",
-      MISSING: "待核验",
+      STALE: "较早数据",
+      MISSING: "尚未取得",
     }[item.status] || "待核验";
     const collected = item.retrieved_at
       ? ` · 采集于 ${formatDateTime(item.retrieved_at)}`
@@ -1184,7 +1184,7 @@ function renderLocalTransitReferences(target, plan) {
   routes.forEach((route) => {
     const item = document.createElement("li");
     const freshness = route.schedule_status === "STALE"
-      ? "历史快照"
+      ? "较早数据"
       : "本次查询";
     item.textContent = `${route.from} → ${route.to}：${
       formatDurationSeconds(route.duration_seconds)

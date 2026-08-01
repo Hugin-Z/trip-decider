@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -117,10 +117,23 @@ def _json_bytes(value: object) -> bytes:
 def _guided_evidence_path(run_id: str) -> Path | None:
     run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
     return (
+        run_directory / "evidence" / "guided-comparison.json"
+        if run_directory is not None
+        else None
+    )
+
+
+def _guided_evidence_read_path(run_id: str) -> Path | None:
+    path = _guided_evidence_path(run_id)
+    if path is None or path.is_file():
+        return path
+    run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
+    legacy = (
         run_directory / "guided-evidence.json"
         if run_directory is not None
         else None
     )
+    return legacy if legacy is not None and legacy.is_file() else path
 
 
 def _persist_guided_evidence(
@@ -143,251 +156,11 @@ def _persist_guided_evidence(
     os.replace(temporary, path)
 
 
-def _evidence_retrieved_at(item: EvidenceItem) -> str | None:
-    value = item.value
-    if isinstance(value, Mapping):
-        snapshot = value.get("snapshot")
-        if isinstance(snapshot, Mapping):
-            retrieved_at = snapshot.get("retrieved_at")
-            if isinstance(retrieved_at, str) and retrieved_at:
-                return retrieved_at
-        retrieved_at = value.get("retrieved_at")
-        if isinstance(retrieved_at, str) and retrieved_at:
-            return retrieved_at
-    values = [
-        str(source["retrieved_at"])
-        for source in item.sources
-        if isinstance(source.get("retrieved_at"), str)
-    ]
-    return max(values) if values else None
-
-
-def _cached_evidence(item: EvidenceItem) -> EvidenceItem:
-    """Project reusable evidence with explicit current-day stale semantics."""
-
-    if (
-        item.status is not EvidenceStatus.SOURCED
-        or not isinstance(item.value, Mapping)
-    ):
-        return item
-    retrieved_at = _evidence_retrieved_at(item)
-    if retrieved_at is None:
-        return item
-    try:
-        collected = datetime.fromisoformat(retrieved_at)
-    except ValueError:
-        return item
-    if collected.tzinfo is None:
-        collected = collected.astimezone()
-    stale = datetime.now().astimezone() - collected > timedelta(
-        minutes=15
-    )
-    value = deepcopy(dict(item.value))
-    if item.domain == "railway":
-        snapshot = value.get("snapshot")
-        if isinstance(snapshot, Mapping) and stale:
-            normalized_snapshot = deepcopy(dict(snapshot))
-            normalized_snapshot.update(
-                {
-                    "status": "STALE",
-                    "availability_semantics": "not_current_availability",
-                    "display": (
-                        f"STALE · 采集于 {retrieved_at} · "
-                        "仅作历史参考，不代表当前余票"
-                    ),
-                }
-            )
-            value["snapshot"] = normalized_snapshot
-            for direction in ("outbound", "return"):
-                train = value.get(direction)
-                if isinstance(train, Mapping):
-                    normalized_train = deepcopy(dict(train))
-                    normalized_train["schedule_status"] = "STALE"
-                    normalized_train["fare_status"] = "STALE"
-                    normalized_train[
-                        "second_class_availability"
-                    ] = "UNKNOWN"
-                    value[direction] = normalized_train
-    elif stale:
-        value["snapshot_status"] = "STALE"
-        value["retrieved_at"] = retrieved_at
-    return EvidenceItem.from_mapping(
-        {
-            **item.to_dict(),
-            "value": value,
-        }
-    )
-
-
-def _rail_matches_guided_intent(
-    item: EvidenceItem,
-    intent: TravelIntent,
-) -> bool:
-    value = item.value
-    window = (
-        value.get("travel_window")
-        if isinstance(value, Mapping)
-        else None
-    )
-    return bool(
-        item.status is EvidenceStatus.SOURCED
-        and isinstance(value, Mapping)
-        and isinstance(window, Mapping)
-        and value.get("origin") == intent.origin
-        and window.get("earliest_departure_at")
-        == intent.earliest_departure_at
-        and window.get("latest_return_at")
-        == intent.latest_return_at
-        and value.get("travelers") == intent.travelers
-    )
-
-
-def _recent_guided_evidence(
-    intent: TravelIntent,
-    *,
-    exclude_run_id: str,
-) -> dict[str, dict[str, EvidenceItem]]:
-    root = DEFAULT_AGENT_STORE.runtime_root
-    if root is None:
-        return {}
-    selected: dict[
-        tuple[str, str],
-        tuple[str, EvidenceItem],
-    ] = {}
-    for path in root.glob("*/guided-evidence.json"):
-        if path.parent.name == exclude_run_id:
-            continue
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        destinations = (
-            document.get("destinations")
-            if isinstance(document, Mapping)
-            else None
-        )
-        if not isinstance(destinations, Mapping):
-            continue
-        for destination_id, domains in destinations.items():
-            if (
-                not isinstance(destination_id, str)
-                or not isinstance(domains, Mapping)
-            ):
-                continue
-            for domain, raw_item in domains.items():
-                if (
-                    domain not in {"railway", "map", "web"}
-                    or not isinstance(raw_item, Mapping)
-                ):
-                    continue
-                try:
-                    item = EvidenceItem.from_mapping(raw_item)
-                except (TypeError, ValueError, TravelAgentError):
-                    continue
-                if domain != "railway" or not _rail_matches_guided_intent(
-                    item,
-                    intent,
-                ):
-                    continue
-                retrieved_at = _evidence_retrieved_at(item) or ""
-                key = (destination_id, domain)
-                if key not in selected or retrieved_at > selected[key][0]:
-                    selected[key] = (
-                        retrieved_at,
-                        _cached_evidence(item),
-                    )
-    result: dict[str, dict[str, EvidenceItem]] = {}
-    for (destination_id, domain), (_time, item) in selected.items():
-        result.setdefault(destination_id, {})[domain] = item
-    return result
-
-
-def _intent_query_matches(
-    raw: Mapping[str, object],
-    intent: TravelIntent,
-) -> bool:
-    expected = intent.to_dict()
-    return all(
-        raw.get(field) == expected.get(field)
-        for field in (
-            "origin",
-            "destination_anchor",
-            "earliest_departure_at",
-            "latest_return_at",
-            "travelers",
-            "total_budget_cny",
-        )
-    )
-
-
-def _recent_detail_evidence(
-    intent: TravelIntent,
-    *,
-    exclude_run_id: str,
-) -> dict[str, EvidenceItem]:
-    root = DEFAULT_AGENT_STORE.runtime_root
-    if root is None:
-        return {}
-    selected: dict[str, tuple[str, EvidenceItem]] = {}
-    for evidence_path in root.glob("*/evidence.json"):
-        if evidence_path.parent.name == exclude_run_id:
-            continue
-        run_path = evidence_path.parent / "run.json"
-        try:
-            run_document = json.loads(run_path.read_text(encoding="utf-8"))
-            evidence_document = json.loads(
-                evidence_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        raw_intent = (
-            run_document.get("intent")
-            if isinstance(run_document, Mapping)
-            else None
-        )
-        current = (
-            evidence_document.get("current")
-            if isinstance(evidence_document, Mapping)
-            else None
-        )
-        if (
-            not isinstance(raw_intent, Mapping)
-            or not _intent_query_matches(raw_intent, intent)
-            or not isinstance(current, list)
-        ):
-            continue
-        for raw_item in current:
-            if not isinstance(raw_item, Mapping):
-                continue
-            try:
-                item = EvidenceItem.from_mapping(raw_item)
-            except (TypeError, ValueError, TravelAgentError):
-                continue
-            if (
-                item.domain not in {"railway", "map", "web"}
-                or item.status is not EvidenceStatus.SOURCED
-            ):
-                continue
-            retrieved_at = _evidence_retrieved_at(item) or ""
-            if (
-                item.domain not in selected
-                or retrieved_at > selected[item.domain][0]
-            ):
-                selected[item.domain] = (
-                    retrieved_at,
-                    _cached_evidence(item),
-                )
-    return {
-        domain: item
-        for domain, (_time, item) in selected.items()
-    }
-
-
 def _guided_evidence_for_selection(
     run_id: str,
     destination_id: str,
 ) -> dict[str, EvidenceItem]:
-    path = _guided_evidence_path(run_id)
+    path = _guided_evidence_read_path(run_id)
     if path is None or not path.is_file():
         return {}
     try:
@@ -1609,7 +1382,10 @@ def _current_run_evidence(
     run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
     if run_directory is None:
         return {}
-    path = run_directory / "evidence.json"
+    path = run_directory / "evidence" / "current.json"
+    legacy = run_directory / "evidence.json"
+    if not path.is_file() and legacy.is_file():
+        path = legacy
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -2951,6 +2727,7 @@ def _candidate_comparison_background(
             railway_collector=collect_railway_evidence,
             map_collector=collect_map_evidence,
             web_collector=collect_live_destination_profile,
+            run_id=run_id,
             initial_evidence=None,
             progress=progress,
             should_cancel=(

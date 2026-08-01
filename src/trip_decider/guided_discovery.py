@@ -11,11 +11,17 @@ from concurrent.futures import (
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from threading import RLock
 import time
 from typing import Protocol
+from uuid import uuid4
 
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
+from trip_decider.evidence_broker import (
+    DEFAULT_EVIDENCE_BROKER,
+    EvidenceBroker,
+    evidence_collected_at,
+    query_for_intent_domain,
+)
 from trip_decider.travel_agent import (
     EvidenceItem,
     EvidenceStatus,
@@ -42,8 +48,6 @@ _DEFAULT_TIMEOUTS = {
     "map": 15.0,
     "web": 10.0,
 }
-_CACHE_LIVE_SECONDS = 15 * 60
-_CACHE_STALE_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -53,78 +57,6 @@ class _EvidenceCheck:
     collected_at: str | None
     from_cache: bool
     timed_out: bool = False
-
-
-class GuidedEvidenceCache:
-    """Small process-local cache keyed by the exact guided query contract."""
-
-    def __init__(
-        self,
-        *,
-        live_seconds: float = _CACHE_LIVE_SECONDS,
-        stale_seconds: float = _CACHE_STALE_SECONDS,
-    ) -> None:
-        self._live_seconds = live_seconds
-        self._stale_seconds = stale_seconds
-        self._lock = RLock()
-        self._entries: dict[
-            tuple[str, str, str, str, str],
-            tuple[float, str, EvidenceItem],
-        ] = {}
-
-    def get(
-        self,
-        key: tuple[str, str, str, str, str],
-    ) -> _EvidenceCheck | None:
-        now = time.time()
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return None
-            stored_at, collected_at, evidence = entry
-            age = max(0.0, now - stored_at)
-            if age > self._stale_seconds:
-                del self._entries[key]
-                return None
-            value = evidence.value
-            snapshot = (
-                value.get("snapshot")
-                if isinstance(value, Mapping)
-                else None
-            )
-            declared_stale = (
-                isinstance(snapshot, Mapping)
-                and snapshot.get("status") == "STALE"
-            )
-            return _EvidenceCheck(
-                evidence=evidence,
-                display_status=(
-                    "STALE"
-                    if declared_stale or age > self._live_seconds
-                    else "LIVE"
-                ),
-                collected_at=collected_at,
-                from_cache=True,
-            )
-
-    def put(
-        self,
-        key: tuple[str, str, str, str, str],
-        evidence: EvidenceItem,
-        *,
-        collected_at: str,
-    ) -> None:
-        if evidence.status is not EvidenceStatus.SOURCED:
-            return
-        with self._lock:
-            self._entries[key] = (
-                time.time(),
-                collected_at,
-                evidence,
-            )
-
-
-DEFAULT_GUIDED_EVIDENCE_CACHE = GuidedEvidenceCache()
 
 
 def guided_region_seeds(
@@ -171,7 +103,8 @@ def build_guided_comparison(
     map_collector: EvidenceCollector | None = None,
     web_collector: EvidenceCollector | None = None,
     timeouts: Mapping[str, float] | None = None,
-    cache: GuidedEvidenceCache = DEFAULT_GUIDED_EVIDENCE_CACHE,
+    run_id: str | None = None,
+    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
     initial_evidence: Mapping[
         str,
         Mapping[str, EvidenceItem],
@@ -182,6 +115,7 @@ def build_guided_comparison(
 ) -> dict[str, object]:
     """Check regional options concurrently and stream each completed card."""
 
+    active_run_id = run_id or f"ephemeral-guided-{uuid4()}"
     seeds = guided_region_seeds(intent, limit=3)
     if progress is not None:
         progress(
@@ -282,23 +216,6 @@ def build_guided_comparison(
                         },
                     )
                 continue
-            cache_key = _cache_key(domain, candidate_intent)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                checks[seed_id][domain] = cached
-                if progress is not None:
-                    progress(
-                        "domain_completed",
-                        name,
-                        {
-                            "destination_id": seed_id,
-                            "domain": domain,
-                            "evidence_status": cached.display_status,
-                            "from_cache": True,
-                            "collected_at": cached.collected_at,
-                        },
-                    )
-                continue
             if collector is None:
                 checks[seed_id][domain] = _missing_check(
                     domain,
@@ -380,31 +297,91 @@ def build_guided_comparison(
                         raise TravelAgentError(
                             "guided collector returned wrong evidence domain"
                         )
-                    check = _check_from_evidence(evidence)
-                    checks[seed_id][domain] = check
+                    candidate_intent = replace(
+                        intent,
+                        task_mode=TaskMode.DIRECT_PLAN,
+                        destination_anchor=(
+                            gateways[seed_id]
+                            if domain == "railway"
+                            else str(seed_by_id[seed_id]["name"])
+                        ),
+                        destination_expression=None,
+                    )
+                    query = query_for_intent_domain(
+                        candidate_intent,
+                        domain,
+                    )
                     if evidence.status is EvidenceStatus.SOURCED:
-                        cache.put(
-                            _cache_key(
-                                domain,
-                                replace(
-                                    intent,
-                                    task_mode=TaskMode.DIRECT_PLAN,
-                                    destination_anchor=(
-                                        gateways[seed_id]
-                                        if domain == "railway"
-                                        else str(seed_by_id[seed_id]["name"])
-                                    ),
-                                ),
-                            ),
-                            evidence,
-                            collected_at=(
-                                check.collected_at or _now_iso()
-                            ),
+                        collected_at = evidence_collected_at(evidence)
+                        if collected_at is not None:
+                            try:
+                                evidence_broker.publish(
+                                    run_id=active_run_id,
+                                    query=query,
+                                    evidence=evidence,
+                                    collected_at=collected_at,
+                                )
+                            except TravelAgentError:
+                                if progress is not None:
+                                    progress(
+                                        "cache_rejected",
+                                        str(seed_by_id[seed_id]["name"]),
+                                        {
+                                            "destination_id": seed_id,
+                                            "domain": domain,
+                                        },
+                                    )
+                    else:
+                        stale = evidence_broker.stale_after_failure(
+                            run_id=active_run_id,
+                            query=query,
+                            live_failure=evidence,
                         )
+                        if stale is not None:
+                            evidence = stale
+                    check = _check_from_evidence(evidence)
+                    checks[seed_id][domain] = replace(
+                        check,
+                        from_cache=(
+                            isinstance(evidence.value, Mapping)
+                            and isinstance(
+                                evidence.value.get("freshness"),
+                                Mapping,
+                            )
+                            and evidence.value["freshness"].get("status")
+                            == "STALE"
+                        ),
+                    )
                 except Exception as error:
-                    checks[seed_id][domain] = _missing_check(
+                    failure = _missing_check(
                         domain,
                         "collector_error:" + type(error).__name__,
+                    )
+                    candidate_intent = replace(
+                        intent,
+                        task_mode=TaskMode.DIRECT_PLAN,
+                        destination_anchor=(
+                            gateways[seed_id]
+                            if domain == "railway"
+                            else str(seed_by_id[seed_id]["name"])
+                        ),
+                        destination_expression=None,
+                    )
+                    stale = evidence_broker.stale_after_failure(
+                        run_id=active_run_id,
+                        query=query_for_intent_domain(
+                            candidate_intent,
+                            domain,
+                        ),
+                        live_failure=failure.evidence,
+                    )
+                    checks[seed_id][domain] = (
+                        replace(
+                            _check_from_evidence(stale),
+                            from_cache=True,
+                        )
+                        if stale is not None
+                        else failure
                     )
                 check = checks[seed_id][domain]
                 if progress is not None:
@@ -432,6 +409,30 @@ def build_guided_comparison(
                     "collector_timeout",
                     timed_out=True,
                 )
+                candidate_intent = replace(
+                    intent,
+                    task_mode=TaskMode.DIRECT_PLAN,
+                    destination_anchor=(
+                        gateways[seed_id]
+                        if domain == "railway"
+                        else str(seed_by_id[seed_id]["name"])
+                    ),
+                    destination_expression=None,
+                )
+                stale = evidence_broker.stale_after_failure(
+                    run_id=active_run_id,
+                    query=query_for_intent_domain(
+                        candidate_intent,
+                        domain,
+                    ),
+                    live_failure=checks[seed_id][domain].evidence,
+                )
+                if stale is not None:
+                    checks[seed_id][domain] = replace(
+                        _check_from_evidence(stale),
+                        from_cache=True,
+                        timed_out=True,
+                    )
                 if progress is not None:
                     progress(
                         "domain_timeout",
@@ -602,10 +603,23 @@ def _check_from_evidence(evidence: EvidenceItem) -> _EvidenceCheck:
         if isinstance(value, Mapping)
         else None
     )
+    freshness = (
+        value.get("freshness")
+        if isinstance(value, Mapping)
+        else None
+    )
     if (
         display_status == "LIVE"
-        and isinstance(snapshot, Mapping)
-        and snapshot.get("status") == "STALE"
+        and (
+            (
+                isinstance(snapshot, Mapping)
+                and snapshot.get("status") == "STALE"
+            )
+            or (
+                isinstance(freshness, Mapping)
+                and freshness.get("status") == "STALE"
+            )
+        )
     ):
         display_status = "STALE"
     return _EvidenceCheck(
@@ -653,19 +667,6 @@ def _evidence_collected_at(evidence: EvidenceItem) -> str:
         if isinstance(retrieved_at, str) and retrieved_at:
             return retrieved_at
     return _now_iso()
-
-
-def _cache_key(
-    domain: str,
-    intent: TravelIntent,
-) -> tuple[str, str, str, str, str]:
-    return (
-        domain,
-        intent.origin or "",
-        intent.destination_anchor or "",
-        intent.earliest_departure_at or "",
-        intent.latest_return_at or "",
-    )
 
 
 def _now_iso() -> str:
@@ -762,8 +763,6 @@ def _region_match_score(
 
 
 __all__ = [
-    "DEFAULT_GUIDED_EVIDENCE_CACHE",
-    "GuidedEvidenceCache",
     "build_guided_comparison",
     "guided_region_seeds",
     "preferred_direct_destination",
