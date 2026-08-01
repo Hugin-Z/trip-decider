@@ -67,6 +67,30 @@ class ProductRequestError(ValueError):
     """Raised for malformed local product API input."""
 
 
+def configure_services(
+    application: TripApplicationService,
+    query: TripQueryService,
+) -> None:
+    """Install one injected command/query bundle for this Web adapter.
+
+    This is used when Web and MCP are hosted by one local process.  The Web
+    adapter still calls only the public application/query boundaries.
+    """
+
+    if query.application_service is not application:
+        raise ValueError(
+            "Web query service must reference the injected application service"
+        )
+    if query.store is not application.store:
+        raise ValueError("Web command and query services must share one store")
+    global DEFAULT_AGENT_STORE
+    global DEFAULT_TRIP_APPLICATION_SERVICE
+    global DEFAULT_TRIP_QUERY_SERVICE
+    DEFAULT_AGENT_STORE = application.store
+    DEFAULT_TRIP_APPLICATION_SERVICE = application
+    DEFAULT_TRIP_QUERY_SERVICE = query
+
+
 def _application_service() -> TripApplicationService:
     """Return the one application service over the active authoritative store."""
 

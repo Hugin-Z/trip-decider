@@ -8,9 +8,13 @@ version = "0.1.0"
 description = "Strict artifact contract validation for trip-decider."
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "mcp==2.0.0",
     "PyYAML==6.0.3",
     "jsonschema[format-nongpl]==4.26.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+trip_decider = ["*.html"]

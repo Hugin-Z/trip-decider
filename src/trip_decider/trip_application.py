@@ -281,6 +281,16 @@ class TripApplicationService:
         run_id: str,
         evidence: EvidenceItem | Mapping[str, object],
     ) -> ApplicationOutcome:
+        previous = self.store.get_run(run_id)
+        if (
+            previous.status is RunStatus.BLOCKED
+            and previous.intent.task_mode is TaskMode.DIRECT_PLAN
+        ):
+            restart_action_loop_for_intent(
+                run_id,
+                previous.intent,
+                store=self.store,
+            )
         action_state = submit_evidence(
             run_id,
             evidence,

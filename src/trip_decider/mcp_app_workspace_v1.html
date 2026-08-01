@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trip Decider</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --surface: light-dark(#ffffff, #171a1f);
+      --surface-soft: light-dark(#f4f6f8, #22262d);
+      --text: light-dark(#17202a, #f2f5f8);
+      --muted: light-dark(#667085, #aab4c3);
+      --line: light-dark(#d8dee7, #39414d);
+      --accent: #156b55;
+      --accent-soft: light-dark(#e6f4ef, #173c32);
+      --warning: light-dark(#8a4b08, #ffd29c);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+        "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--text); background: transparent; }
+    button, input, select, textarea { font: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible,
+    textarea:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 2px; }
+    .app { display: grid; gap: 14px; padding: 12px; min-width: 0; }
+    .app.full { max-width: 1180px; margin: 0 auto; }
+    .toolbar { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .title { margin: 0; font-size: 1.15rem; }
+    .subtitle, .muted { color: var(--muted); }
+    .subtitle { margin: 3px 0 0; font-size: .88rem; }
+    .button { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); padding: 8px 12px; cursor: pointer; }
+    .button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .button:disabled { cursor: wait; opacity: .58; }
+    .cards { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(250px, 1fr); gap: 12px; overflow-x: auto; padding: 2px 2px 8px; scroll-snap-type: x proximity; }
+    .card, .panel { border: 1px solid var(--line); border-radius: 13px; background: var(--surface); padding: 14px; }
+    .card { scroll-snap-align: start; display: grid; gap: 11px; align-content: start; }
+    .card h3, .panel h3, .day h3 { margin: 0; }
+    .status { display: inline-flex; width: fit-content; border-radius: 999px; background: var(--accent-soft); padding: 4px 8px; font-size: .78rem; }
+    dl { display: grid; grid-template-columns: minmax(88px, auto) 1fr; gap: 6px 10px; margin: 0; font-size: .87rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+    ul { margin: 7px 0 0; padding-left: 20px; }
+    .plan-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(230px, .8fr); gap: 14px; align-items: start; }
+    .timeline { display: grid; gap: 12px; }
+    .day { border-left: 3px solid var(--accent); padding: 2px 0 2px 14px; }
+    .events { display: grid; gap: 8px; margin-top: 10px; }
+    .event { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+    .event:first-child { border-top: 0; }
+    .event time { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .event strong { display: block; }
+    .event p { margin: 3px 0 0; color: var(--muted); font-size: .84rem; }
+    .sidebar { display: grid; gap: 12px; }
+    .budget-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 7px 0; }
+    .budget-row:first-of-type { border-top: 0; }
+    .route { border-top: 1px solid var(--line); padding: 8px 0; }
+    .route:first-of-type { border-top: 0; }
+    .route small { display: block; color: var(--muted); margin-top: 3px; }
+    .revision { display: grid; gap: 9px; }
+    .revision label { display: grid; gap: 5px; font-size: .84rem; color: var(--muted); }
+    .revision select, .revision textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); padding: 8px; }
+    .revision textarea { resize: vertical; min-height: 64px; }
+    .notice { border-radius: 10px; background: var(--surface-soft); padding: 10px 12px; color: var(--muted); }
+    .notice.error { color: var(--warning); }
+    .diff-list { font-size: .86rem; }
+    .hidden { display: none !important; }
+    @media (max-width: 760px) {
+      .plan-grid { grid-template-columns: 1fr; }
+      .cards { grid-auto-columns: minmax(230px, 88vw); }
+      .event { grid-template-columns: 78px minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <main id="app" class="app" aria-live="polite">
+    <div class="notice">正在连接旅行任务…</div>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+      const app = document.getElementById("app");
+      let busy = false;
+      let rpcId = 0;
+      const pending = new Map();
+
+      const element = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
+      };
+      const finite = (value) => typeof value === "number" && Number.isFinite(value);
+      const money = (value) => finite(value) ? `¥${value.toLocaleString("zh-CN")}` : "待核验";
+      const duration = (seconds) => {
+        if (!finite(seconds)) return "待核验";
+        const minutes = Math.round(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const rest = minutes % 60;
+        return hours ? `${hours}小时${rest ? `${rest}分钟` : ""}` : `${rest}分钟`;
+      };
+      const clock = (value) => {
+        if (typeof value !== "string") return "待定";
+        const match = value.match(/T(\d{2}:\d{2})/);
+        return match ? match[1] : value;
+      };
+      const labels = {
+        FEASIBLE: "可行",
+        CONDITIONALLY_FEASIBLE: "有条件可行",
+        INFEASIBLE: "不可行",
+        UNKNOWN: "待核验",
+        PARTIAL_READY: "条件化行程",
+        PLAN_READY: "行程已生成",
+      };
+
+      const request = (method, params) => new Promise((resolve, reject) => {
+        const id = ++rpcId;
+        pending.set(id, {resolve, reject});
+        window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
+      });
+      const notify = (method, params) => {
+        window.parent.postMessage({jsonrpc: "2.0", method, params}, "*");
+      };
+      const initialize = async () => {
+        await request("ui/initialize", {
+          appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
+          appCapabilities: {},
+          protocolVersion: "2026-01-26",
+        });
+        notify("ui/notifications/initialized", {});
+        return true;
+      };
+      const bridgeReady = initialize().catch(() => false);
+
+      const structured = (response) => response?.structuredContent || response?.structured_content || null;
+      const callTool = async (name, args) => {
+        const ready = await bridgeReady;
+        if (ready) return request("tools/call", {name, arguments: args});
+        if (window.openai?.callTool) return window.openai.callTool(name, args);
+        throw new Error("host does not expose MCP Apps tool calls");
+      };
+
+      const heading = (title, subtitle) => {
+        const bar = element("header", "toolbar");
+        const copy = element("div");
+        copy.append(element("h2", "title", title), element("p", "subtitle", subtitle));
+        bar.append(copy);
+        if (window.openai?.requestDisplayMode) {
+          const expand = element("button", "button", "全屏查看");
+          expand.type = "button";
+          expand.addEventListener("click", async () => {
+            await window.openai.requestDisplayMode({mode: "fullscreen"});
+            app.classList.add("full");
+          });
+          bar.append(expand);
+        }
+        return bar;
+      };
+
+      const factList = (rows) => {
+        const list = element("dl");
+        rows.forEach(([name, value]) => {
+          list.append(element("dt", "", name), element("dd", "", value));
+        });
+        return list;
+      };
+
+      const renderCandidates = (payload) => {
+        app.replaceChildren();
+        const model = payload.candidates || {};
+        const options = Array.isArray(model.candidates) ? model.candidates : [];
+        app.append(heading("目的地方案比较", `${options.length} 个候选 · 选择后继续同一个旅行任务`));
+        const cards = element("section", "cards");
+        options.forEach((option) => {
+          const card = element("article", "card");
+          const title = option.name || option.destination_anchor || option.destination_id || "目的地候选";
+          const feasibility = option.feasibility_status || option.coarse_feasibility || option.coarse_plan_status || "UNKNOWN";
+          const transport = option.roundtrip_transport || {};
+          card.append(
+            element("h3", "", title),
+            element("span", "status", labels[feasibility] || feasibility),
+            factList([
+              ["往返交通", duration(transport.duration_seconds)],
+              ["已知费用", money(transport.known_cost_cny)],
+              ["可游玩时间", duration(option.playable_time_seconds)],
+              ["当地交通", option.local_transport_difficulty?.value || "待核验"],
+              ["主题", Array.isArray(option.themes) && option.themes.length ? option.themes.join("、") : "待核验"],
+              ["体力", option.physical_intensity || "待核验"],
+              ["预算余量", money(option.budget_headroom_after_known_transport_cny)],
+            ])
+          );
+          if (Array.isArray(option.evidence_missing) && option.evidence_missing.length) {
+            card.append(element("strong", "", "仍缺证据"));
+            const missing = element("ul");
+            option.evidence_missing.forEach((item) => missing.append(element("li", "", item)));
+            card.append(missing);
+          }
+          const choose = element("button", "button primary", "选择并生成详细行程");
+          choose.type = "button";
+          choose.addEventListener("click", async () => {
+            if (busy) return;
+            busy = true;
+            choose.disabled = true;
+            choose.textContent = "正在生成…";
+            try {
+              await callTool("select_trip_candidate", {
+                run_id: payload.run_id,
+                candidate_id: option.destination_id,
+              });
+              await callTool("advance_trip_task", {run_id: payload.run_id, wait_seconds: 10});
+              const response = await callTool("show_trip_plan", {run_id: payload.run_id});
+              const next = structured(response);
+              if (next) renderPayload(next);
+            } catch (_) {
+              const notice = element("div", "notice error", "暂时无法继续该方案。可以在对话中继续推进同一任务。");
+              card.append(notice);
+              choose.disabled = false;
+              choose.textContent = "重试选择";
+            } finally {
+              busy = false;
+            }
+          });
+          card.append(choose);
+          cards.append(card);
+        });
+        if (!options.length) cards.append(element("div", "notice", "候选尚未准备好，请先推进旅行任务。"));
+        app.append(cards);
+      };
+
+      const eventDetail = (event) => {
+        const parts = [];
+        if (finite(event.duration_seconds)) parts.push(duration(event.duration_seconds));
+        if (finite(event.distance_meters)) parts.push(`${(event.distance_meters / 1000).toFixed(1)}公里`);
+        if (finite(event.planning_allocation_minutes)) parts.push(`游览${event.planning_allocation_minutes}分钟`);
+        const amount = event.fare?.amount_cny ?? event.cost?.amount_cny;
+        if (finite(amount)) parts.push(money(amount));
+        return parts.join(" · ") || event.why || "详情待核验";
+      };
+
+      const renderPlan = (payload) => {
+        app.replaceChildren();
+        const installed = payload.plan || {};
+        const plan = installed.plan || {};
+        const presentation = payload.trip?.presentation || {};
+        const version = installed.plan_version ?? payload.current_version ?? "—";
+        app.append(heading("详细行程", `PlanVersion ${version} · ${labels[installed.planning_state] || installed.planning_state || "已安装"}`));
+        const grid = element("div", "plan-grid");
+        const timeline = element("section", "timeline");
+        const days = Array.isArray(plan.days) ? plan.days : [];
+        days.forEach((day) => {
+          const dayNode = element("article", "day");
+          dayNode.append(element("h3", "", `Day ${day.day} · ${day.date || "日期待定"}`));
+          const events = element("div", "events");
+          (day.events || []).forEach((event) => {
+            const row = element("div", "event");
+            row.append(element("time", "", `${clock(event.start_at)}–${clock(event.end_at)}`));
+            const copy = element("div");
+            copy.append(element("strong", "", event.name || "未命名事件"));
+            copy.append(element("p", "", eventDetail(event)));
+            row.append(copy);
+            events.append(row);
+          });
+          if (!events.childElementCount) events.append(element("div", "notice", "当天内容待核验。"));
+          dayNode.append(events);
+          timeline.append(dayNode);
+        });
+        if (!days.length) timeline.append(element("div", "notice", "当前没有已安装的可展示行程。"));
+
+        const sidebar = element("aside", "sidebar");
+        const budgetPanel = element("section", "panel");
+        budgetPanel.append(element("h3", "", "预算"));
+        (presentation.budget_summary || []).forEach((item) => {
+          const row = element("div", "budget-row");
+          const parts = [];
+          if (finite(item.known_cny) && item.known_cny > 0) parts.push(`已知 ${money(item.known_cny)}`);
+          if (finite(item.estimated_cny) && item.estimated_cny > 0) parts.push(`估算 ${money(item.estimated_cny)}`);
+          if (item.unknown) parts.push("另有金额待核验");
+          row.append(element("strong", "", item.label), element("span", "", parts.join(" · ") || "待核验"));
+          budgetPanel.append(row);
+        });
+        sidebar.append(budgetPanel);
+
+        const missingPanel = element("section", "panel");
+        missingPanel.append(element("h3", "", "缺失项与条件"));
+        const requirements = presentation.planning_draft?.missing_requirements || [];
+        if (requirements.length) {
+          const list = element("ul");
+          requirements.forEach((item) => list.append(element("li", "", item.reason || item.label || item.domain || String(item))));
+          missingPanel.append(list);
+        }
+        const blockers = presentation.planning_draft?.blockers || presentation.blockers || [];
+        if (blockers.length) {
+          const list = element("ul");
+          blockers.forEach((item) => list.append(element("li", "", item.reason || item.blocker_id || "仍需补充证据")));
+          missingPanel.append(list);
+        } else if (!requirements.length) {
+          missingPanel.append(element("p", "muted", "没有未处理的硬缺失项。"));
+        }
+        sidebar.append(missingPanel);
+
+        const routesPanel = element("section", "panel");
+        routesPanel.append(element("h3", "", "路线摘要"));
+        const routes = presentation.map_payload?.route_polylines || [];
+        routes.forEach((route) => {
+          const row = element("div", "route");
+          row.append(element("strong", "", `${route.from || "起点"} → ${route.to || "终点"}`));
+          row.append(element("small", "", `${route.transport_mode || "方式待核验"} · ${duration(route.duration_seconds)} · ${route.evidence_status || "待核验"}`));
+          routesPanel.append(row);
+        });
+        if (!routes.length) routesPanel.append(element("p", "muted", "路线数据待核验。"));
+        sidebar.append(routesPanel);
+
+        const revisionPanel = element("section", "panel revision");
+        revisionPanel.append(element("h3", "", "修改行程"));
+        const paceLabel = element("label", "", "旅行节奏");
+        const pace = element("select");
+        [["relaxed", "轻松"], ["standard", "标准"], ["intensive", "紧凑"]].forEach(([value, label]) => {
+          const option = element("option", "", label);
+          option.value = value;
+          if (plan.constraints?.pace === value) option.selected = true;
+          pace.append(option);
+        });
+        paceLabel.append(pace);
+        const messageLabel = element("label", "", "这次希望怎么改");
+        const message = element("textarea");
+        message.placeholder = "例如：第二天九点以后出发";
+        messageLabel.append(message);
+        const revise = element("button", "button primary", "生成新版本");
+        revise.type = "button";
+        revise.addEventListener("click", async () => {
+          if (busy) return;
+          busy = true;
+          revise.disabled = true;
+          revise.textContent = "正在修改…";
+          try {
+            const response = await callTool("revise_trip_plan", {
+              run_id: payload.run_id,
+              revision: {pace: pace.value, user_message: message.value.trim() || "调整旅行节奏"},
+            });
+            const next = structured(response);
+            if (next?.plan) {
+              renderPlan({
+                view: "plan",
+                run_id: payload.run_id,
+                current_version: next.plan.plan_version,
+                trip: next.trip,
+                plan: next.plan,
+              });
+            }
+          } catch (_) {
+            revisionPanel.append(element("div", "notice error", "本次修改未安装；当前版本保持不变。可在对话中补充修改要求。"));
+            revise.disabled = false;
+            revise.textContent = "重试修改";
+          } finally {
+            busy = false;
+          }
+        });
+        revisionPanel.append(paceLabel, messageLabel, revise);
+
+        const diff = plan.revision?.diff;
+        if (diff) {
+          const diffPanel = element("section", "panel diff-list");
+          diffPanel.append(element("h3", "", "相对上一版的变化"));
+          const changes = [
+            ...(Array.isArray(plan.revision?.changes) ? plan.revision.changes : []),
+            ...(Array.isArray(diff.attraction_changes) ? diff.attraction_changes : []),
+          ];
+          if (changes.length) {
+            const list = element("ul");
+            changes.forEach((change) => list.append(element("li", "", change.reason || change.type || "行程已调整")));
+            diffPanel.append(list);
+          } else diffPanel.append(element("p", "muted", "版本已更新，主要行程块未发生可见变化。"));
+          sidebar.append(diffPanel);
+        }
+
+        sidebar.append(revisionPanel);
+        grid.append(timeline, sidebar);
+        app.append(grid);
+      };
+
+      const renderPayload = (payload) => {
+        if (!payload || typeof payload !== "object") return;
+        if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
+        else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
+      };
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.id !== undefined && pending.has(message.id)) {
+          const item = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) item.reject(message.error);
+          else item.resolve(message.result);
+          return;
+        }
+        if (message.method === "ui/notifications/tool-result") {
+          renderPayload(message.params?.structuredContent);
+        }
+      }, {passive: true});
+
+      if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);
+    })();
+  </script>
+</body>
+</html>

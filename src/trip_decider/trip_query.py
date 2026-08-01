@@ -150,14 +150,12 @@ class TripQueryService:
                 raise TripQueryError("candidate comparison omitted options")
             stage = result.get("stage")
             comparison_completed = True
-        elif (
-            run.status is RunStatus.RUNNING
-            and run.intent.task_mode
-            in {TaskMode.OPEN_DISCOVERY, TaskMode.GUIDED_DISCOVERY}
-        ):
+        else:
             by_id: dict[str, dict[str, object]] = {}
-            for event in self.events(run_id):
-                if not str(event.get("event_type", "")).endswith(
+            candidate_events = self.events(run_id)
+            for event in candidate_events:
+                event_type = str(event.get("event_type", ""))
+                if not event_type.endswith(
                     ".candidate.completed"
                 ):
                     continue
@@ -174,12 +172,23 @@ class TripQueryService:
                 )
                 if isinstance(destination_id, str):
                     by_id[destination_id] = deepcopy(dict(option))
+            if not by_id:
+                raise TripQueryError(
+                    "candidate comparison is not available for this run"
+                )
             options = list(by_id.values())
-            stage = "candidate_comparison"
-            comparison_completed = False
-        else:
-            raise TripQueryError(
-                "candidate comparison is not available for this run"
+            guided = any(
+                str(event.get("event_type", "")).startswith("guided.")
+                for event in candidate_events
+            )
+            stage = (
+                "guided_discovery" if guided else "open_discovery"
+            )
+            comparison_completed = any(
+                str(event.get("event_type", "")).endswith(
+                    ".comparison.completed"
+                )
+                for event in candidate_events
             )
         return {
             "run_id": run_id,
