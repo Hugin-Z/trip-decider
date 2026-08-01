@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import threading
+import time
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
 
+import trip_decider.agent_actions as agent_actions
+import trip_decider.product_web as product_web
 from trip_decider.product_web import (
-    _agent_post,
-    _api_response,
+    _MODE_EXECUTION_HANDLERS,
     _client_configuration,
-    _product_discovery_request,
+    _execute_direct_plan,
+    _execute_guided_discovery,
+    _execute_open_discovery,
+    _map_payload_contract,
+    _persist_guided_evidence,
+    _presentation_contract,
     _sse_event,
+    _trip_post,
 )
 from trip_decider.codex_host import (
     confirm_trip_run,
@@ -22,6 +33,7 @@ from trip_decider.codex_host import (
 from trip_decider.agent_actions import (
     execute_registered_action,
     get_next_actions,
+    run_until_blocked,
     start_action_loop,
     submit_evidence,
 )
@@ -29,8 +41,14 @@ from trip_decider.destination_runtime import (
     collect_map_evidence,
     execute_destination_intent,
 )
+from trip_decider.guided_discovery import (
+    GuidedEvidenceCache,
+    build_guided_comparison,
+    guided_region_seeds,
+)
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
+    DEFAULT_AGENT_STORE,
     DestinationCollectors,
     EvidenceItem,
     EvidenceStatus,
@@ -40,6 +58,7 @@ from trip_decider.travel_agent import (
     TaskMode,
     TravelIntent,
     confirm_intent,
+    continue_run_with_intent,
     create_run,
     execute_run,
     revise_run,
@@ -51,44 +70,213 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProductWebContractTests(unittest.TestCase):
-    def test_datetime_window_derives_three_and_a_half_days(self) -> None:
-        request, window = _product_discovery_request(
+    def test_detail_loop_runs_independent_missing_tools_in_parallel(
+        self,
+    ) -> None:
+        store = InMemoryAgentStore()
+        run = create_run(
             {
-                "origin": "武汉市",
+                "task_mode": "DIRECT_PLAN",
+                "origin": "甲地",
+                "destination_anchor": "乙地",
                 "earliest_departure_at": "2026-08-04T12:00",
-                "latest_return_at": "2026-08-08T00:00",
-                "total_budget": 6000,
+                "latest_return_at": "2026-08-07T22:00",
                 "travelers": 2,
-                "themes": ["山水"],
-                "pace": "适中",
-                "transport_preferences": ["高铁"],
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+            },
+            store=store,
+        )
+        confirm_intent(run.run_id, store=store)
+        missing = {
+            domain: EvidenceItem(
+                evidence_id=f"guided-{domain}-missing",
+                domain=domain,
+                status=EvidenceStatus.MISSING,
+                value=None,
+                missing_reason=(
+                    "web_search_collector_not_configured"
+                    if domain == "web"
+                    else "guided_query_missing"
+                ),
+            )
+            for domain in ("railway", "map", "web")
+        }
+        first = start_action_loop(
+            run.run_id,
+            initial_evidence=missing,
+            store=store,
+        )
+        self.assertEqual(
+            [action["action_id"] for action in first["actions"]],
+            ["railway", "web", "map"],
+        )
+
+        parallel_gate = threading.Barrier(2)
+
+        def sourced(domain: str) -> EvidenceItem:
+            parallel_gate.wait(timeout=1)
+            return EvidenceItem(
+                evidence_id=f"{domain}-fresh",
+                domain=domain,
+                status=EvidenceStatus.SOURCED,
+                value=(
+                    {"destination": {"adcode": "000000"}}
+                    if domain == "map"
+                    else {"roundtrip_fare_cny": 400}
+                ),
+                sources=(
+                    {"source_type": "official_api", "locator": "test"},
+                ),
+            )
+
+        with (
+            patch(
+                "trip_decider.agent_actions.collect_railway_evidence",
+                side_effect=lambda intent: sourced("railway"),
+            ),
+            patch(
+                "trip_decider.agent_actions.collect_map_evidence",
+                side_effect=lambda intent: sourced("map"),
+            ),
+        ):
+            paused = run_until_blocked(run.run_id, store=store)
+        self.assertEqual(paused["status"], "NEED_USER_INPUT")
+        self.assertEqual(paused["paused_at"], ["codex_web_research"])
+
+    def test_action_without_progress_is_blocked_instead_of_staying_running(
+        self,
+    ) -> None:
+        store = InMemoryAgentStore()
+        run = create_run(
+            {
+                "task_mode": "DIRECT_PLAN",
+                "origin": "甲地",
+                "destination_anchor": "乙地",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+            },
+            store=store,
+        )
+        confirm_intent(run.run_id, store=store)
+        start_action_loop(run.run_id, store=store)
+        release = threading.Event()
+        original = agent_actions._TOOL_REGISTRY["railway"]["handler"]
+
+        def stalled_handler(intent, state):
+            release.wait(2)
+            return EvidenceItem(
+                evidence_id="late-rail",
+                domain="railway",
+                status=EvidenceStatus.MISSING,
+                value=None,
+                missing_reason="late_result",
+            )
+
+        agent_actions._TOOL_REGISTRY["railway"]["handler"] = (
+            stalled_handler
+        )
+        try:
+            snapshot = run_until_blocked(
+                run.run_id,
+                store=store,
+                max_wait_seconds=0.02,
+            )
+        finally:
+            release.set()
+            agent_actions._TOOL_REGISTRY["railway"]["handler"] = original
+        self.assertEqual(snapshot["status"], "BLOCKED")
+        blocked = store.get_run(run.run_id)
+        self.assertEqual(blocked.status, RunStatus.BLOCKED)
+        self.assertEqual(
+            blocked.error_code,
+            "RAILWAY_ACTION_STALLED",
+        )
+
+    def test_plan_audit_does_not_require_planning_intent_fields(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "task_mode": "PLAN_AUDIT",
+                "interpretation": "检查已有计划",
             }
         )
-        self.assertEqual(request["approximate_start_date"], "2026-08-04")
-        self.assertEqual(request["days"], 3.5)
-        self.assertEqual(window["available_duration_hours"], 84.0)
+        self.assertEqual(intent.blocking_missing_fields, ())
 
-    def test_discover_preserves_submitted_6000_budget(self) -> None:
-        result = _api_response(
-            "/api/discover",
-            {
-                "origin": "上海市",
-                "earliest_departure_at": "2026-08-04T12:00",
-                "latest_return_at": "2026-08-08T00:00",
-                "total_budget": 6000,
-                "travelers": 2,
-                "themes": ["山水", "古村"],
-                "pace": "适中",
-                "transport_preferences": ["高铁"],
-            },
+    def test_each_task_mode_has_an_independent_execution_handler(self) -> None:
+        self.assertIs(
+            _MODE_EXECUTION_HANDLERS[TaskMode.OPEN_DISCOVERY],
+            _execute_open_discovery,
         )
-        self.assertEqual(result["request"]["total_budget"], 6000.0)
-        self.assertEqual(result["request"]["travelers"], 2)
+        self.assertIs(
+            _MODE_EXECUTION_HANDLERS[TaskMode.GUIDED_DISCOVERY],
+            _execute_guided_discovery,
+        )
+        self.assertIs(
+            _MODE_EXECUTION_HANDLERS[TaskMode.DIRECT_PLAN],
+            _execute_direct_plan,
+        )
+        self.assertNotIn(TaskMode.PLAN_AUDIT, _MODE_EXECUTION_HANDLERS)
+
+    def test_plan_audit_accepts_existing_plan_without_planner(self) -> None:
+        _, created = _trip_post(
+            "/api/trips",
+            {"intent": {"task_mode": "PLAN_AUDIT"}},
+        )
+        run_id = created["run"]["run_id"]
+        self.addCleanup(
+            shutil.rmtree,
+            DEFAULT_AGENT_STORE.runtime_root / run_id,
+            True,
+        )
+        _trip_post(f"/api/trips/{run_id}/confirm", {})
+        with patch.object(product_web, "start_action_loop") as planner:
+            status, response = _trip_post(
+                f"/api/trips/{run_id}/audit",
+                {
+                    "plan": {
+                        "days": [
+                            {
+                                "day": 1,
+                                "events": [
+                                    {
+                                        "type": "attraction",
+                                        "start": "09:00",
+                                        "end": "11:00",
+                                        "location": "某景点",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+            )
+        self.assertEqual(status, 200)
+        planner.assert_not_called()
+        self.assertEqual(response["run"]["result"]["stage"], "plan_audit")
+        self.assertFalse(response["run"]["result"]["planner_invoked"])
         self.assertEqual(
-            result["request"]["earliest_departure_at"],
-            "2026-08-04T12:00",
+            response["run"]["result"]["audit"]["validation_status"],
+            "STRUCTURALLY_VALID",
         )
-        self.assertEqual(len(result["preliminary_candidates"]), 5)
+
+    def test_product_server_source_does_not_expose_legacy_routes(self) -> None:
+        source = (
+            ROOT / "src/trip_decider/product_web.py"
+        ).read_text(encoding="utf-8")
+        for legacy_path in (
+            "/api/discover",
+            "/api/select-destination",
+            "/api/catalog",
+            "/api/interpret-intent",
+            "/api/agent/current",
+        ):
+            self.assertNotIn(legacy_path, source)
+        self.assertNotIn("trip_decider.destination_discovery", source)
 
     def test_agent_core_is_model_neutral(self) -> None:
         status = runtime_status()
@@ -100,14 +288,15 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", source)
         self.assertNotIn("urllib.request", source)
 
-    def test_destination_anchor_determines_anchored_mode_generically(
+    def test_destination_commitment_determines_mode_generically(
         self,
     ) -> None:
-        anchored = TravelIntent.from_mapping(
+        guided = TravelIntent.from_mapping(
             {
                 "task_mode": "OPEN_DISCOVERY",
                 "origin": "杭州",
                 "destination_anchor": "绍兴",
+                "destination_expression": "倾向绍兴一带",
                 "earliest_departure_at": "2026-08-04T12:00",
                 "latest_return_at": "2026-08-05T20:00",
                 "travelers": 2,
@@ -117,9 +306,16 @@ class ProductWebContractTests(unittest.TestCase):
                 "themes": ["人文"],
             }
         )
+        direct = TravelIntent.from_mapping(
+            {
+                **guided.to_dict(),
+                "destination_expression": "已经订了绍兴，就去这里",
+                "task_mode": "OPEN_DISCOVERY",
+            }
+        )
         open_intent = TravelIntent.from_mapping(
             {
-                "task_mode": "ANCHORED_PLAN",
+                "task_mode": "DIRECT_PLAN",
                 "origin": "杭州",
                 "destination_anchor": None,
                 "earliest_departure_at": None,
@@ -130,13 +326,487 @@ class ProductWebContractTests(unittest.TestCase):
             }
         )
         self.assertEqual(
-            anchored.task_mode,
-            TaskMode.ANCHORED_PLAN,
+            guided.task_mode,
+            TaskMode.GUIDED_DISCOVERY,
+        )
+        self.assertEqual(
+            direct.task_mode,
+            TaskMode.DIRECT_PLAN,
         )
         self.assertEqual(
             open_intent.task_mode,
             TaskMode.OPEN_DISCOVERY,
         )
+        base = {
+            **guided.to_dict(),
+            "task_mode": "OPEN_DISCOVERY",
+        }
+        for marker in ("倾向", "优先", "大概想去", "考虑"):
+            with self.subTest(marker=marker):
+                classified = TravelIntent.from_mapping(
+                    {
+                        **base,
+                        "destination_expression": f"{marker}绍兴一带",
+                    }
+                )
+                self.assertEqual(
+                    classified.task_mode,
+                    TaskMode.GUIDED_DISCOVERY,
+                )
+        for marker in ("确定", "就去", "已经订了"):
+            with self.subTest(marker=marker):
+                classified = TravelIntent.from_mapping(
+                    {
+                        **base,
+                        "destination_expression": f"{marker}绍兴",
+                    }
+                )
+                self.assertEqual(
+                    classified.task_mode,
+                    TaskMode.DIRECT_PLAN,
+                )
+
+    def test_regional_preference_is_guided_not_direct_plan(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "origin": "武汉",
+                "destination_anchor": "江西婺源、上饶那块",
+                "destination_expression": "倾向江西婺源、上饶那块",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["high_speed_rail"],
+                "themes": ["山水", "古村"],
+            }
+        )
+        self.assertEqual(intent.task_mode, TaskMode.GUIDED_DISCOVERY)
+        self.assertEqual(
+            [item["name"] for item in guided_region_seeds(intent)],
+            ["婺源", "三清山"],
+        )
+
+    def test_guided_options_are_coarse_checked_before_display(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "origin": "武汉",
+                "destination_anchor": "江西婺源、上饶那块",
+                "destination_expression": "优先江西婺源、上饶那块",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["high_speed_rail"],
+                "themes": ["山水", "古村"],
+            }
+        )
+        checked: list[str] = []
+
+        def railway(contract: TravelIntent) -> EvidenceItem:
+            checked.append(str(contract.destination_anchor))
+            return EvidenceItem(
+                evidence_id="rail-check",
+                domain="railway",
+                status=EvidenceStatus.SOURCED,
+                value={
+                    "roundtrip_duration_seconds": 36000,
+                    "roundtrip_fare_cny": 800,
+                    "snapshot": {
+                        "status": "LIVE",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                    },
+                    "outbound": {
+                        "train_code": "TEST",
+                        "departure_at": "2026-08-04T13:00",
+                        "arrival_at": "2026-08-04T16:00",
+                        "duration_seconds": 10800,
+                    },
+                    "return": {
+                        "train_code": "TEST",
+                        "departure_at": "2026-08-07T17:00",
+                        "arrival_at": "2026-08-07T21:00",
+                        "duration_seconds": 14400,
+                    },
+                },
+                sources=(
+                    {
+                        "source_type": "official_api",
+                        "locator": "test",
+                    },
+                ),
+            )
+
+        result = build_guided_comparison(
+            intent,
+            railway_collector=railway,
+        )
+        self.assertEqual(result["option_count"], 2)
+        self.assertEqual(len(checked), 2)
+        self.assertEqual(
+            set(result["reusable_evidence"]),
+            {str(option["destination_id"]) for option in result["options"]},
+        )
+        for option in result["options"]:
+            self.assertEqual(
+                option["feasibility_status"],
+                "CONDITIONALLY_FEASIBLE",
+            )
+            self.assertEqual(
+                option["local_transport_difficulty"]["status"],
+                "MISSING",
+            )
+            self.assertGreater(
+                option["playable_time_seconds"],
+                0,
+            )
+            self.assertIn("当地交通难度", option["evidence_missing"])
+
+    def test_guided_candidates_stream_as_parallel_checks_finish(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "task_mode": "GUIDED_DISCOVERY",
+                "origin": "武汉",
+                "destination_anchor": "江西婺源、上饶那块",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+                "themes": ["山水"],
+            }
+        )
+        started = time.monotonic()
+        streamed: list[tuple[str, float]] = []
+
+        def railway(contract: TravelIntent) -> EvidenceItem:
+            time.sleep(
+                0.03 if contract.destination_anchor == "婺源" else 0.15
+            )
+            return EvidenceItem(
+                evidence_id="rail",
+                domain="railway",
+                status=EvidenceStatus.SOURCED,
+                value={
+                    "roundtrip_duration_seconds": 3600,
+                    "roundtrip_fare_cny": 200,
+                    "snapshot": {
+                        "status": "LIVE",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                    },
+                },
+                sources=(
+                    {
+                        "source_type": "official_api",
+                        "locator": "test",
+                    },
+                ),
+            )
+
+        def progress(status, destination, details):
+            if status == "candidate_completed":
+                streamed.append((destination, time.monotonic() - started))
+
+        result = build_guided_comparison(
+            intent,
+            railway_collector=railway,
+            progress=progress,
+            cache=GuidedEvidenceCache(),
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result["option_count"], 2)
+        self.assertEqual(len(streamed), 2)
+        self.assertLess(streamed[0][1], 0.12)
+        self.assertLess(elapsed, 0.24)
+
+    def test_guided_domain_timeout_is_partial_and_does_not_block(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "task_mode": "GUIDED_DISCOVERY",
+                "origin": "武汉",
+                "destination_anchor": "江西婺源、上饶那块",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+                "themes": ["山水"],
+            }
+        )
+
+        def slow_railway(contract: TravelIntent) -> EvidenceItem:
+            del contract
+            time.sleep(0.2)
+            return EvidenceItem(
+                evidence_id="late",
+                domain="railway",
+                status=EvidenceStatus.MISSING,
+                value=None,
+                missing_reason="late",
+            )
+
+        started = time.monotonic()
+        result = build_guided_comparison(
+            intent,
+            railway_collector=slow_railway,
+            timeouts={"railway": 0.02},
+            cache=GuidedEvidenceCache(),
+        )
+        self.assertLess(time.monotonic() - started, 0.12)
+        self.assertEqual(result["option_count"], 2)
+        for option in result["options"]:
+            rail = next(
+                item
+                for item in option["evidence_statuses"]
+                if item["domain"] == "railway"
+            )
+            self.assertEqual(rail["status"], "MISSING")
+            self.assertTrue(rail["timed_out"])
+
+    def test_guided_cache_reuses_exact_request_and_marks_stale(self) -> None:
+        intent = TravelIntent.from_mapping(
+            {
+                "task_mode": "GUIDED_DISCOVERY",
+                "origin": "武汉",
+                "destination_anchor": "江西婺源、上饶那块",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+                "themes": ["山水"],
+            }
+        )
+        calls = 0
+        cache = GuidedEvidenceCache(live_seconds=0, stale_seconds=60)
+
+        def railway(contract: TravelIntent) -> EvidenceItem:
+            nonlocal calls
+            calls += 1
+            return EvidenceItem(
+                evidence_id=str(contract.destination_anchor),
+                domain="railway",
+                status=EvidenceStatus.SOURCED,
+                value={
+                    "roundtrip_duration_seconds": 3600,
+                    "roundtrip_fare_cny": 200,
+                    "snapshot": {
+                        "status": "LIVE",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                    },
+                },
+                sources=(
+                    {
+                        "source_type": "official_api",
+                        "locator": "test",
+                    },
+                ),
+            )
+
+        build_guided_comparison(
+            intent,
+            railway_collector=railway,
+            cache=cache,
+        )
+        time.sleep(0.01)
+        reused = build_guided_comparison(
+            intent,
+            railway_collector=railway,
+            cache=cache,
+        )
+        self.assertEqual(calls, 2)
+        for option in reused["options"]:
+            self.assertEqual(
+                option["roundtrip_transport"]["status"],
+                "STALE",
+            )
+            self.assertTrue(
+                option["roundtrip_transport"]["from_cache"]
+            )
+            self.assertEqual(
+                option["roundtrip_transport"]["retrieved_at"],
+                "2026-07-30T12:00:00+08:00",
+            )
+
+    def test_guided_selection_continues_in_same_run(self) -> None:
+        store = InMemoryAgentStore()
+        guided = TravelIntent.from_mapping(
+            {
+                "task_mode": "GUIDED_DISCOVERY",
+                "origin": "甲地",
+                "destination_anchor": "乙地区域",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+            }
+        )
+        created = create_run(guided, store=store)
+        confirm_intent(created.run_id, store=store)
+        completed = execute_run(
+            created.run_id,
+            executor=lambda intent, emit: {
+                "stage": "guided_discovery",
+                "options": [{"destination_id": "one"}],
+            },
+            store=store,
+        )
+        direct_value = guided.to_dict()
+        direct_value.update(
+            {
+                "task_mode": "DIRECT_PLAN",
+                "destination_anchor": "乙地",
+                "destination_expression": "确定乙地",
+            }
+        )
+        continued = continue_run_with_intent(
+            completed.run_id,
+            direct_value,
+            store=store,
+        )
+        self.assertEqual(continued.run_id, created.run_id)
+        self.assertEqual(continued.session_id, created.session_id)
+        self.assertEqual(continued.status, RunStatus.CONFIRMED)
+        self.assertEqual(continued.intent.task_mode, TaskMode.DIRECT_PLAN)
+        self.assertEqual(
+            continued.result["stage"],
+            "guided_discovery",
+        )
+
+    def test_guided_selection_endpoint_reuses_the_current_run(self) -> None:
+        created = create_run(
+            {
+                "task_mode": "GUIDED_DISCOVERY",
+                "origin": "甲地",
+                "destination_anchor": "乙地区域",
+                "earliest_departure_at": "2026-08-04T12:00",
+                "latest_return_at": "2026-08-07T22:00",
+                "travelers": 2,
+                "total_budget_cny": 6000,
+                "pace": "relaxed",
+                "transport_preferences": ["rail"],
+            }
+        )
+        self.addCleanup(
+            shutil.rmtree,
+            DEFAULT_AGENT_STORE.runtime_root / created.run_id,
+            True,
+        )
+        confirm_intent(created.run_id)
+        execute_run(
+            created.run_id,
+            executor=lambda intent, emit: {
+                "stage": "guided_discovery",
+                "options": [
+                    {
+                        "destination_id": "option-one",
+                        "destination_anchor": "乙地",
+                        "feasibility_status": "CONDITIONALLY_FEASIBLE",
+                        "roundtrip_transport": {
+                            "status": "LIVE",
+                            "duration_seconds": 7200,
+                            "known_cost_cny": 400,
+                        },
+                        "evidence_statuses": [
+                            {"domain": "railway", "status": "LIVE"},
+                            {"domain": "map", "status": "LIVE"},
+                            {"domain": "web", "status": "MISSING"},
+                        ],
+                        "evidence_missing": ["网页事实"],
+                    }
+                ],
+            },
+        )
+        sourced_rail = EvidenceItem(
+            evidence_id="guided-rail",
+            domain="railway",
+            status=EvidenceStatus.SOURCED,
+            value={
+                "roundtrip_duration_seconds": 7200,
+                "roundtrip_fare_cny": 400,
+            },
+            sources=({"source_type": "official_api", "locator": "test"},),
+        )
+        sourced_map = EvidenceItem(
+            evidence_id="guided-map",
+            domain="map",
+            status=EvidenceStatus.SOURCED,
+            value={"destination": {"adcode": "000000"}},
+            sources=({"source_type": "official_api", "locator": "test"},),
+        )
+        missing_web = EvidenceItem(
+            evidence_id="guided-web-missing",
+            domain="web",
+            status=EvidenceStatus.MISSING,
+            value=None,
+            missing_reason="web_search_collector_not_configured",
+        )
+        _persist_guided_evidence(
+            created.run_id,
+            {
+                "option-one": {
+                    "railway": sourced_rail.to_dict(),
+                    "map": sourced_map.to_dict(),
+                    "web": missing_web.to_dict(),
+                }
+            },
+        )
+        status, response = _trip_post(
+            f"/api/trips/{created.run_id}/candidates/option-one/select",
+            {},
+        )
+        self.assertEqual(status.value, 202)
+        self.assertEqual(response["run"]["run_id"], created.run_id)
+        self.assertEqual(
+            response["run"]["intent"]["task_mode"],
+            "DIRECT_PLAN",
+        )
+        self.assertEqual(
+            response["run"]["intent"]["destination_anchor"],
+            "乙地",
+        )
+        self.assertEqual(
+            [
+                action["action_id"]
+                for action in response["action_loop"]["actions"]
+            ],
+            ["web"],
+        )
+        self.assertEqual(
+            response["presentation"]["compact_progress"]["state"],
+            "running",
+        )
+        self.assertEqual(
+            response["presentation"]["compact_progress"][
+                "completed_count"
+            ],
+            2,
+        )
+        self.assertEqual(
+            response["presentation"]["planning_handoff"][
+                "roundtrip_transport"
+            ]["known_cost_cny"],
+            400,
+        )
+        with patch(
+            "trip_decider.agent_actions.collect_railway_evidence"
+        ) as railway_query:
+            progressed_status, progressed = _trip_post(
+                f"/api/trips/{created.run_id}/execute",
+                {},
+            )
+        self.assertEqual(progressed_status.value, 200)
+        self.assertEqual(
+            progressed["run"]["run_id"],
+            created.run_id,
+        )
+        railway_query.assert_not_called()
 
     def test_codex_can_drive_run_lifecycle_and_revision(self) -> None:
         store = InMemoryAgentStore()
@@ -189,11 +859,83 @@ class ProductWebContractTests(unittest.TestCase):
             store=store,
         )
         self.assertEqual(revised.status, RunStatus.COMPLETED)
+        self.assertEqual(revised.run_id, run.run_id)
+        self.assertEqual(
+            store.get_session(run.session_id).run_ids,
+            [run.run_id],
+        )
+        self.assertIsNone(revised.parent_run_id)
         events = store.events_after(run.session_id, 0)
         self.assertEqual(events[-1].event_type, "run.completed")
         encoded = _sse_event(events[-1].to_dict()).decode("utf-8")
         self.assertIn("event: agent_event", encoded)
         self.assertIn('"event_type": "run.completed"', encoded)
+
+    def test_same_run_revision_persists_version_and_retains_old_on_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            store = InMemoryAgentStore(Path(temporary) / "sessions")
+            run = create_run(
+                {
+                    "origin": "甲地",
+                    "destination_anchor": "乙地",
+                    "earliest_departure_at": "2026-08-04T12:00",
+                    "latest_return_at": "2026-08-07T20:00",
+                    "travelers": 2,
+                    "total_budget_cny": 6000,
+                    "pace": "relaxed",
+                    "transport_preferences": ["high_speed_rail"],
+                },
+                store=store,
+            )
+            confirm_intent(run.run_id, store=store)
+            completed = execute_run(
+                run.run_id,
+                executor=lambda intent, emit: {
+                    "plan": {
+                        "pace": intent.pace,
+                        "days": [{"day": 1, "events": []}],
+                    }
+                },
+                store=store,
+            )
+            old_result = completed.result
+            revised = revise_run(
+                run.run_id,
+                Revision(pace="standard"),
+                executor=lambda previous, revision, emit: {
+                    "plan": {
+                        "pace": revision.pace,
+                        "days": [{"day": 1, "events": []}],
+                    },
+                    "previous": previous,
+                },
+                store=store,
+            )
+            self.assertEqual(revised.run_id, run.run_id)
+            version = json.loads(
+                (
+                    store.run_directory(run.run_id)
+                    / "plan-version.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(version["plan_version"], 1)
+            with self.assertRaisesRegex(RuntimeError, "revision failed"):
+                revise_run(
+                    run.run_id,
+                    Revision(pace="intensive"),
+                    executor=lambda previous, revision, emit: (
+                        (_ for _ in ()).throw(
+                            RuntimeError("revision failed")
+                        )
+                    ),
+                    store=store,
+                )
+            failed = store.get_run(run.run_id)
+            self.assertEqual(failed.status, RunStatus.FAILED)
+            self.assertEqual(failed.result, revised.result)
+            self.assertNotEqual(failed.result, old_result)
 
     def test_map_configuration_uses_separate_frontend_variables(self) -> None:
         with patch.dict(
@@ -213,6 +955,181 @@ class ProductWebContractTests(unittest.TestCase):
             result["amap_js"]["key"],
             "backend-only",
         )
+
+    def test_map_payload_projects_only_persisted_geometry(self) -> None:
+        run = {
+            "result": {
+                "context": {
+                    "evidence": [
+                        {
+                            "domain": "railway",
+                            "value": {
+                                "snapshot": {
+                                    "status": "STALE",
+                                    "retrieved_at": "2026-07-30T12:00:00+08:00",
+                                }
+                            },
+                            "sources": [],
+                        },
+                        {
+                            "domain": "web",
+                            "value": {
+                                "retrieved_at": "2026-07-30T12:01:00+08:00",
+                                "hotel_area": {
+                                    "name": "住宿片区",
+                                    "longitude": 117.86,
+                                    "latitude": 29.25,
+                                },
+                            },
+                            "sources": [],
+                        },
+                        {
+                            "domain": "map",
+                            "value": {
+                                "snapshot_status": "STALE",
+                                "retrieved_at": "2026-07-30T12:02:00+08:00",
+                                "places": [
+                                    {
+                                        "name": "景点甲",
+                                        "longitude": 117.88,
+                                        "latitude": 29.27,
+                                    }
+                                ],
+                                "local_transit": [
+                                    {
+                                        "route_id": "map-local-1",
+                                        "polyline": [
+                                            [117.86, 29.25],
+                                            [117.88, 29.27],
+                                        ],
+                                    }
+                                ],
+                            },
+                            "sources": [],
+                        },
+                    ]
+                },
+                "plan": {
+                    "days": [
+                        {
+                            "day": 1,
+                            "date": "2026-08-04",
+                            "events": [
+                                {
+                                    "event_id": "rail-outbound",
+                                    "type": "transit",
+                                    "name": "去程 G1",
+                                    "from": "出发站",
+                                    "to": "目的站",
+                                    "from_location": {
+                                        "longitude": 114.30,
+                                        "latitude": 30.59,
+                                    },
+                                    "to_location": {
+                                        "longitude": 117.86,
+                                        "latitude": 29.25,
+                                    },
+                                    "start_at": "2026-08-04T12:00",
+                                    "end_at": "2026-08-04T15:00",
+                                },
+                                {
+                                    "event_id": "attraction-1",
+                                    "type": "attraction",
+                                    "name": "景点甲",
+                                },
+                            ],
+                        }
+                    ],
+                    "planning_input": {
+                        "local_transit_events": [
+                            {
+                                "event_id": "map-local-1",
+                                "type": "transit",
+                                "from": "住宿片区",
+                                "to": "景点甲",
+                                "mode": "public_transit",
+                                "schedule_status": "STALE",
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+        payload = _map_payload_contract(run, plan_version=3)
+        self.assertEqual(payload["plan_version"], 3)
+        self.assertEqual(
+            set(payload),
+            {"plan_version", "day", "markers", "route_polylines"},
+        )
+        self.assertEqual(
+            sum(bool(item.get("position")) for item in payload["markers"]),
+            4,
+        )
+        self.assertEqual(
+            payload["route_polylines"][0]["geometry_status"],
+            "EXISTING_POLYLINE",
+        )
+        self.assertEqual(
+            payload["route_polylines"][0]["evidence_status"],
+            "STALE",
+        )
+        self.assertEqual(
+            len(payload["route_polylines"][0]["polyline"]),
+            2,
+        )
+
+    def test_map_payload_keeps_missing_geometry_explicit(self) -> None:
+        payload = _map_payload_contract(
+            {
+                "result": {
+                    "context": {
+                        "evidence": [
+                            {
+                                "domain": "map",
+                                "value": {
+                                    "local_transit": [
+                                        {"route_id": "map-local-1"}
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                    "plan": {
+                        "days": [
+                            {
+                                "day": 1,
+                                "events": [
+                                    {
+                                        "event_id": "attraction-1",
+                                        "type": "attraction",
+                                        "name": "景点甲",
+                                    }
+                                ],
+                            }
+                        ],
+                        "planning_input": {
+                            "local_transit_events": [
+                                {
+                                    "event_id": "map-local-1",
+                                    "from": "住宿片区",
+                                    "to": "景点甲",
+                                }
+                            ]
+                        },
+                    },
+                }
+            },
+            plan_version=1,
+        )
+        self.assertEqual(
+            sum(bool(item.get("position")) for item in payload["markers"]),
+            0,
+        )
+        self.assertEqual(
+            payload["route_polylines"][0]["geometry_status"],
+            "MISSING_GEOMETRY",
+        )
+        self.assertEqual(payload["route_polylines"][0]["polyline"], [])
 
     def test_default_runtime_is_codex_hosted_without_web_nlp(self) -> None:
         status = runtime_status()
@@ -366,12 +1283,13 @@ class ProductWebContractTests(unittest.TestCase):
             "src/trip_decider/codex_host.py",
             "src/trip_decider/agent_actions.py",
             "src/trip_decider/planning_input_compiler.py",
+            "src/trip_decider/guided_discovery.py",
         ):
             source = (ROOT / relative).read_text(encoding="utf-8")
             for city in forbidden:
                 self.assertNotIn(city, source, msg=f"{city} found in {relative}")
 
-    def test_static_product_waits_for_codex_then_shows_chinese_workbench(
+    def test_home_only_exposes_new_history_and_explicit_continue_entry(
         self,
     ) -> None:
         html = (ROOT / "src/trip_decider/web/index.html").read_text(
@@ -380,8 +1298,10 @@ class ProductWebContractTests(unittest.TestCase):
         script = (ROOT / "src/trip_decider/web/app.js").read_text(
             encoding="utf-8"
         )
-        self.assertIn("请从 Codex 发起任务", html)
-        self.assertNotIn("<textarea", html)
+        self.assertIn("新建旅行任务", html)
+        self.assertIn("历史行程", html)
+        self.assertIn("继续上一次行程", html)
+        self.assertIn("<textarea", html)
         self.assertIn(
             'id="confirmation" class="confirmation hidden"',
             html,
@@ -390,12 +1310,50 @@ class ProductWebContractTests(unittest.TestCase):
             'id="workbench" class="workbench hidden"',
             html,
         )
-        for label in ("理解需求", "查询真实数据", "验证可行性", "生成行程"):
-            self.assertIn(label, html)
-        for status in ("等待", "进行中", "已完成", "受阻"):
-            self.assertIn(status, html + script)
-        for action in ("重新查询", "手动补充", "返回修改"):
+        for map_element in (
+            "map-column",
+            "map-day-tabs",
+            "map-canvas",
+            "railway-map-cards",
+            "map-missing-geometry",
+        ):
+            self.assertIn(map_element, html)
+        for map_behavior in (
+            "/api/client-config",
+            "https://webapi.amap.com/maps?v=2.0",
+            "renderMapPanel",
+            "applyMapDayFilter",
+            "bindTimelineMapEvent",
+            "setSelectedEvent",
+            "EXISTING_POLYLINE",
+            "ENDPOINTS_ONLY",
+        ):
+            self.assertIn(map_behavior, script)
+        self.assertNotIn('id="progress-grid"', html)
+        self.assertNotIn('id="run-message"', html)
+        for compact_id in (
+            "compact-progress",
+            "compact-progress-fill",
+            "compact-progress-percent",
+            "compact-progress-task",
+            "compact-progress-elapsed",
+        ):
+            self.assertIn(compact_id, html)
+        for action in ("继续查询", "手动补充", "暂时跳过"):
             self.assertIn(action, html + script)
+        self.assertIn("开始比较区域方案", html + script)
+        self.assertNotIn("直接规划该目的地", html + script)
+        self.assertNotIn("直接规划婺源", html + script)
+        for field in (
+            "往返交通",
+            "已知费用",
+            "可游玩时间",
+            "当地交通难度",
+            "预算余量",
+            "证据缺失",
+            "粗计划状态",
+        ):
+            self.assertIn(field, script)
         for field_name in (
             "origin",
             "earliest_departure_at",
@@ -407,12 +1365,95 @@ class ProductWebContractTests(unittest.TestCase):
             "destination_anchor",
         ):
             self.assertIn(field_name, script)
-        self.assertIn("<details", html)
-        self.assertIn("执行详情", html)
+        self.assertNotIn("<details", html)
+        self.assertNotIn("查看技术详情", html + script)
+        self.assertNotIn("执行事件", html + script)
         self.assertNotIn("Plan ID", html)
         self.assertNotIn("Context ID", html)
         self.assertIn("new EventSource", script)
-        self.assertIn("/api/agent/current", script)
+        self.assertNotIn("/api/agent/", script)
+        self.assertIn("/api/trips", script)
+        self.assertIn('"revise_existing"', script)
+        self.assertIn("/revisions", script)
+        self.assertIn("当前继续显示上一版行程", script)
+        self.assertIn("继续完善行程", script)
+        self.assertIn("/execute", script)
+        self.assertIn("renderTimeline", script)
+        for evidence_status in ("LIVE", "STALE", "MISSING"):
+            self.assertIn(evidence_status, script)
+
+    def test_presentation_requires_three_attractions_and_route_chain(
+        self,
+    ) -> None:
+        events = [
+            {
+                "event_id": "rail-outbound",
+                "type": "transit",
+                "snapshot_status": "STALE",
+            },
+            {
+                "event_id": "rail-return",
+                "type": "transit",
+                "snapshot_status": "STALE",
+            },
+            *[
+                {
+                    "event_id": f"attraction-{index}",
+                    "type": "attraction",
+                }
+                for index in range(3)
+            ],
+            *[
+                {
+                    "event_id": f"map-local-{index}",
+                    "type": "transit",
+                }
+                for index in range(3)
+            ],
+        ]
+        presentation = _presentation_contract(
+            {
+                "result": {
+                    "plan": {
+                        "days": [{"day": 1, "events": events}],
+                        "display_requirements": {
+                            "accommodation_base": True,
+                        },
+                        "conditional_blockers": [
+                            {"blocker_id": "HOTEL_DETAIL_PENDING"}
+                        ],
+                    }
+                }
+            }
+        )
+        self.assertEqual(presentation["day_count"], 1)
+        self.assertEqual(presentation["event_count"], 8)
+        self.assertEqual(presentation["attraction_count"], 3)
+        self.assertEqual(presentation["local_transit_count"], 3)
+        self.assertTrue(presentation["detailed_itinerary_ready"])
+        statuses = {
+            item["domain"]: item["status"]
+            for item in presentation["evidence_statuses"]
+        }
+        self.assertEqual(statuses["railway"], "STALE")
+        self.assertEqual(statuses["attraction"], "LIVE")
+        self.assertEqual(statuses["local_transit"], "LIVE")
+        self.assertEqual(statuses["accommodation"], "LIVE")
+
+        events.pop()
+        presentation = _presentation_contract(
+            {
+                "result": {
+                    "plan": {
+                        "days": [{"day": 1, "events": events}],
+                        "display_requirements": {
+                            "accommodation_base": True,
+                        },
+                    }
+                }
+            }
+        )
+        self.assertFalse(presentation["detailed_itinerary_ready"])
 
     def test_codex_cli_exposes_all_four_run_actions(self) -> None:
         source = (ROOT / "scripts/trip_agent.py").read_text(encoding="utf-8")
@@ -605,16 +1646,16 @@ class ProductWebContractTests(unittest.TestCase):
             Exception,
             "CODEX_HOSTED",
         ):
-            _agent_post(
-                "/api/agent/runs",
+            _trip_post(
+                "/api/trips",
                 {"text": "请规划一次旅行"},
             )
 
     def test_acceptance_intent_is_complete_and_waits_for_confirmation(
         self,
     ) -> None:
-        status, response = _agent_post(
-            "/api/agent/runs",
+        status, response = _trip_post(
+            "/api/trips",
             {
                 "intent": {
                     "origin": "武汉",
@@ -629,9 +1670,14 @@ class ProductWebContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(status.value, 201)
+        self.addCleanup(
+            shutil.rmtree,
+            DEFAULT_AGENT_STORE.runtime_root / response["run"]["run_id"],
+            True,
+        )
         intent = response["run"]["intent"]
         self.assertEqual(response["run"]["status"], "AWAITING_CONFIRMATION")
-        self.assertEqual(intent["task_mode"], "ANCHORED_PLAN")
+        self.assertEqual(intent["task_mode"], "GUIDED_DISCOVERY")
         self.assertEqual(intent["origin"], "武汉")
         self.assertEqual(intent["destination_anchor"], "婺源")
         self.assertEqual(intent["earliest_departure_at"], "2026-08-04T12:00")

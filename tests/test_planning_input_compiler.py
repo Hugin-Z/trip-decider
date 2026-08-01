@@ -641,6 +641,109 @@ class PlanningInputCompilerTests(unittest.TestCase):
         self.assertEqual(ready["run_id"], run.run_id)
         self.assertTrue(ready["result"]["plan"]["displayable"])
 
+    def test_new_attractions_require_same_run_local_route_refresh(
+        self,
+    ) -> None:
+        state = agent_actions._LoopState(
+            evidence={
+                "web": EvidenceItem(
+                    evidence_id="web",
+                    domain="web",
+                    status=EvidenceStatus.SOURCED,
+                    value={
+                        "destination_official_name": "乙地区",
+                        "hotel_area": {"name": "乙站"},
+                        "verified_facts": [{"field": "identity"}],
+                        "attractions": [
+                            {"attraction_id": "a", "name": "景点甲"},
+                            {"attraction_id": "b", "name": "景点乙"},
+                            {"attraction_id": "c", "name": "景点丙"},
+                        ],
+                    },
+                    sources=({"publisher": "official-test"},),
+                ),
+                "map": EvidenceItem(
+                    evidence_id="map",
+                    domain="map",
+                    status=EvidenceStatus.SOURCED,
+                    value={
+                        "destination": {"adcode": "000000"},
+                        "local_transit_input_signature": ["乙站", "景点甲"],
+                        "local_transit": [
+                            {
+                                "route_id": "route-1",
+                                "from": "乙站",
+                                "to": "景点甲",
+                                "duration_seconds": 600,
+                            }
+                        ],
+                    },
+                    sources=({"provider": "fake-map"},),
+                ),
+            }
+        )
+        self.assertTrue(agent_actions._needs_local_transit(state))
+
+    def test_map_route_snapshot_replaces_old_signature_and_failure(
+        self,
+    ) -> None:
+        previous = EvidenceItem(
+            evidence_id="map-old",
+            domain="map",
+            status=EvidenceStatus.SOURCED,
+            value={
+                "destination": {"adcode": "000000"},
+                "local_transit_input_signature": ["基地", "景点甲"],
+                "local_transit_result_status": "FAILED",
+                "local_transit_refresh_failure": {"stage": "poi_transport"},
+                "local_transit": [
+                    {
+                        "route_id": "route-1",
+                        "from": "基地",
+                        "to": "景点甲",
+                        "duration_seconds": 600,
+                    }
+                ],
+            },
+            sources=({"provider": "fake-map"},),
+        )
+        current = EvidenceItem(
+            evidence_id="map-current",
+            domain="map",
+            status=EvidenceStatus.SOURCED,
+            value={
+                "destination": {"adcode": "000000"},
+                "local_transit_input_signature": [
+                    "基地",
+                    "景点甲",
+                    "景点乙",
+                    "景点丙",
+                ],
+                "local_transit_result_status": "AVAILABLE",
+                "local_transit": [
+                    {
+                        "route_id": f"route-{index}",
+                        "from": f"地点{index}",
+                        "to": f"地点{index + 1}",
+                        "duration_seconds": 600,
+                    }
+                    for index in range(1, 4)
+                ],
+            },
+            sources=({"provider": "fake-map"},),
+        )
+        merged = agent_actions._merge_sourced_evidence(previous, current)
+        self.assertEqual(
+            merged.value["local_transit_input_signature"],
+            ["基地", "景点甲", "景点乙", "景点丙"],
+        )
+        self.assertEqual(len(merged.value["local_transit"]), 3)
+        self.assertEqual(
+            merged.value["local_transit_result_status"],
+            "AVAILABLE",
+        )
+        self.assertNotIn("local_transit_refresh_failure", merged.value)
+
 
 if __name__ == "__main__":
     unittest.main()

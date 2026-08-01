@@ -47,8 +47,66 @@ class TaskMode(str, Enum):
     """Top-level routing selected before tool execution."""
 
     OPEN_DISCOVERY = "OPEN_DISCOVERY"
-    ANCHORED_PLAN = "ANCHORED_PLAN"
+    GUIDED_DISCOVERY = "GUIDED_DISCOVERY"
+    DIRECT_PLAN = "DIRECT_PLAN"
     PLAN_AUDIT = "PLAN_AUDIT"
+
+
+_GUIDED_DESTINATION_MARKERS = (
+    "倾向",
+    "优先",
+    "大概想去",
+    "考虑",
+)
+_DIRECT_DESTINATION_MARKERS = (
+    "确定",
+    "就去",
+    "已经订了",
+)
+_LEGACY_TASK_MODE_ALIASES = {
+    "ANCHORED_PLAN": TaskMode.DIRECT_PLAN,
+}
+
+
+def _classify_task_mode(
+    *,
+    requested_mode: object,
+    destination_anchor: str | None,
+    destination_expression: str | None,
+) -> tuple[TaskMode, str]:
+    """Classify routing without treating every destination hint as fixed."""
+
+    if requested_mode is None:
+        parsed_mode = None
+    else:
+        raw_mode = str(requested_mode)
+        parsed_mode = _LEGACY_TASK_MODE_ALIASES.get(raw_mode)
+        if parsed_mode is None:
+            try:
+                parsed_mode = TaskMode(raw_mode)
+            except ValueError:
+                raise TravelAgentError("unsupported task_mode") from None
+    if parsed_mode is TaskMode.PLAN_AUDIT:
+        return parsed_mode, "explicit_plan_audit"
+    if destination_anchor is None:
+        return TaskMode.OPEN_DISCOVERY, "no_destination_region"
+    if parsed_mode is TaskMode.DIRECT_PLAN:
+        return parsed_mode, "explicit_direct_plan"
+    if parsed_mode is TaskMode.GUIDED_DISCOVERY:
+        return parsed_mode, "explicit_guided_discovery"
+
+    expression = destination_expression or ""
+    if any(marker in expression for marker in _DIRECT_DESTINATION_MARKERS):
+        return TaskMode.DIRECT_PLAN, "destination_expression_direct_marker"
+    if any(marker in expression for marker in _GUIDED_DESTINATION_MARKERS):
+        return (
+            TaskMode.GUIDED_DISCOVERY,
+            "destination_expression_guided_marker",
+        )
+    return (
+        TaskMode.GUIDED_DISCOVERY,
+        "destination_anchor_without_direct_commitment",
+    )
 
 
 class AgentRuntimeMode(str, Enum):
@@ -91,6 +149,10 @@ class TravelIntent:
     missing_fields: tuple[str, ...] = ()
     interpretation: str = ""
     classification_basis: str = "caller_supplied"
+    destination_expression: str | None = None
+    accommodation_budget_total_cny: float | None = None
+    accommodation_budget_per_night_cny: float | None = None
+    rooms: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> TravelIntent:
@@ -98,21 +160,16 @@ class TravelIntent:
             value.get("destination_anchor"),
             "destination_anchor",
         )
+        destination_expression = _optional_text(
+            value.get("destination_expression"),
+            "destination_expression",
+        )
         requested_mode = value.get("task_mode")
-        try:
-            parsed_mode = (
-                TaskMode(str(requested_mode))
-                if requested_mode is not None
-                else TaskMode.OPEN_DISCOVERY
-            )
-        except ValueError:
-            raise TravelAgentError("unsupported task_mode") from None
-        if parsed_mode is not TaskMode.PLAN_AUDIT:
-            parsed_mode = (
-                TaskMode.ANCHORED_PLAN
-                if destination
-                else TaskMode.OPEN_DISCOVERY
-            )
+        parsed_mode, mode_basis = _classify_task_mode(
+            requested_mode=requested_mode,
+            destination_anchor=destination,
+            destination_expression=destination_expression,
+        )
         earliest = _optional_wall_datetime(
             value.get("earliest_departure_at"),
             "earliest_departure_at",
@@ -143,6 +200,21 @@ class TravelIntent:
             raise TravelAgentError(
                 "total_budget_cny must be a positive number or null"
             )
+        accommodation_total = _optional_positive_number(
+            value.get("accommodation_budget_total_cny"),
+            "accommodation_budget_total_cny",
+        )
+        accommodation_per_night = _optional_positive_number(
+            value.get("accommodation_budget_per_night_cny"),
+            "accommodation_budget_per_night_cny",
+        )
+        rooms = value.get("rooms")
+        if rooms is not None and (
+            not isinstance(rooms, int)
+            or isinstance(rooms, bool)
+            or rooms < 1
+        ):
+            raise TravelAgentError("rooms must be a positive integer or null")
         pace = _optional_text(value.get("pace"), "pace")
         if pace is not None and pace not in {
             "relaxed",
@@ -160,6 +232,11 @@ class TravelIntent:
             value.get("missing_fields", ()),
             "missing_fields",
         )
+        required_fields = (
+            ()
+            if parsed_mode is TaskMode.PLAN_AUDIT
+            else _REQUIRED_INTENT_FIELDS
+        )
         inferred_missing = [
             field_name
             for field_name, field_value in (
@@ -174,12 +251,13 @@ class TravelIntent:
                 ("pace", pace),
                 ("transport_preferences", transport_preferences),
             )
+            if field_name in required_fields
             if field_value is None or field_value == ()
         ]
-        if (
-            parsed_mode is TaskMode.ANCHORED_PLAN
-            and destination is None
-        ):
+        if parsed_mode in {
+            TaskMode.GUIDED_DISCOVERY,
+            TaskMode.DIRECT_PLAN,
+        } and destination is None:
             inferred_missing.append("destination_anchor")
         missing = tuple(
             dict.fromkeys((*inferred_missing, *supplied_missing))
@@ -202,8 +280,12 @@ class TravelIntent:
             missing_fields=missing,
             interpretation=str(value.get("interpretation", "")),
             classification_basis=str(
-                value.get("classification_basis", "caller_supplied")
+                value.get("classification_basis", mode_basis)
             ),
+            destination_expression=destination_expression,
+            accommodation_budget_total_cny=accommodation_total,
+            accommodation_budget_per_night_cny=accommodation_per_night,
+            rooms=rooms,
         )
 
     @property
@@ -220,8 +302,15 @@ class TravelIntent:
             "transport_preferences": self.transport_preferences,
             "destination_anchor": self.destination_anchor,
         }
-        required = list(_REQUIRED_INTENT_FIELDS)
-        if self.task_mode is TaskMode.ANCHORED_PLAN:
+        required = (
+            []
+            if self.task_mode is TaskMode.PLAN_AUDIT
+            else list(_REQUIRED_INTENT_FIELDS)
+        )
+        if self.task_mode in {
+            TaskMode.GUIDED_DISCOVERY,
+            TaskMode.DIRECT_PLAN,
+        }:
             required.append("destination_anchor")
         inferred = [
             field_name
@@ -246,6 +335,14 @@ class TravelIntent:
             "missing_fields": list(self.missing_fields),
             "interpretation": self.interpretation,
             "classification_basis": self.classification_basis,
+            "destination_expression": self.destination_expression,
+            "accommodation_budget_total_cny": (
+                self.accommodation_budget_total_cny
+            ),
+            "accommodation_budget_per_night_cny": (
+                self.accommodation_budget_per_night_cny
+            ),
+            "rooms": self.rooms,
         }
 
 
@@ -258,6 +355,7 @@ class Revision:
     event_duration_minutes: Mapping[str, int] = field(default_factory=dict)
     locked_event_ids: tuple[str, ...] = ()
     must_visit: tuple[str, ...] = ()
+    day_start_times: Mapping[str, str] = field(default_factory=dict)
     pace: str | None = None
     night_activity: bool | None = None
     user_message: str | None = None
@@ -276,6 +374,27 @@ class Revision:
             minimum=15,
             maximum=720,
         )
+        raw_day_starts = value.get("day_start_times", {})
+        if not isinstance(raw_day_starts, Mapping):
+            raise TravelAgentError("day_start_times must be an object")
+        day_start_times: dict[str, str] = {}
+        for day, clock in raw_day_starts.items():
+            if (
+                not isinstance(day, str)
+                or not day.isdigit()
+                or int(day) < 1
+                or not isinstance(clock, str)
+            ):
+                raise TravelAgentError(
+                    "day_start_times must map positive day numbers to HH:MM"
+                )
+            try:
+                parsed_clock = datetime.strptime(clock, "%H:%M")
+            except ValueError:
+                raise TravelAgentError(
+                    "day_start_times values must use HH:MM"
+                ) from None
+            day_start_times[day] = parsed_clock.strftime("%H:%M")
         pace = _optional_text(value.get("pace"), "pace")
         if pace is not None and pace not in {
             "relaxed",
@@ -304,6 +423,7 @@ class Revision:
                 value.get("must_visit", ()),
                 "must_visit",
             ),
+            day_start_times=day_start_times,
             pace=pace,
             night_activity=night,
             user_message=_optional_text(
@@ -321,6 +441,7 @@ class Revision:
             ),
             "locked_event_ids": list(self.locked_event_ids),
             "must_visit": list(self.must_visit),
+            "day_start_times": dict(self.day_start_times),
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -646,6 +767,15 @@ class InMemoryAgentStore:
                 return None
             return deepcopy(next(reversed(self._runs.values())))
 
+    def list_runs(self) -> list[AgentRun]:
+        """Return persisted runs newest first without changing current state."""
+
+        with self._lock:
+            return [
+                deepcopy(run)
+                for run in reversed(tuple(self._runs.values()))
+            ]
+
     def confirm(
         self,
         run_id: str,
@@ -721,6 +851,123 @@ class InMemoryAgentStore:
                 message="沿用当前会话和证据，开始显式重新查询。",
             )
             return deepcopy(run)
+
+    def continue_with_intent(
+        self,
+        run_id: str,
+        intent: TravelIntent,
+    ) -> AgentRun:
+        """Continue one completed discovery run under a selected destination."""
+
+        with self._condition:
+            run = self._required_run(run_id)
+            if run.status is not RunStatus.COMPLETED:
+                raise TravelAgentError(
+                    "only a completed run can continue with a selection"
+                )
+            if intent.blocking_missing_fields:
+                raise TravelAgentError(
+                    "selected intent is missing required fields"
+                )
+            previous_mode = run.intent.task_mode
+            run.intent = intent
+            run.status = RunStatus.CONFIRMED
+            run.confirmed_at = _now()
+            run.completed_at = None
+            run.error_code = None
+            self._append_unlocked(
+                run,
+                event_type="discovery.option_selected",
+                status="completed",
+                message="用户已选定区域方案，将在同一任务中继续详细规划。",
+                details={
+                    "previous_task_mode": previous_mode.value,
+                    "task_mode": intent.task_mode.value,
+                    "destination_anchor": intent.destination_anchor,
+                },
+            )
+            return deepcopy(run)
+
+    def prepare_revision(
+        self,
+        run_id: str,
+        *,
+        intent: TravelIntent | None = None,
+        revision: Revision | None = None,
+    ) -> AgentRun:
+        """Prepare a new version on the same run without hiding its result."""
+
+        with self._condition:
+            run = self._required_run(run_id)
+            if (
+                run.status
+                not in {
+                    RunStatus.COMPLETED,
+                    RunStatus.BLOCKED,
+                    RunStatus.FAILED,
+                }
+                or run.result is None
+            ):
+                raise TravelAgentError(
+                    "only a run with a retained result can be revised"
+                )
+            next_intent = intent or run.intent
+            if next_intent.blocking_missing_fields:
+                raise TravelAgentError(
+                    "revised intent is missing required fields"
+                )
+            run.intent = next_intent
+            run.revision = revision
+            run.status = RunStatus.CONFIRMED
+            run.confirmed_at = _now()
+            run.completed_at = None
+            run.error_code = None
+            self._append_unlocked(
+                run,
+                event_type="revision.started",
+                status="running",
+                message="已在当前任务中开始生成新版本；上一版继续可用。",
+                details={
+                    "same_run": True,
+                    "revision": (
+                        revision.to_dict()
+                        if revision is not None
+                        else None
+                    ),
+                },
+            )
+            return deepcopy(run)
+
+    def persist_plan_version(
+        self,
+        run_id: str,
+        result: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """Persist one immutable plan version for an existing run."""
+
+        run_directory = self.run_directory(run_id)
+        if run_directory is None:
+            return None
+        plan = result.get("plan")
+        if not isinstance(plan, Mapping):
+            raise TravelAgentError("planner result omitted plan")
+        versions = run_directory / "plans"
+        versions.mkdir(parents=True, exist_ok=True)
+        version = len(list(versions.glob("plan-*.json"))) + 1
+        payload = {
+            "run_id": run_id,
+            "plan_version": version,
+            "plan": deepcopy(dict(plan)),
+        }
+        _atomic_json(
+            versions / f"plan-{version:04d}.json",
+            payload,
+        )
+        _atomic_json(
+            run_directory / "plan-version.json",
+            payload,
+        )
+        return deepcopy(payload)
 
     def fail(self, run_id: str, error_code: str) -> AgentRun:
         with self._condition:
@@ -1058,7 +1305,12 @@ def _intent_from_persisted(
     value: Mapping[str, object],
 ) -> TravelIntent:
     try:
-        task_mode = TaskMode(str(value["task_mode"]))
+        raw_task_mode = str(value["task_mode"])
+        task_mode = (
+            _LEGACY_TASK_MODE_ALIASES[raw_task_mode]
+            if raw_task_mode in _LEGACY_TASK_MODE_ALIASES
+            else TaskMode(raw_task_mode)
+        )
     except (KeyError, ValueError):
         raise TravelAgentError(
             "persisted intent has invalid task_mode"
@@ -1121,6 +1373,10 @@ def _intent_from_persisted(
         classification_basis=_loaded_required_text(
             value.get("classification_basis"),
             "classification_basis",
+        ),
+        destination_expression=_loaded_optional_text(
+            value.get("destination_expression"),
+            "destination_expression",
         ),
     )
 
@@ -1380,6 +1636,26 @@ def execute_run(
         raise
 
 
+def continue_run_with_intent(
+    run_id: str,
+    intent: TravelIntent | Mapping[str, object],
+    *,
+    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+) -> AgentRun:
+    """Keep the same session/run while advancing discovery into planning."""
+
+    contract = (
+        intent
+        if isinstance(intent, TravelIntent)
+        else TravelIntent.from_mapping(intent)
+    )
+    if contract.task_mode is not TaskMode.DIRECT_PLAN:
+        raise TravelAgentError(
+            "a guided discovery selection must continue as DIRECT_PLAN"
+        )
+    return store.continue_with_intent(run_id, contract)
+
+
 def collect_destination_evidence(
     intent: TravelIntent,
     *,
@@ -1547,26 +1823,42 @@ def revise_run(
     revision: Revision | Mapping[str, object],
     *,
     executor: RevisionExecutor,
+    intent: TravelIntent | Mapping[str, object] | None = None,
     store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
 ) -> AgentRun:
-    """Create and execute a child run that reuses the previous result."""
+    """Create and atomically install a new version on the same run."""
 
     previous = store.get_run(run_id)
-    if previous.status is not RunStatus.COMPLETED or previous.result is None:
-        raise TravelAgentError("only a completed run can be revised")
+    if (
+        previous.status
+        not in {
+            RunStatus.COMPLETED,
+            RunStatus.BLOCKED,
+            RunStatus.FAILED,
+        }
+        or previous.result is None
+    ):
+        raise TravelAgentError("only a run with a retained result can be revised")
     contract = (
         revision
         if isinstance(revision, Revision)
         else Revision.from_mapping(revision)
     )
-    child = store.create(
-        previous.intent,
-        session_id=previous.session_id,
-        parent_run_id=previous.run_id,
+    next_intent = (
+        intent
+        if isinstance(intent, TravelIntent)
+        else (
+            TravelIntent.from_mapping(intent)
+            if intent is not None
+            else previous.intent
+        )
+    )
+    store.prepare_revision(
+        run_id,
+        intent=next_intent,
         revision=contract,
     )
-    store.confirm(child.run_id, None)
-    child = store.start(child.run_id)
+    store.start(run_id)
 
     def emit(
         tool: str,
@@ -1575,7 +1867,7 @@ def revise_run(
         details: Mapping[str, object] | None = None,
     ) -> None:
         store.append_event(
-            child.run_id,
+            run_id,
             event_type=f"tool.{status}",
             status=status,
             message=message,
@@ -1586,10 +1878,11 @@ def revise_run(
         result = executor(previous.result, contract, emit)
         if not isinstance(result, Mapping):
             raise TravelAgentError("revision executor must return an object")
-        return store.complete(child.run_id, result)
+        store.persist_plan_version(run_id, result)
+        return store.complete(run_id, result)
     except Exception as error:
         store.fail(
-            child.run_id,
+            run_id,
             f"REVISION_EXECUTOR_{type(error).__name__.upper()}",
         )
         raise
@@ -1608,11 +1901,11 @@ def runtime_status() -> dict[str, object]:
     """Describe the core without inspecting any model configuration."""
 
     return {
-        "mode": AgentRuntimeMode.CODEX_HOSTED.value,
-        "web_natural_language_enabled": False,
+        "mode": AgentRuntimeMode.STANDALONE_WEB.value,
+        "web_natural_language_enabled": True,
         "model_required": False,
         "model_adapter_loaded": False,
-        "display": "Codex 宿主模式",
+        "display": "本地结构化提取模式",
         "fact_policy": "数字只能来自工具或用户显式输入。",
     }
 
@@ -1624,6 +1917,23 @@ def _optional_text(value: object, field_name: str) -> str | None:
         raise TravelAgentError(f"{field_name} must be text or null")
     stripped = value.strip()
     return stripped or None
+
+
+def _optional_positive_number(
+    value: object,
+    field_name: str,
+) -> float | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or float(value) <= 0
+    ):
+        raise TravelAgentError(
+            f"{field_name} must be a positive number or null"
+        )
+    return float(value)
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -1707,6 +2017,7 @@ __all__ = [
     "TaskMode",
     "TravelAgentError",
     "TravelIntent",
+    "continue_run_with_intent",
     "confirm_intent",
     "collect_destination_evidence",
     "create_run",

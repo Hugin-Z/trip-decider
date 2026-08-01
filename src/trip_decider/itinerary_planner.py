@@ -896,6 +896,7 @@ def replan_itinerary(
         "forced_days",
         "event_duration_minutes",
         "locked_event_ids",
+        "day_start_times",
     }
     unknown = sorted(set(edits) - allowed_edit_fields)
     if unknown:
@@ -916,10 +917,13 @@ def replan_itinerary(
     locked = string_set("locked_event_ids")
     raw_forced = edits.get("forced_days", {})
     raw_durations = edits.get("event_duration_minutes", {})
+    raw_day_starts = edits.get("day_start_times", {})
     if not isinstance(raw_forced, Mapping):
         raise ValueError("forced_days must be an object")
     if not isinstance(raw_durations, Mapping):
         raise ValueError("event_duration_minutes must be an object")
+    if not isinstance(raw_day_starts, Mapping):
+        raise ValueError("day_start_times must be an object")
     forced_days: dict[str, int] = {}
     for attraction_id, day_number in raw_forced.items():
         if (
@@ -944,6 +948,22 @@ def replan_itinerary(
                 "event_duration_minutes must map event IDs to 15..720"
             )
         duration_edits[event_id] = minutes
+    day_start_times: dict[int, str] = {}
+    for day_number, clock in raw_day_starts.items():
+        if (
+            not isinstance(day_number, str)
+            or not day_number.isdigit()
+            or int(day_number) < 1
+            or not isinstance(clock, str)
+        ):
+            raise ValueError("day_start_times contains an invalid entry")
+        try:
+            datetime.strptime(clock, "%H:%M")
+        except ValueError:
+            raise ValueError(
+                "day_start_times values must use HH:MM"
+            ) from None
+        day_start_times[int(day_number)] = clock
 
     candidate_evaluation = evaluate_pace(
         days=candidate_days,
@@ -1185,6 +1205,196 @@ def replan_itinerary(
             continue
         insertion = min(old_index, len(target["events"]))
         target["events"].insert(insertion, old_event)
+
+    for day_number, clock in sorted(day_start_times.items()):
+        target = next(
+            (day for day in days if int(day["day"]) == day_number),
+            None,
+        )
+        if target is None:
+            conflicts.append(
+                {
+                    "type": "day_start_day_missing",
+                    "day": day_number,
+                    "message": "用户指定的日期不存在。",
+                }
+            )
+            continue
+        movable = [
+            event
+            for _, _, event in _selected_events([target])
+            if isinstance(event.get("start_at"), str)
+            and (
+                event.get("type") == "attraction"
+                or (
+                    event.get("type") == "transit"
+                    and not str(event.get("event_id", "")).startswith(
+                        "rail-"
+                    )
+                )
+            )
+        ]
+        if not movable:
+            conflicts.append(
+                {
+                    "type": "day_start_activity_missing",
+                    "day": day_number,
+                    "message": "该日没有可调整的当地出发事件。",
+                }
+            )
+            continue
+        earliest_movable = min(
+            datetime.fromisoformat(str(event["start_at"]))
+            for event in movable
+        )
+        requested = at_date_time(str(target["date"]), clock)
+        if earliest_movable >= requested:
+            continue
+        delta = requested - earliest_movable
+        affected = [
+            event
+            for _, _, event in _selected_events([target])
+            if isinstance(event.get("start_at"), str)
+            and datetime.fromisoformat(str(event["start_at"]))
+            >= earliest_movable
+            and (
+                event.get("type") == "attraction"
+                or (
+                    event.get("type") == "transit"
+                    and not str(event.get("event_id", "")).startswith(
+                        "rail-"
+                    )
+                )
+                or (
+                    event.get("type") == "buffer"
+                    and (
+                        isinstance(
+                            event.get("remove_with_attraction_id"),
+                            str,
+                        )
+                        or str(event.get("event_id", "")).startswith(
+                            "activity-buffer-"
+                        )
+                    )
+                )
+            )
+        ]
+        locked_affected = [
+            str(event["event_id"])
+            for event in affected
+            if str(event["event_id"]) in locked
+        ]
+        if locked_affected:
+            conflicts.append(
+                {
+                    "type": "day_start_hits_locked_event",
+                    "day": day_number,
+                    "event_ids": locked_affected,
+                    "message": (
+                        "新的出发时间会移动已锁定事件；"
+                        "锁定优先，因此未应用该修改。"
+                    ),
+                }
+            )
+            continue
+        for event in affected:
+            for field in ("start_at", "end_at"):
+                raw = event.get(field)
+                if isinstance(raw, str):
+                    event[field] = (
+                        datetime.fromisoformat(raw) + delta
+                    ).isoformat(timespec="minutes")
+            event_change_reasons[str(event["event_id"])] = (
+                f"用户要求Day {day_number}在{clock}以后出发；"
+                "为保持相对顺序，受影响的当地交通、景点和缓冲顺延。"
+            )
+        shifted_intervals = [
+            (
+                datetime.fromisoformat(str(event["start_at"])),
+                datetime.fromisoformat(str(event["end_at"])),
+            )
+            for event in affected
+            if isinstance(event.get("start_at"), str)
+            and isinstance(event.get("end_at"), str)
+        ]
+        meals = [
+            event
+            for _, _, event in _selected_events([target])
+            if event.get("type") == "meal"
+            and isinstance(event.get("start_at"), str)
+            and isinstance(event.get("end_at"), str)
+        ]
+        for meal in meals:
+            meal_start = datetime.fromisoformat(str(meal["start_at"]))
+            meal_end = datetime.fromisoformat(str(meal["end_at"]))
+            duration = meal_end - meal_start
+            while True:
+                overlapping = [
+                    interval
+                    for interval in shifted_intervals
+                    if interval[0] < meal_end and interval[1] > meal_start
+                ]
+                if not overlapping:
+                    break
+                if str(meal["event_id"]) in locked:
+                    conflicts.append(
+                        {
+                            "type": "day_start_hits_locked_meal",
+                            "day": day_number,
+                            "event_id": str(meal["event_id"]),
+                            "message": (
+                                "顺延后的活动与已锁定餐食重叠；"
+                                "餐食未移动，需要用户调整活动或解除锁定。"
+                            ),
+                        }
+                    )
+                    break
+                meal_start = max(interval[1] for interval in overlapping)
+                meal_end = meal_start + duration
+            if str(meal["event_id"]) in locked:
+                continue
+            original_start = datetime.fromisoformat(str(meal["start_at"]))
+            if meal_start != original_start:
+                meal["start_at"] = meal_start.isoformat(timespec="minutes")
+                meal["end_at"] = meal_end.isoformat(timespec="minutes")
+                event_change_reasons[str(meal["event_id"])] = (
+                    f"Day {day_number}出发时间调整后与活动重叠；"
+                    "餐食按原时长顺延到首个可用时段。"
+                )
+                if (
+                    meal.get("meal_kind") == "lunch"
+                    and meal_end
+                    > at_date_time(
+                        str(target["date"]),
+                        str(PLANNER_DEFAULTS["lunch_window_end"]),
+                    )
+                ):
+                    conflicts.append(
+                        {
+                            "type": "lunch_window_exceeded",
+                            "day": day_number,
+                            "event_id": str(meal["event_id"]),
+                            "message": (
+                                f"Day {day_number}推迟出发后，午餐需延至"
+                                f"{meal_start.strftime('%H:%M')}–"
+                                f"{meal_end.strftime('%H:%M')}，超过默认午餐"
+                                f"窗口{PLANNER_DEFAULTS['lunch_window_end']}；"
+                                "可缩短景点、缩短午餐或接受较晚午餐。"
+                            ),
+                        }
+                    )
+        explicit_changes.append(
+            {
+                "action": "moved_time",
+                "day": day_number,
+                "from": earliest_movable.strftime("%H:%M"),
+                "to": clock,
+                "reason": (
+                    f"用户要求Day {day_number}在{clock}以后出发；"
+                    "只顺延受影响的当地交通、景点和相邻缓冲。"
+                ),
+            }
+        )
 
     previous_attraction_events: dict[str, list[str]] = {}
     for _, _, event in _selected_events(previous_days):

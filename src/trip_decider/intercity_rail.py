@@ -388,6 +388,55 @@ def _train_payload(train: _Train, price: Decimal) -> dict[str, object]:
     }
 
 
+def search_live_station_names(
+    query: str,
+    *,
+    limit: int = 30,
+) -> dict[str, object]:
+    """Search the current 12306 station index without retaining its bytes."""
+
+    token = query.strip()
+    if not token:
+        raise ValueError("station query must be non-empty text")
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit < 1
+        or limit > 100
+    ):
+        raise ValueError("station result limit is invalid")
+    client = _RailClient()
+    attempted_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    try:
+        names, _codes = client.station_codes()
+    except _RailFailure as error:
+        return {
+            "evidence_status": "missing",
+            "domain": "railway_station_index",
+            "missing_reason": error.stage,
+            "network_attempts": client.network_attempts,
+            "attempted_at": attempted_at,
+        }
+    matches = [name for name in names if token in name][:limit]
+    return {
+        "evidence_status": "sourced",
+        "domain": "railway_station_index",
+        "query": token,
+        "station_names": matches,
+        "retrieved_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "network_attempts": client.network_attempts,
+        "source": {
+            "provider": "中国铁路12306",
+            "scope": "当前车站名称索引",
+            "retrieved_at": attempted_at,
+        },
+    }
+
+
 def query_intercity_rail(
     *,
     origin: str,
@@ -580,4 +629,5 @@ def query_intercity_rail(
 __all__ = [
     "query_intercity_rail",
     "rail_snapshot_metadata",
+    "search_live_station_names",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import time
 from typing import Protocol
 
 from trip_decider.intercity_rail import query_intercity_rail
@@ -59,6 +60,7 @@ def collect_railway_evidence(intent: TravelIntent) -> EvidenceItem:
             "railway",
             "missing_intent_fields:" + ",".join(absent),
         )
+    started = time.monotonic()
     result = query_intercity_rail(
         origin=str(intent.origin),
         destination=str(intent.destination_anchor),
@@ -66,6 +68,10 @@ def collect_railway_evidence(intent: TravelIntent) -> EvidenceItem:
         latest_return_at=str(intent.latest_return_at),
         travelers=intent.travelers or 1,
         budget_cny=intent.total_budget_cny,
+    )
+    result["timing_ms"] = round(
+        (time.monotonic() - started) * 1000,
+        3,
     )
     if result.get("evidence_status") != "sourced":
         return EvidenceItem(
@@ -196,7 +202,8 @@ def execute_destination_intent(
     result["task_mode"] = intent.task_mode.value
     result["mode_flow"] = {
         TaskMode.OPEN_DISCOVERY: "DISCOVER_EVIDENCE_AND_CANDIDATES",
-        TaskMode.ANCHORED_PLAN: "ANCHORED_DESTINATION_PLAN",
+        TaskMode.GUIDED_DISCOVERY: "GUIDED_REGION_COMPARISON",
+        TaskMode.DIRECT_PLAN: "DIRECT_DESTINATION_PLAN",
         TaskMode.PLAN_AUDIT: "EXISTING_PLAN_AUDIT",
     }[intent.task_mode]
     return result

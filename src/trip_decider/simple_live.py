@@ -12,6 +12,7 @@ import argparse
 import html
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -21,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time as wall_time, timedelta
 from pathlib import Path
@@ -72,6 +74,7 @@ class _Route:
     duration_seconds: int
     attempts: int
     estimated_taxi_cost_cny: float | None = None
+    polyline: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class _TransitRoute:
     fare_cny: float | None
     services: tuple[dict[str, object], ...]
     attempts: int
+    polyline: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -359,6 +363,20 @@ def query_destination_district(
         for item in parsed.districts
         if _normalized(item.name) == _normalized(anchor)
     ]
+    if not matches:
+        anchor_root = re.sub(r"[省市县区]$", "", _normalized(anchor))
+        suffix_matches = [
+            item
+            for item in parsed.districts
+            if anchor_root
+            and re.sub(
+                r"[省市县区]$",
+                "",
+                _normalized(item.name),
+            ) == anchor_root
+        ]
+        if len(suffix_matches) == 1:
+            matches = suffix_matches
     retrieved_at = datetime.now().astimezone().isoformat(
         timespec="seconds"
     )
@@ -408,6 +426,293 @@ def query_destination_district(
             "provider": "高德地图 Web 服务",
             "scope": "行政区查询",
             "retrieved_at": retrieved_at,
+        },
+    }
+
+
+def list_live_top_level_regions() -> dict[str, object]:
+    """Read the current AMap country district tree without retaining bytes."""
+
+    credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
+    if not isinstance(credential, str) or not credential:
+        return {
+            "evidence_status": "missing",
+            "domain": "map_region_index",
+            "missing_reason": "amap_web_service_key_not_configured",
+            "network_attempts": 0,
+        }
+    response = _http_get(
+        operation="district",
+        endpoint_path=_DISTRICT_PATH,
+        parameters={
+            "extensions": "base",
+            "keywords": "中国",
+            "subdistrict": "1",
+        },
+        credential=credential,
+    )
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+        roots = document.get("districts")
+        if not isinstance(roots, list) or len(roots) != 1:
+            raise ValueError("country district root is invalid")
+        children = roots[0].get("districts")
+        if not isinstance(children, list):
+            raise ValueError("country district children are invalid")
+        regions = []
+        for item in children:
+            if not isinstance(item, Mapping):
+                raise ValueError("country district child is invalid")
+            name = item.get("name")
+            adcode = item.get("adcode")
+            level = item.get("level")
+            if not all(
+                isinstance(value, str) and value
+                for value in (name, adcode, level)
+            ):
+                raise ValueError("country district identity is invalid")
+            regions.append(
+                {"name": name, "adcode": adcode, "level": level}
+            )
+    except (UnicodeError, json.JSONDecodeError, ValueError, AttributeError):
+        raise _LiveFailure(
+            stage="district_parse",
+            http_status=response.http_status,
+            amap_status=response.amap_status,
+            amap_infocode=response.amap_infocode,
+            python_exception_type="ValidationProblem",
+            response_bytes_received=True,
+            attempts=response.attempts,
+        ) from None
+    retrieved_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    return {
+        "evidence_status": "sourced",
+        "domain": "map_region_index",
+        "regions": regions,
+        "retrieved_at": retrieved_at,
+        "network_attempts": response.attempts,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": "实时省级行政区索引",
+            "retrieved_at": retrieved_at,
+        },
+    }
+
+
+def resolve_live_place_points(
+    *,
+    place_names: Sequence[str],
+    region: str | None = None,
+) -> dict[str, object]:
+    """Resolve unique exact POIs to GCJ-02 points without route queries."""
+
+    seeds = tuple(name.strip() for name in place_names)
+    if (
+        not seeds
+        or any(not seed for seed in seeds)
+        or len({_normalized(seed) for seed in seeds}) != len(seeds)
+        or (region is not None and not region.strip())
+    ):
+        raise _LiveFailure(
+            stage="map_point_input_validation",
+            python_exception_type="ValueError",
+        )
+    credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
+    if not isinstance(credential, str) or not credential:
+        raise _LiveFailure(
+            stage="credential",
+            python_exception_type="KeyError",
+        )
+
+    def collect(seed: str) -> tuple[str, _Response, tuple[ParsedAmapPoi, ...]]:
+        parameters = {
+            "keywords": seed,
+            "page_num": "1",
+            "page_size": str(_MAX_POIS),
+            "show_fields": "business,navi",
+        }
+        if region is not None:
+            parameters["region"] = region.strip()
+            parameters["city_limit"] = "true"
+        response = _http_get(
+            operation="poi",
+            endpoint_path=_POI_PATH,
+            parameters=parameters,
+            credential=credential,
+        )
+        parsed, _observation = _parse_and_bind_poi(response)
+        exact = tuple(
+            poi
+            for poi in parsed.pois
+            if _normalized(poi.name) == _normalized(seed)
+        )
+        return seed, response, exact
+
+    with ThreadPoolExecutor(
+        max_workers=min(6, len(seeds)),
+        thread_name_prefix="amap-map-point",
+    ) as executor:
+        results = list(executor.map(collect, seeds))
+    retrieved_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    points: dict[str, dict[str, object]] = {}
+    network_attempts = 0
+    for seed, response, exact in results:
+        network_attempts += response.attempts
+        if len(exact) != 1:
+            points[seed] = {
+                "status": "AMBIGUOUS" if exact else "UNMATCHED",
+                "exact_candidate_count": len(exact),
+            }
+            continue
+        values = exact[0].location.split(",")
+        if len(values) != 2:
+            raise _LiveFailure(
+                stage="poi_location_parse",
+                http_status=response.http_status,
+                amap_status=response.amap_status,
+                amap_infocode=response.amap_infocode,
+                python_exception_type="ValueError",
+                response_bytes_received=True,
+                attempts=response.attempts,
+            )
+        try:
+            longitude = float(values[0])
+            latitude = float(values[1])
+        except ValueError:
+            raise _LiveFailure(
+                stage="poi_location_parse",
+                http_status=response.http_status,
+                amap_status=response.amap_status,
+                amap_infocode=response.amap_infocode,
+                python_exception_type="ValueError",
+                response_bytes_received=True,
+                attempts=response.attempts,
+            ) from None
+        points[seed] = {
+            "status": "MATCHED",
+            "exact_candidate_count": 1,
+            "resolved_name": exact[0].name,
+            "location": {
+                "longitude": longitude,
+                "latitude": latitude,
+                "coordinate_system": "GCJ-02",
+            },
+        }
+    return {
+        "status": (
+            "AVAILABLE"
+            if all(value["status"] == "MATCHED" for value in points.values())
+            else "PARTIAL"
+        ),
+        "place_resolutions": points,
+        "network_attempts": network_attempts,
+        "retrieved_at": retrieved_at,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": "POI Search 2.0 exact-name map points",
+            "coordinate_system": "GCJ-02",
+        },
+    }
+
+
+def search_live_places(
+    *,
+    keyword: str,
+    region: str | None = None,
+    city_limit: bool = False,
+    page_size: int = 20,
+) -> dict[str, object]:
+    """Search provider POIs without persisting raw response bytes.
+
+    This is the generic discovery/profile boundary.  It intentionally returns
+    only parsed provider fields and GCJ-02 coordinates; opening hours, prices
+    and editorial recommendations are not inferred from a POI response.
+    """
+
+    normalized_keyword = keyword.strip()
+    normalized_region = region.strip() if isinstance(region, str) else None
+    if (
+        not normalized_keyword
+        or (normalized_region is not None and not normalized_region)
+        or not isinstance(city_limit, bool)
+        or not isinstance(page_size, int)
+        or isinstance(page_size, bool)
+        or not 1 <= page_size <= _MAX_POIS
+    ):
+        raise ValueError("invalid live place search input")
+    credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
+    if not isinstance(credential, str) or not credential:
+        return {
+            "evidence_status": "missing",
+            "missing_reason": "amap_web_service_key_not_configured",
+            "network_attempts": 0,
+            "places": [],
+        }
+    parameters = {
+        "keywords": normalized_keyword,
+        "page_num": "1",
+        "page_size": str(page_size),
+        "show_fields": "business,navi",
+    }
+    if normalized_region is not None:
+        parameters["region"] = normalized_region
+        parameters["city_limit"] = "true" if city_limit else "false"
+    response = _http_get(
+        operation="poi",
+        endpoint_path=_POI_PATH,
+        parameters=parameters,
+        credential=credential,
+    )
+    parsed, _observation = _parse_and_bind_poi(response)
+    retrieved_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    places: list[dict[str, object]] = []
+    for poi in parsed.pois:
+        values = poi.location.split(",")
+        location: dict[str, object] | None = None
+        if len(values) == 2:
+            try:
+                location = {
+                    "longitude": float(values[0]),
+                    "latitude": float(values[1]),
+                    "coordinate_system": "GCJ-02",
+                }
+            except ValueError:
+                location = None
+        places.append(
+            {
+                "provider_record_id": poi.record_id,
+                "name": poi.name,
+                "category": poi.category_label,
+                "category_code": poi.category_code,
+                "address": poi.address,
+                "province": poi.province_name,
+                "city": poi.city_name,
+                "district": poi.district_name,
+                "province_code": poi.province_code,
+                "city_code": poi.city_code,
+                "district_code": poi.district_code,
+                "location": location,
+            }
+        )
+    return {
+        "evidence_status": "sourced",
+        "keyword": normalized_keyword,
+        "region": normalized_region,
+        "city_limit": city_limit,
+        "retrieved_at": retrieved_at,
+        "network_attempts": response.attempts,
+        "places": places,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": "POI Search 2.0",
+            "retrieved_at": retrieved_at,
+            "coordinate_system": "GCJ-02",
         },
     }
 
@@ -647,6 +952,46 @@ def _route_coordinates(place: Mapping[str, object]) -> str:
     return f"{float(longitude):.6f},{float(latitude):.6f}"
 
 
+def _polyline_points(value: object) -> tuple[tuple[float, float], ...]:
+    if not isinstance(value, str) or not value.strip():
+        return ()
+    points: list[tuple[float, float]] = []
+    for raw_point in value.split(";"):
+        values = raw_point.split(",")
+        if len(values) != 2:
+            raise ValueError("polyline point must contain longitude,latitude")
+        longitude = float(values[0])
+        latitude = float(values[1])
+        if not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
+            raise ValueError("polyline coordinate is out of range")
+        point = (longitude, latitude)
+        if not points or points[-1] != point:
+            points.append(point)
+    return tuple(points)
+
+
+def _nested_polyline(value: object) -> tuple[tuple[float, float], ...]:
+    """Collect provider-returned route geometry in response order."""
+
+    points: list[tuple[float, float]] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, Mapping):
+            for key, nested in item.items():
+                if key == "polyline":
+                    for point in _polyline_points(nested):
+                        if not points or points[-1] != point:
+                            points.append(point)
+                else:
+                    visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return tuple(points)
+
+
 def _route_value(
     *,
     origin: Mapping[str, object],
@@ -657,10 +1002,14 @@ def _route_value(
     parameters = {
         "origin": _route_coordinates(origin),
         "destination": _route_coordinates(destination),
-        "origin_id": str(origin["provider_record_id"]),
-        "destination_id": str(destination["provider_record_id"]),
-        "show_fields": "cost",
+        "show_fields": "cost,navi,polyline",
     }
+    if isinstance(origin.get("provider_record_id"), str):
+        parameters["origin_id"] = str(origin["provider_record_id"])
+    if isinstance(destination.get("provider_record_id"), str):
+        parameters["destination_id"] = str(
+            destination["provider_record_id"]
+        )
     if transport_mode == "driving":
         parameters["strategy"] = "32"
     response = _http_get(
@@ -694,7 +1043,8 @@ def _route_value(
             if distance < 0 or duration < 0:
                 raise ValueError("negative route metric")
             metrics.append((duration, distance, index))
-        duration, distance, _ = min(metrics)
+        duration, distance, selected_index = min(metrics)
+        polyline = _nested_polyline(paths[selected_index])
     except (
         KeyError,
         TypeError,
@@ -718,6 +1068,7 @@ def _route_value(
         duration_seconds=duration,
         attempts=response.attempts,
         estimated_taxi_cost_cny=estimated_taxi_cost_cny,
+        polyline=polyline,
     )
 
 
@@ -745,19 +1096,24 @@ def _transit_route_value(
     city_adcode: str,
     credential: str,
 ) -> _TransitRoute | None:
+    parameters = {
+        "origin": _route_coordinates(origin),
+        "destination": _route_coordinates(destination),
+        "city1": city_adcode,
+        "city2": city_adcode,
+        "strategy": "0",
+        "show_fields": "cost,navi,polyline",
+    }
+    if isinstance(origin.get("provider_record_id"), str):
+        parameters["origin_id"] = str(origin["provider_record_id"])
+    if isinstance(destination.get("provider_record_id"), str):
+        parameters["destination_id"] = str(
+            destination["provider_record_id"]
+        )
     response = _http_get(
         operation="route_transit",
         endpoint_path=_TRANSIT_PATH,
-        parameters={
-            "origin": _route_coordinates(origin),
-            "destination": _route_coordinates(destination),
-            "origin_id": str(origin["provider_record_id"]),
-            "destination_id": str(destination["provider_record_id"]),
-            "city1": city_adcode,
-            "city2": city_adcode,
-            "strategy": "0",
-            "show_fields": "cost",
-        },
+        parameters=parameters,
         credential=credential,
     )
     try:
@@ -776,6 +1132,7 @@ def _transit_route_value(
                 int,
                 float | None,
                 tuple[dict[str, object], ...],
+                tuple[tuple[float, float], ...],
             ]
         ] = []
         for index, transit in enumerate(transits):
@@ -791,6 +1148,7 @@ def _transit_route_value(
                 raise ValueError("negative transit metric")
             fare = _optional_nonnegative_number(cost.get("transit_fee"))
             services: list[dict[str, object]] = []
+            polyline = _nested_polyline(transit)
             segments = transit.get("segments")
             if not isinstance(segments, list):
                 raise TypeError("transit segments must be an array")
@@ -844,6 +1202,7 @@ def _transit_route_value(
                     walking_distance,
                     fare,
                     tuple(services),
+                    polyline,
                 )
             )
         (
@@ -853,6 +1212,7 @@ def _transit_route_value(
             walking_distance,
             fare,
             services,
+            polyline,
         ) = min(parsed, key=lambda item: item[0])
     except (
         KeyError,
@@ -877,6 +1237,7 @@ def _transit_route_value(
         fare_cny=fare,
         services=services,
         attempts=response.attempts,
+        polyline=polyline,
     )
 
 
@@ -1584,13 +1945,27 @@ def estimate_live_route_segments(
         for result in place_results
         if isinstance(result["selected"], Mapping)
     }
-    resolutions = {
-        str(result["input_name"]): {
+    resolutions: dict[str, dict[str, object]] = {}
+    for result in place_results:
+        input_name = str(result["input_name"])
+        resolution: dict[str, object] = {
             "status": result["status"],
             "exact_candidate_count": len(result["alternatives"]),
         }
-        for result in place_results
-    }
+        selected = result.get("selected")
+        location = (
+            selected.get("location")
+            if isinstance(selected, Mapping)
+            else None
+        )
+        if isinstance(location, Mapping):
+            resolution["location"] = {
+                "longitude": location.get("longitude"),
+                "latitude": location.get("latitude"),
+                "coordinate_system": "GCJ-02",
+            }
+            resolution["resolved_name"] = selected.get("name")
+        resolutions[input_name] = resolution
     route_values: list[dict[str, object]] = []
     warnings: list[dict[str, object]] = []
     for origin_name, destination_name in segments:
@@ -1686,6 +2061,7 @@ def estimate_live_public_transport_segments(
     this function never derives a taxi fare from distance.
     """
 
+    overall_started = time.monotonic()
     seeds = tuple(name.strip() for name in place_names)
     if (
         not city.strip()
@@ -1711,6 +2087,7 @@ def estimate_live_public_transport_segments(
             stage="credential",
             python_exception_type="KeyError",
         )
+    district_started = time.monotonic()
     district_response = _http_get(
         operation="district",
         endpoint_path=_DISTRICT_PATH,
@@ -1728,10 +2105,19 @@ def estimate_live_public_transport_segments(
         observation=district_observation,
         response=district_response,
     )
+    district_duration_ms = round(
+        (time.monotonic() - district_started) * 1000,
+        3,
+    )
     network_attempts = district_response.attempts
-    poi_observations: list[tuple[str, PolicyBoundAmapObservation]] = []
-    poi_by_candidate: dict[str, ParsedAmapPoi] = {}
-    for seed in seeds:
+    def collect_poi(
+        seed: str,
+    ) -> tuple[
+        str,
+        int,
+        PolicyBoundAmapObservation,
+        dict[str, ParsedAmapPoi],
+    ]:
         poi_response = _http_get(
             operation="poi",
             endpoint_path=_POI_PATH,
@@ -1745,12 +2131,29 @@ def estimate_live_public_transport_segments(
             },
             credential=credential,
         )
-        network_attempts += poi_response.attempts
         parsed, observation = _parse_and_bind_poi(poi_response)
-        poi_observations.append((seed, observation))
+        exact: dict[str, ParsedAmapPoi] = {}
         for poi in parsed.pois:
             if _normalized(poi.name) == _normalized(seed):
-                poi_by_candidate[_candidate_id(poi.record_id)] = poi
+                exact[_candidate_id(poi.record_id)] = poi
+        return seed, poi_response.attempts, observation, exact
+
+    poi_started = time.monotonic()
+    with ThreadPoolExecutor(
+        max_workers=min(6, len(seeds)),
+        thread_name_prefix="amap-poi",
+    ) as executor:
+        poi_results = list(executor.map(collect_poi, seeds))
+    poi_observations: list[tuple[str, PolicyBoundAmapObservation]] = []
+    poi_by_candidate: dict[str, ParsedAmapPoi] = {}
+    for seed, attempts, observation, exact in poi_results:
+        network_attempts += attempts
+        poi_observations.append((seed, observation))
+        poi_by_candidate.update(exact)
+    poi_duration_ms = round(
+        (time.monotonic() - poi_started) * 1000,
+        3,
+    )
     projection = _project(
         city=city,
         city_adcode=city_adcode,
@@ -1770,22 +2173,37 @@ def estimate_live_public_transport_segments(
         for result in place_results
         if isinstance(result["selected"], Mapping)
     }
-    resolutions = {
-        str(result["input_name"]): {
+    resolutions: dict[str, dict[str, object]] = {}
+    for result in place_results:
+        input_name = str(result["input_name"])
+        resolution: dict[str, object] = {
             "status": result["status"],
             "exact_candidate_count": len(result["alternatives"]),
         }
-        for result in place_results
-    }
-    values: list[dict[str, object]] = []
-    warnings: list[dict[str, object]] = []
-    for origin_name, destination_name in segments:
+        selected = result.get("selected")
+        location = (
+            selected.get("location")
+            if isinstance(selected, Mapping)
+            else None
+        )
+        if isinstance(location, Mapping):
+            resolution["location"] = {
+                "longitude": location.get("longitude"),
+                "latitude": location.get("latitude"),
+                "coordinate_system": "GCJ-02",
+            }
+            resolution["resolved_name"] = selected.get("name")
+        resolutions[input_name] = resolution
+    def collect_segment(
+        segment: tuple[str, str],
+    ) -> tuple[dict[str, object], list[dict[str, object]], int]:
+        origin_name, destination_name = segment
         origin = selected_by_input.get(origin_name)
         destination = selected_by_input.get(destination_name)
         if not isinstance(origin, Mapping) or not isinstance(
             destination, Mapping
         ):
-            values.append(
+            return (
                 {
                     "from": origin_name,
                     "to": destination_name,
@@ -1793,9 +2211,12 @@ def estimate_live_public_transport_segments(
                     "primary": None,
                     "alternatives": [],
                     "reason": "place_identity_not_uniquely_resolved",
-                }
+                },
+                [],
+                0,
             )
-            continue
+        segment_attempts = 0
+        segment_warnings: list[dict[str, object]] = []
         try:
             transit = _transit_route_value(
                 origin=origin,
@@ -1804,15 +2225,15 @@ def estimate_live_public_transport_segments(
                 credential=credential,
             )
         except _LiveFailure as error:
-            network_attempts += error.attempts
-            warnings.append(
+            segment_attempts += error.attempts
+            segment_warnings.append(
                 _route_warning(
                     origin=origin,
                     destination=destination,
                     error=error,
                 )
             )
-            values.append(
+            return (
                 {
                     "from": origin_name,
                     "to": destination_name,
@@ -1820,12 +2241,13 @@ def estimate_live_public_transport_segments(
                     "primary": None,
                     "alternatives": [],
                     "reason": error.stage,
-                }
+                },
+                segment_warnings,
+                segment_attempts,
             )
-            continue
         if transit is not None:
-            network_attempts += transit.attempts
-            values.append(
+            segment_attempts += transit.attempts
+            return (
                 {
                     "from": origin_name,
                     "to": destination_name,
@@ -1840,15 +2262,21 @@ def estimate_live_public_transport_segments(
                         ),
                         "fare_cny": transit.fare_cny,
                         "services": list(transit.services),
+                        "polyline": [
+                            [longitude, latitude]
+                            for longitude, latitude in transit.polyline
+                        ],
                         "source": "高德公交路线规划2.0",
                     },
                     "alternatives": [],
                     "reason": None,
-                }
+                },
+                segment_warnings,
+                segment_attempts,
             )
-            continue
         # Public transport was queried first and returned no option. Only this
         # branch requests a road route for explicit fallback comparison.
+        segment_attempts += 1
         try:
             driving = _route_value(
                 origin=origin,
@@ -1857,8 +2285,8 @@ def estimate_live_public_transport_segments(
                 credential=credential,
             )
         except _LiveFailure as error:
-            network_attempts += error.attempts
-            warnings.append(
+            segment_attempts += error.attempts
+            segment_warnings.append(
                 _route_warning(
                     origin=origin,
                     destination=destination,
@@ -1867,7 +2295,7 @@ def estimate_live_public_transport_segments(
             )
             driving = None
         else:
-            network_attempts += driving.attempts
+            segment_attempts += driving.attempts
         alternatives: list[dict[str, object]] = [
             {
                 "mode": "chartered_vehicle",
@@ -1890,6 +2318,10 @@ def estimate_live_public_transport_segments(
                         "duration_seconds": driving.duration_seconds,
                         "distance_meters": driving.distance_meters,
                         "cost_cny": driving.estimated_taxi_cost_cny,
+                        "polyline": [
+                            [longitude, latitude]
+                            for longitude, latitude in driving.polyline
+                        ],
                         "cost_semantics": (
                             "amap_explicit_taxi_estimate_not_distance_derived"
                         ),
@@ -1900,11 +2332,15 @@ def estimate_live_public_transport_segments(
                         "duration_seconds": driving.duration_seconds,
                         "distance_meters": driving.distance_meters,
                         "cost_cny": None,
+                        "polyline": [
+                            [longitude, latitude]
+                            for longitude, latitude in driving.polyline
+                        ],
                         "reason": "fuel_tolls_and_parking_not_queried",
                     },
                 ]
             )
-        values.append(
+        return (
             {
                 "from": origin_name,
                 "to": destination_name,
@@ -1912,8 +2348,30 @@ def estimate_live_public_transport_segments(
                 "primary": None,
                 "alternatives": alternatives,
                 "reason": "amap_returned_zero_transit_options",
-            }
+            },
+            segment_warnings,
+            segment_attempts,
         )
+
+    route_started = time.monotonic()
+    with ThreadPoolExecutor(
+        max_workers=min(6, max(1, len(segments))),
+        thread_name_prefix="amap-route",
+    ) as executor:
+        segment_results = list(executor.map(collect_segment, segments))
+    values = [value for value, _warnings, _attempts in segment_results]
+    warnings = [
+        warning
+        for _value, segment_warnings, _attempts in segment_results
+        for warning in segment_warnings
+    ]
+    network_attempts += sum(
+        attempts for _value, _warnings, attempts in segment_results
+    )
+    route_duration_ms = round(
+        (time.monotonic() - route_started) * 1000,
+        3,
+    )
     return {
         "status": (
             "AVAILABLE"
@@ -1924,6 +2382,15 @@ def estimate_live_public_transport_segments(
         "segments": values,
         "warnings": warnings,
         "network_attempts": network_attempts,
+        "timings_ms": {
+            "district": district_duration_ms,
+            "poi": poi_duration_ms,
+            "local_transit": route_duration_ms,
+            "total": round(
+                (time.monotonic() - overall_started) * 1000,
+                3,
+            ),
+        },
         "retrieved_at": datetime.now().astimezone().isoformat(
             timespec="seconds"
         ),
@@ -1935,6 +2402,204 @@ def estimate_live_public_transport_segments(
                 "transit fare is provider-returned; taxi cost is never "
                 "derived from driving distance"
             ),
+        },
+    }
+
+
+def estimate_public_transport_from_points(
+    *,
+    city_adcode: str,
+    place_points: Mapping[str, Mapping[str, object]],
+    segments: Sequence[tuple[str, str]],
+) -> dict[str, object]:
+    """Query routes from already parsed same-run GCJ-02 place evidence."""
+
+    if not city_adcode.isdigit() or not place_points or not segments:
+        raise _LiveFailure(
+            stage="public_route_points_input_validation",
+            python_exception_type="ValueError",
+        )
+    credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
+    if not isinstance(credential, str) or not credential:
+        raise _LiveFailure(
+            stage="credential",
+            python_exception_type="KeyError",
+        )
+    selected: dict[str, dict[str, object]] = {}
+    resolutions: dict[str, dict[str, object]] = {}
+    for name, location in place_points.items():
+        if not isinstance(name, str) or not name.strip():
+            raise _LiveFailure(
+                stage="public_route_points_input_validation",
+                python_exception_type="ValueError",
+            )
+        point = {
+            "longitude": location.get("longitude"),
+            "latitude": location.get("latitude"),
+            "coordinate_system": location.get(
+                "coordinate_system",
+                "GCJ-02",
+            ),
+        }
+        candidate = {
+            "candidate_id": stable_identifier(
+                "route-point",
+                "trip-decider:same-run-map-evidence",
+                name,
+            ),
+            "name": name,
+            "location": point,
+        }
+        _route_coordinates(candidate)
+        selected[name] = candidate
+        resolutions[name] = {
+            "status": "MATCHED",
+            "exact_candidate_count": 1,
+            "resolved_name": name,
+            "location": point,
+        }
+    values: list[dict[str, object]] = []
+    warnings: list[dict[str, object]] = []
+    attempts = 0
+    started = time.monotonic()
+    for origin_name, destination_name in segments:
+        origin = selected.get(origin_name)
+        destination = selected.get(destination_name)
+        if origin is None or destination is None or origin_name == destination_name:
+            raise _LiveFailure(
+                stage="public_route_points_input_validation",
+                python_exception_type="ValueError",
+            )
+        try:
+            transit = _transit_route_value(
+                origin=origin,
+                destination=destination,
+                city_adcode=city_adcode,
+                credential=credential,
+            )
+        except _LiveFailure as error:
+            attempts += error.attempts
+            warnings.append(
+                _route_warning(
+                    origin=origin,
+                    destination=destination,
+                    error=error,
+                )
+            )
+            values.append(
+                {
+                    "from": origin_name,
+                    "to": destination_name,
+                    "status": "UNKNOWN",
+                    "primary": None,
+                    "alternatives": [],
+                    "reason": error.stage,
+                }
+            )
+            continue
+        if transit is not None:
+            attempts += transit.attempts
+            values.append(
+                {
+                    "from": origin_name,
+                    "to": destination_name,
+                    "status": "AVAILABLE",
+                    "primary": {
+                        "mode": "public_transit",
+                        "support": "api_estimate",
+                        "duration_seconds": transit.duration_seconds,
+                        "distance_meters": transit.distance_meters,
+                        "walking_distance_meters": (
+                            transit.walking_distance_meters
+                        ),
+                        "fare_cny": transit.fare_cny,
+                        "services": list(transit.services),
+                        "polyline": [
+                            [longitude, latitude]
+                            for longitude, latitude in transit.polyline
+                        ],
+                        "source": "高德公交路线规划2.0",
+                    },
+                    "alternatives": [],
+                    "reason": None,
+                }
+            )
+            continue
+        try:
+            driving = _route_value(
+                origin=origin,
+                destination=destination,
+                transport_mode="driving",
+                credential=credential,
+            )
+        except _LiveFailure as error:
+            attempts += 1 + error.attempts
+            warnings.append(
+                _route_warning(
+                    origin=origin,
+                    destination=destination,
+                    error=error,
+                )
+            )
+            driving = None
+        else:
+            attempts += 1 + driving.attempts
+        alternatives: list[dict[str, object]] = []
+        if driving is not None:
+            alternatives.append(
+                {
+                    "mode": "self_driving",
+                    "status": "ESTIMATED",
+                    "duration_seconds": driving.duration_seconds,
+                    "distance_meters": driving.distance_meters,
+                    "cost_cny": None,
+                    "polyline": [
+                        [longitude, latitude]
+                        for longitude, latitude in driving.polyline
+                    ],
+                    "reason": "public_transit_unavailable",
+                }
+            )
+        values.append(
+            {
+                "from": origin_name,
+                "to": destination_name,
+                "status": "PUBLIC_TRANSIT_UNAVAILABLE",
+                "primary": None,
+                "alternatives": alternatives,
+                "reason": "amap_returned_zero_transit_options",
+            }
+        )
+    retrieved_at = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    return {
+        "status": (
+            "AVAILABLE"
+            if all(value["status"] == "AVAILABLE" for value in values)
+            else "PARTIAL"
+        ),
+        "place_resolutions": resolutions,
+        "segments": values,
+        "warnings": warnings,
+        "network_attempts": attempts,
+        "timings_ms": {
+            "district": 0.0,
+            "poi": 0.0,
+            "local_transit": round(
+                (time.monotonic() - started) * 1000,
+                3,
+            ),
+            "total": round((time.monotonic() - started) * 1000, 3),
+        },
+        "retrieved_at": retrieved_at,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": (
+                "同一run已解析GCJ-02地点证据与公交路线规划2.0；"
+                "无公交时才调用驾车路线规划2.0"
+            ),
+            "coordinate_system": "GCJ-02",
         },
     }
 

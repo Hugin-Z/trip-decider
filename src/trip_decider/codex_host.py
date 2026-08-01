@@ -30,7 +30,7 @@ def create_trip_run(
     """Create an unconfirmed run from a structured ``TravelIntent``."""
 
     payload = intent.to_dict() if isinstance(intent, TravelIntent) else dict(intent)
-    return _post_json(base_url, "/api/agent/runs", {"intent": payload})
+    return _post_json(base_url, "/api/trips", {"intent": payload})
 
 
 def confirm_trip_run(
@@ -42,7 +42,7 @@ def confirm_trip_run(
 
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/confirm",
+        f"/api/trips/{_run_id(run_id)}/confirm",
         {},
     )
 
@@ -56,7 +56,7 @@ def execute_trip_run(
 
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/execute",
+        f"/api/trips/{_run_id(run_id)}/execute",
         {},
     )
 
@@ -68,10 +68,14 @@ def get_next_actions(
 ) -> dict[str, object]:
     """Return structured actions until the run reaches a terminal state."""
 
-    return _get_json(
+    response = _get_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/actions",
+        f"/api/trips/{_run_id(run_id)}",
     )
+    action_loop = response.get("action_loop")
+    if not isinstance(action_loop, Mapping):
+        raise CodexHostError("trip does not expose executable actions")
+    return dict(action_loop)
 
 
 def execute_trip_action(
@@ -86,7 +90,7 @@ def execute_trip_action(
         raise CodexHostError("action_id is not a registered local tool")
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/run-action",
+        f"/api/trips/{_run_id(run_id)}/execute",
         {"action_id": action_id},
         timeout=120,
     )
@@ -101,7 +105,7 @@ def run_trip_until_blocked(
 
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/run-until-blocked",
+        f"/api/trips/{_run_id(run_id)}/execute",
         {},
         timeout=180,
     )
@@ -117,7 +121,7 @@ def submit_evidence(
 
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/evidence",
+        f"/api/trips/{_run_id(run_id)}/evidence",
         {"evidence": dict(evidence)},
     )
 
@@ -137,8 +141,29 @@ def revise_trip_run(
     )
     return _post_json(
         base_url,
-        f"/api/agent/runs/{_run_id(run_id)}/revise",
+        f"/api/trips/{_run_id(run_id)}/revisions",
         {"revision": payload},
+    )
+
+
+def audit_trip_run(
+    run_id: str,
+    *,
+    plan: Mapping[str, object] | None = None,
+    content: str | None = None,
+    base_url: str = DEFAULT_PRODUCT_URL,
+) -> dict[str, object]:
+    """Audit one supplied plan or guide without invoking the Planner."""
+
+    if (plan is None) == (content is None):
+        raise CodexHostError("provide exactly one of plan or content")
+    payload: dict[str, object] = (
+        {"plan": dict(plan)} if plan is not None else {"content": content}
+    )
+    return _post_json(
+        base_url,
+        f"/api/trips/{_run_id(run_id)}/audit",
+        payload,
     )
 
 
@@ -222,6 +247,7 @@ def _safe_error_message(body: bytes) -> str:
 
 __all__ = [
     "CodexHostError",
+    "audit_trip_run",
     "confirm_trip_run",
     "create_trip_run",
     "execute_trip_action",

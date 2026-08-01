@@ -1,19 +1,22 @@
 """Action-driven orchestration for a Codex-hosted trip run.
 
-Registered runtime tools execute inside the local product.  Web research stays
-an explicit Codex action and enters the run only through ``submit_evidence``.
+Registered runtime tools execute inside the local product.  Destination POI
+and lodging candidates come from the live provider collector; unresolved
+opening hours, ticket prices, and lodging prices remain explicit missing data.
 No collector result is marked complete unless it is sourced evidence.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
 from threading import RLock
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -21,6 +24,7 @@ from trip_decider.destination_runtime import (
     collect_map_evidence,
     collect_railway_evidence,
 )
+from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.itinerary_planner import (
     plan_destination_context,
     validate_destination_plan,
@@ -29,6 +33,7 @@ from trip_decider.intercity_rail import rail_snapshot_metadata
 from trip_decider.planning_input_compiler import PlanningInputCompiler
 from trip_decider.simple_live import (
     _LiveFailure,
+    estimate_public_transport_from_points,
     estimate_live_public_transport_segments,
 )
 from trip_decider.travel_agent import (
@@ -59,11 +64,13 @@ class _LoopState:
         }
     )
     result: dict[str, object] | None = None
+    fallback_result: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "action_status": dict(self.action_status),
             "result": deepcopy(self.result),
+            "fallback_result": deepcopy(self.fallback_result),
         }
 
     def evidence_dict(self, run_id: str) -> dict[str, object]:
@@ -87,6 +94,7 @@ _STATES: dict[str, _LoopState] = {}
 def start_action_loop(
     run_id: str,
     *,
+    initial_evidence: Mapping[str, EvidenceItem] | None = None,
     store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
 ) -> dict[str, object]:
     """Move a confirmed run into its action-driven execution state."""
@@ -96,16 +104,116 @@ def start_action_loop(
         raise TravelAgentError("run must be confirmed before action execution")
     store.start(run_id)
     with _LOCK:
-        state = _LoopState()
+        state = _LoopState(
+            fallback_result=(
+                deepcopy(dict(run.result))
+                if isinstance(run.result, Mapping)
+                else None
+            )
+        )
+        reused: list[str] = []
+        unavailable: list[str] = []
+        for domain, item in sorted((initial_evidence or {}).items()):
+            if domain not in _DOMAINS or item.domain != domain:
+                raise TravelAgentError(
+                    "initial evidence domain does not match its key"
+                )
+            state.evidence[domain] = item
+            if item.status is EvidenceStatus.SOURCED:
+                state.last_sourced_evidence[domain] = item
+                state.action_status[domain] = "completed"
+                reused.append(domain)
+            elif (
+                domain == "web"
+                and item.missing_reason
+                in {
+                    "collector_not_configured",
+                    "web_search_collector_not_configured",
+                }
+            ):
+                state.evidence.pop(domain, None)
+                state.action_status[domain] = "waiting"
+            else:
+                state.action_status[domain] = "waiting"
+                unavailable.append(domain)
         _STATES[run_id] = state
         _persist_loop_state(run_id, state, store)
+    store.append_event(
+        run_id,
+        event_type="planning.actions.initialized",
+        status="running",
+        message="已复用比较证据，只补充详细规划缺失项。",
+        details={
+            "tool": "destination_context",
+            "total_actions": len(_ACTION_ORDER),
+            "completed_actions": reused,
+            "unavailable_actions": unavailable,
+            "pending_actions": [
+                action_id
+                for action_id in _ACTION_ORDER
+                if state.action_status[action_id] == "waiting"
+            ],
+        },
+    )
+    for domain in reused:
+        store.append_event(
+            run_id,
+            event_type="planning.evidence.reused",
+            status="completed",
+            message=f"{_action_title(domain)}沿用区域比较阶段证据。",
+            details={
+                "tool": domain,
+                "evidence_status": "sourced",
+            },
+        )
     return get_next_actions(run_id, store=store)
+
+
+def restart_action_loop_for_intent(
+    run_id: str,
+    intent: TravelIntent | Mapping[str, object],
+    *,
+    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+) -> dict[str, object]:
+    """Start a same-run revision while reusing still-applicable evidence."""
+
+    previous = store.get_run(run_id)
+    contract = (
+        intent
+        if isinstance(intent, TravelIntent)
+        else TravelIntent.from_mapping(intent)
+    )
+    state = _state(run_id, store)
+    reusable = dict(state.evidence)
+    previous_intent = previous.intent
+    if contract.destination_anchor != previous_intent.destination_anchor:
+        reusable.clear()
+    else:
+        rail_inputs = (
+            "origin",
+            "earliest_departure_at",
+            "latest_return_at",
+            "transport_preferences",
+        )
+        if any(
+            getattr(contract, field_name)
+            != getattr(previous_intent, field_name)
+            for field_name in rail_inputs
+        ):
+            reusable.pop("railway", None)
+    store.prepare_revision(run_id, intent=contract)
+    return start_action_loop(
+        run_id,
+        initial_evidence=reusable,
+        store=store,
+    )
 
 
 def run_until_blocked(
     run_id: str,
     *,
     store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    max_wait_seconds: float = 30.0,
 ) -> dict[str, object]:
     """Execute local registered tools and pause at external evidence actions.
 
@@ -114,30 +222,45 @@ def run_until_blocked(
     retry authority with the caller and prevents an implicit retry loop.
     """
 
+    if (
+        not isinstance(max_wait_seconds, (int, float))
+        or isinstance(max_wait_seconds, bool)
+        or float(max_wait_seconds) <= 0
+    ):
+        raise TravelAgentError("max_wait_seconds must be positive")
+    started = time.monotonic()
     executed: set[tuple[str, str]] = set()
     for _ in range(16):
+        remaining = float(max_wait_seconds) - (
+            time.monotonic() - started
+        )
+        if remaining <= 0:
+            snapshot = get_next_actions(run_id, store=store)
+            return {
+                **snapshot,
+                "status": "NEED_USER_INPUT",
+                "reason": "time_budget_exhausted",
+                "elapsed_seconds": float(max_wait_seconds),
+            }
         snapshot = get_next_actions(run_id, store=store)
         if snapshot["status"] in {"READY", "BLOCKED"}:
             return snapshot
         actions = snapshot.get("actions")
         if not isinstance(actions, list):
             raise TravelAgentError("action snapshot omitted actions")
-        executable = next(
-            (
-                action
-                for action in actions
-                if isinstance(action, Mapping)
-                and action.get("action_type") == "registered_tool"
-                and action.get("mode") != "requery"
-                and (
-                    str(action.get("action_id")),
-                    str(action.get("mode", "initial")),
-                )
-                not in executed
-            ),
-            None,
-        )
-        if executable is None:
+        executable = [
+            action
+            for action in actions
+            if isinstance(action, Mapping)
+            and action.get("action_type") == "registered_tool"
+            and action.get("mode") != "requery"
+            and (
+                str(action.get("action_id")),
+                str(action.get("mode", "initial")),
+            )
+            not in executed
+        ]
+        if not executable:
             return {
                 **snapshot,
                 "status": "NEED_USER_INPUT",
@@ -147,10 +270,94 @@ def run_until_blocked(
                     if isinstance(action, Mapping)
                 ],
             }
-        action_id = str(executable["action_id"])
-        mode = str(executable.get("mode", "initial"))
+        batch = [
+            action
+            for action in executable
+            if action.get("action_id") in {"railway", "web", "map"}
+            and action.get("mode", "initial") == "initial"
+        ]
+        if len(batch) > 1:
+            for action in batch:
+                executed.add(
+                    (
+                        str(action["action_id"]),
+                        str(action.get("mode", "initial")),
+                    )
+                )
+            executor = ThreadPoolExecutor(
+                max_workers=len(batch),
+                thread_name_prefix="detail-missing-actions",
+            )
+            try:
+                futures = [
+                    executor.submit(
+                        execute_registered_action,
+                        run_id,
+                        str(action["action_id"]),
+                        store=store,
+                    )
+                    for action in batch
+                ]
+                completed, pending = wait(
+                    futures,
+                    timeout=min(30.0, remaining),
+                )
+                for future in completed:
+                    future.result()
+                if any(
+                    str(batch[futures.index(future)].get("action_id"))
+                    != "planner"
+                    for future in completed
+                ):
+                    executed.discard(("planner", "initial"))
+                if pending:
+                    for future in pending:
+                        future.cancel()
+                    pending_ids = [
+                        str(batch[futures.index(future)]["action_id"])
+                        for future in pending
+                    ]
+                    _timeout_actions(
+                        run_id,
+                        pending_ids,
+                        store=store,
+                    )
+                    return get_next_actions(run_id, store=store)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+            continue
+        action = executable[0]
+        action_id = str(action["action_id"])
+        mode = str(action.get("mode", "initial"))
         executed.add((action_id, mode))
-        execute_registered_action(run_id, action_id, store=store)
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="detail-action-budget",
+        )
+        try:
+            future = executor.submit(
+                execute_registered_action,
+                run_id,
+                action_id,
+                store=store,
+            )
+            completed, pending = wait(
+                (future,),
+                timeout=min(30.0, remaining),
+            )
+            if pending:
+                future.cancel()
+                _timeout_actions(
+                    run_id,
+                    [action_id],
+                    store=store,
+                )
+                return get_next_actions(run_id, store=store)
+            next(iter(completed)).result()
+            if action_id != "planner":
+                executed.discard(("planner", "initial"))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     raise TravelAgentError("run-until-blocked exceeded its action bound")
 
 
@@ -213,6 +420,7 @@ def get_next_actions(
             "NEED_USER_INPUT",
             _plan_followup_actions(run.intent, state),
             reason="displayable_itinerary_requirements_missing",
+            result=state.result,
             missing_requirements=_missing_display_requirements(state.result),
             blockers=_result_blockers(state.result),
         )
@@ -231,11 +439,18 @@ def get_next_actions(
             )
         )
     if state.action_status["web"] == "waiting":
-        actions.append(_web_action(run.intent))
+        actions.append(_registered_action("web", run.intent))
     map_action: dict[str, object] | None = None
     if (
         state.action_status["map"] == "waiting"
-        and "web" in state.evidence
+        and (
+            "web" in state.evidence
+            or (
+                "map" in state.evidence
+                and state.evidence["map"].status
+                is not EvidenceStatus.SOURCED
+            )
+        )
     ):
         map_action = _registered_action("map", run.intent, state)
         actions.append(map_action)
@@ -273,7 +488,7 @@ def execute_registered_action(
     run = store.get_run(run_id)
     if (
         run.status is RunStatus.COMPLETED
-        and action_id in {"railway", "map"}
+        and action_id in {"railway", "map", "planner"}
     ):
         run = store.resume(run_id)
     if run.status is not RunStatus.RUNNING:
@@ -281,10 +496,7 @@ def execute_registered_action(
     state = _state(run_id, store)
     if action_id not in _TOOL_REGISTRY:
         raise TravelAgentError("action is not a registered runtime tool")
-    is_refresh = (
-        action_id in {"railway", "map"}
-        and state.action_status[action_id] in {"completed", "failed"}
-    )
+    is_refresh = state.action_status[action_id] in {"completed", "failed"}
     if state.action_status[action_id] != "waiting" and not is_refresh:
         raise TravelAgentError("action is not waiting")
     if not is_refresh:
@@ -305,6 +517,7 @@ def execute_registered_action(
         message=f"{_TOOL_REGISTRY[action_id]['title']}开始执行。",
         details={"tool": action_id},
     )
+    action_started = time.monotonic()
     try:
         outcome = _TOOL_REGISTRY[action_id]["handler"](
             run.intent,
@@ -321,6 +534,10 @@ def execute_registered_action(
             details={
                 "tool": action_id,
                 "error_type": type(error).__name__,
+                "duration_ms": round(
+                    (time.monotonic() - action_started) * 1000,
+                    3,
+                ),
             },
         )
         _block_run(run_id, action_id, store=store)
@@ -333,13 +550,19 @@ def execute_registered_action(
         state.result = result
         state.action_status[action_id] = "completed"
         _persist_loop_state(run_id, state, store)
-        _persist_plan_version(run_id, result, store)
+        store.persist_plan_version(run_id, result)
         store.append_event(
             run_id,
             event_type="tool.completed",
             status="completed",
             message="Planner完成并通过证据边界校验。",
-            details={"tool": "planner"},
+            details={
+                "tool": "planner",
+                "duration_ms": round(
+                    (time.monotonic() - action_started) * 1000,
+                    3,
+                ),
+            },
         )
         if _result_is_displayable(result):
             store.complete(run_id, result)
@@ -359,6 +582,31 @@ def execute_registered_action(
 
     if not isinstance(outcome, EvidenceItem):
         raise TravelAgentError("evidence action returned an invalid value")
+    if (
+        outcome.status is not EvidenceStatus.SOURCED
+        and action_id not in state.last_sourced_evidence
+    ):
+        previous = _recent_sourced_evidence(
+            run_id,
+            run.intent,
+            action_id,
+            store=store,
+        )
+        if previous is not None:
+            state.last_sourced_evidence[action_id] = previous
+    store.append_event(
+        run_id,
+        event_type="tool.timed",
+        status="completed",
+        message="一项数据查询完成计时。",
+        details={
+            "tool": action_id,
+            "duration_ms": round(
+                (time.monotonic() - action_started) * 1000,
+                3,
+            ),
+        },
+    )
     return submit_evidence(
         run_id,
         {
@@ -497,11 +745,20 @@ def _railway_handler(
     return collect_railway_evidence(intent)
 
 
+def _web_handler(
+    intent: TravelIntent,
+    state: _LoopState,
+) -> EvidenceItem:
+    del state
+    return collect_live_destination_profile(intent)
+
+
 def _map_handler(
     intent: TravelIntent,
     state: _LoopState,
 ) -> EvidenceItem:
-    web_value = state.evidence["web"].value
+    web_evidence = state.evidence.get("web")
+    web_value = web_evidence.value if web_evidence is not None else None
     official_name = (
         web_value.get("destination_official_name")
         if isinstance(web_value, Mapping)
@@ -514,8 +771,16 @@ def _map_handler(
     )
     if not selected_name:
         raise TravelAgentError("map action lacks a destination anchor")
-    district_evidence = collect_map_evidence(
-        replace(intent, destination_anchor=selected_name)
+    existing_map = state.evidence.get("map")
+    district_evidence = (
+        existing_map
+        if (
+            existing_map is not None
+            and existing_map.status is EvidenceStatus.SOURCED
+        )
+        else collect_map_evidence(
+            replace(intent, destination_anchor=selected_name)
+        )
     )
     if (
         district_evidence.status is EvidenceStatus.SOURCED
@@ -538,6 +803,13 @@ def _map_handler(
         if isinstance(value, Mapping)
         else None
     )
+    route_city = (
+        str(destination.get("name")).strip()
+        if isinstance(destination, Mapping)
+        and isinstance(destination.get("name"), str)
+        and str(destination.get("name")).strip()
+        else selected_name
+    )
     city_adcode = (
         destination.get("adcode")
         if isinstance(destination, Mapping)
@@ -553,16 +825,28 @@ def _map_handler(
     base, attractions = route_inputs
     place_names = [base, *attractions]
     route_signature = list(place_names)
-    segments = [
-        (place_names[index], place_names[index + 1])
-        for index in range(len(place_names) - 1)
-    ]
+    segments = _web_route_segments(
+        state.evidence.get("web"),
+        place_names,
+    )
     try:
-        route_result = estimate_live_public_transport_segments(
-            city=selected_name,
-            city_adcode=city_adcode,
-            place_names=place_names,
-            segments=segments,
+        route_points = _web_route_points(
+            state.evidence.get("web"),
+            place_names,
+        )
+        route_result = (
+            estimate_public_transport_from_points(
+                city_adcode=city_adcode,
+                place_points=route_points,
+                segments=segments,
+            )
+            if route_points is not None
+            else estimate_live_public_transport_segments(
+                city=route_city,
+                city_adcode=city_adcode,
+                place_names=place_names,
+                segments=segments,
+            )
         )
     except _LiveFailure as error:
         enriched = deepcopy(dict(value))
@@ -580,10 +864,31 @@ def _map_handler(
             sources=district_evidence.sources,
         )
     local_transit = _normalize_local_transit(route_result)
+    resolutions = route_result.get("place_resolutions")
+    retrieved_at = route_result.get("retrieved_at")
+    for route in local_transit:
+        if isinstance(resolutions, Mapping):
+            origin = resolutions.get(route.get("from"))
+            destination_point = resolutions.get(route.get("to"))
+            if isinstance(origin, Mapping):
+                route["from_location"] = deepcopy(origin.get("location"))
+            if isinstance(destination_point, Mapping):
+                route["to_location"] = deepcopy(
+                    destination_point.get("location")
+                )
+        route["retrieved_at"] = retrieved_at
+        route["evidence_status"] = "LIVE"
     enriched = deepcopy(dict(value))
     enriched["local_transit"] = local_transit
     enriched["local_transit_result_status"] = route_result.get("status")
     enriched["local_transit_input_signature"] = route_signature
+    enriched["local_transit_place_resolutions"] = deepcopy(
+        route_result.get("place_resolutions", {})
+    )
+    if isinstance(route_result.get("timings_ms"), Mapping):
+        enriched["timings_ms"] = deepcopy(
+            dict(route_result["timings_ms"])
+        )
     route_source = route_result.get("source")
     sources = list(district_evidence.sources)
     if isinstance(route_source, Mapping):
@@ -634,6 +939,7 @@ def _planner_handler(
                 "cross_city_rail_events",
                 "attraction_events",
                 "local_transit_events",
+                "map_points",
                 "meal_events",
                 "hotel_events",
                 "buffer_events",
@@ -695,6 +1001,10 @@ _TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "title": "高德目的地核验",
         "handler": _map_handler,
     },
+    "web": {
+        "title": "目的地景点与住宿候选查询",
+        "handler": _web_handler,
+    },
     "planner": {
         "title": "通用Planner",
         "handler": _planner_handler,
@@ -718,13 +1028,19 @@ def _registered_action(
             "latest_return_at": intent.latest_return_at,
         }
     elif action_id == "map" and state is not None:
-        value = state.evidence["web"].value
+        web_evidence = state.evidence.get("web")
+        value = web_evidence.value if web_evidence is not None else None
         arguments = {
             "destination": (
                 value.get("destination_official_name")
                 if isinstance(value, Mapping)
                 else None
             )
+        }
+    elif action_id == "web":
+        arguments = {
+            "destination": intent.destination_anchor,
+            "themes": list(intent.themes),
         }
     return {
         "action_id": action_id,
@@ -868,11 +1184,30 @@ def _merge_sourced_evidence(
         if key not in seen:
             seen.add(key)
             sources.append(deepcopy(dict(source)))
+    merged_value = _merge_values(previous.value, current.value)
+    if current.domain == "map" and isinstance(merged_value, Mapping):
+        merged_map = deepcopy(dict(merged_value))
+        for field_name in (
+            "local_transit",
+            "local_transit_input_signature",
+            "local_transit_result_status",
+        ):
+            if field_name in current.value:
+                merged_map[field_name] = deepcopy(
+                    current.value[field_name]
+                )
+        if (
+            current.value.get("local_transit_result_status")
+            in {"AVAILABLE", "PARTIAL"}
+            and "local_transit_refresh_failure" not in current.value
+        ):
+            merged_map.pop("local_transit_refresh_failure", None)
+        merged_value = merged_map
     return EvidenceItem(
         evidence_id=current.evidence_id,
         domain=current.domain,
         status=EvidenceStatus.SOURCED,
-        value=_merge_values(previous.value, current.value),
+        value=merged_value,
         sources=tuple(sources),
     )
 
@@ -972,6 +1307,55 @@ def _latest_retrieved_at(
     return max(values) if values else None
 
 
+def _recent_sourced_evidence(
+    run_id: str,
+    intent: TravelIntent,
+    domain: str,
+    *,
+    store: InMemoryAgentStore,
+) -> EvidenceItem | None:
+    for previous_run in store.list_runs():
+        if previous_run.run_id == run_id:
+            continue
+        if domain == "railway":
+            if any(
+                getattr(previous_run.intent, field_name)
+                != getattr(intent, field_name)
+                for field_name in (
+                    "origin",
+                    "destination_anchor",
+                    "earliest_departure_at",
+                    "latest_return_at",
+                )
+            ):
+                continue
+        elif (
+            previous_run.intent.destination_anchor
+            != intent.destination_anchor
+        ):
+            continue
+        previous_state = _STATES.get(previous_run.run_id)
+        if previous_state is None:
+            previous_state = _load_loop_state(
+                previous_run.run_id,
+                store,
+            )
+        if previous_state is None:
+            continue
+        item = previous_state.last_sourced_evidence.get(domain)
+        if item is None:
+            candidate = previous_state.evidence.get(domain)
+            item = (
+                candidate
+                if candidate is not None
+                and candidate.status is EvidenceStatus.SOURCED
+                else None
+            )
+        if item is not None:
+            return item
+    return None
+
+
 def _web_route_inputs(
     evidence: EvidenceItem | None,
 ) -> tuple[str, list[str]] | None:
@@ -982,7 +1366,11 @@ def _web_route_inputs(
     ):
         return None
     hotel = evidence.value.get("hotel_area")
-    base = hotel.get("name") if isinstance(hotel, Mapping) else None
+    base = (
+        hotel.get("route_query_name", hotel.get("name"))
+        if isinstance(hotel, Mapping)
+        else None
+    )
     attractions = evidence.value.get("attractions")
     if (
         not isinstance(base, str)
@@ -991,18 +1379,93 @@ def _web_route_inputs(
     ):
         return None
     names = [
-        str(item["name"]).strip()
+        str(item.get("route_query_name", item["name"])).strip()
         for item in attractions
         if isinstance(item, Mapping)
         and isinstance(item.get("name"), str)
         and str(item["name"]).strip()
+        and isinstance(item.get("route_query_name", item["name"]), str)
+        and str(item.get("route_query_name", item["name"])).strip()
     ]
     unique_names = list(dict.fromkeys(names))
+    explicit_sequence = evidence.value.get("route_sequence")
+    if isinstance(explicit_sequence, list):
+        sequence = [
+            str(value).strip()
+            for value in explicit_sequence
+            if isinstance(value, str) and value.strip()
+        ]
+        expected = [base.strip(), *unique_names]
+        if (
+            len(sequence) == len(expected)
+            and sequence[0] == base.strip()
+            and set(sequence) == set(expected)
+        ):
+            return sequence[0], sequence[1:]
     return (
         (base.strip(), unique_names)
         if unique_names and base.strip() not in unique_names
         else None
     )
+
+
+def _web_route_points(
+    evidence: EvidenceItem | None,
+    place_names: list[str],
+) -> dict[str, Mapping[str, object]] | None:
+    if (
+        evidence is None
+        or evidence.status is not EvidenceStatus.SOURCED
+        or not isinstance(evidence.value, Mapping)
+    ):
+        return None
+    values: dict[str, Mapping[str, object]] = {}
+    hotel = evidence.value.get("hotel_area")
+    if isinstance(hotel, Mapping):
+        name = hotel.get("route_query_name", hotel.get("name"))
+        location = hotel.get("location")
+        if isinstance(name, str) and isinstance(location, Mapping):
+            values[name.strip()] = location
+    attractions = evidence.value.get("attractions")
+    if isinstance(attractions, list):
+        for item in attractions:
+            if not isinstance(item, Mapping):
+                continue
+            name = item.get("route_query_name", item.get("name"))
+            location = item.get("location")
+            if isinstance(name, str) and isinstance(location, Mapping):
+                values[name.strip()] = location
+    return (
+        {name: values[name] for name in place_names}
+        if all(name in values for name in place_names)
+        else None
+    )
+
+
+def _web_route_segments(
+    evidence: EvidenceItem | None,
+    place_names: list[str],
+) -> list[tuple[str, str]]:
+    if (
+        evidence is not None
+        and evidence.status is EvidenceStatus.SOURCED
+        and isinstance(evidence.value, Mapping)
+    ):
+        raw_segments = evidence.value.get("route_segments")
+        if isinstance(raw_segments, list):
+            result = [
+                (str(item[0]).strip(), str(item[1]).strip())
+                for item in raw_segments
+                if isinstance(item, list)
+                and len(item) == 2
+                and all(isinstance(value, str) and value.strip() for value in item)
+                and item[0] in place_names
+                and item[1] in place_names
+                and item[0] != item[1]
+            ]
+            if result:
+                return result
+    return list(zip(place_names, place_names[1:]))
 
 
 def _normalize_local_transit(
@@ -1045,6 +1508,8 @@ def _normalize_local_transit(
                 "mode": selected.get("mode"),
                 "duration_seconds": selected["duration_seconds"],
                 "distance_meters": selected.get("distance_meters"),
+                "polyline": deepcopy(selected.get("polyline")),
+                "route_source": selected.get("source"),
                 "fare": {
                     "status": (
                         "estimated" if isinstance(fare, (int, float)) else "unknown"
@@ -1069,11 +1534,30 @@ def _web_action(intent: TravelIntent) -> dict[str, object]:
         "title": "核验目的地公开事实",
         "query": {
             "destination": intent.destination_anchor,
-            "questions": [
-                "官方行政区全称是什么？",
-                "至少一个景点及其开放时间可由哪些一手来源支持？",
-                "可作为粗计划基地的住宿片区或交通枢纽是什么？",
+            "parallel_tasks": [
+                {
+                    "task": "景点资料与住宿片区",
+                    "required_for_first_plan": True,
+                    "questions": [
+                        "官方行政区全称是什么？",
+                        "至少三个景点的名称和特色可由哪些一手来源支持？",
+                        "可作为粗计划基地的住宿片区或交通枢纽是什么？",
+                    ],
+                },
+                {
+                    "task": "开放时间",
+                    "required_for_first_plan": False,
+                    "questions": ["各景点开放时间是否有一手来源？"],
+                },
+                {
+                    "task": "门票",
+                    "required_for_first_plan": False,
+                    "questions": ["各景点门票是否有一手来源？"],
+                },
             ],
+            "per_source_timeout_seconds": 10,
+            "max_sources_per_task": 3,
+            "submit_core_evidence_immediately": True,
         },
         "required_evidence": {
             "domain": "web",
@@ -1093,6 +1577,29 @@ def _needs_local_transit(state: _LoopState) -> bool:
     ):
         return True
     routes = evidence.value.get("local_transit")
+    route_inputs = _web_route_inputs(state.evidence.get("web"))
+    if route_inputs is not None:
+        base, attractions = route_inputs
+        expected_signature = [base, *attractions]
+        observed_signature = evidence.value.get(
+            "local_transit_input_signature"
+        )
+        if (
+            not isinstance(observed_signature, list)
+            or len(observed_signature) != len(expected_signature)
+            or set(observed_signature) != set(expected_signature)
+        ):
+            return True
+        if evidence.value.get("local_transit_result_status") == "FAILED":
+            # The exact route request already consumed its automatic retry.
+            # Keep the failure explicit and let Planner return a partial plan;
+            # only an explicit user re-query may run the same parameters again.
+            freshness = evidence.value.get("freshness")
+            if not (
+                isinstance(freshness, Mapping)
+                and freshness.get("status") == "STALE"
+            ):
+                return False
     return not isinstance(routes, list) or not routes
 
 
@@ -1109,10 +1616,16 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
         return False
     base, attractions = route_inputs
     expected_signature = [base, *attractions]
+    freshness = map_item.value.get("freshness")
+    stale = (
+        isinstance(freshness, Mapping)
+        and freshness.get("status") == "STALE"
+    )
     if (
         "local_transit_result_status" in map_item.value
         and map_item.value.get("local_transit_input_signature")
         == expected_signature
+        and not stale
     ):
         return False
     destination = map_item.value.get("destination")
@@ -1184,20 +1697,17 @@ def _plan_followup_actions(
                 _manual_railway_action(intent),
             )
         )
-    if "attraction" in missing:
+    if missing & {"attraction", "accommodation_base"}:
         actions.append(
-            {
-                **_web_action(intent),
-                "mode": "attractions_and_opening_hours",
-            }
+            _registered_action(
+                "web",
+                intent,
+                mode="supplement",
+            )
         )
     if "accommodation_base" in missing:
         actions.extend(
             (
-                {
-                    **_web_action(intent),
-                    "mode": "accommodation_area",
-                },
                 {
                     "action_id": "accommodation_base_manual",
                     "action_type": "user_input",
@@ -1260,29 +1770,71 @@ def _block_run(
     domain: str,
     *,
     store: InMemoryAgentStore,
+    stalled: bool = False,
 ) -> None:
     state = _state(run_id, store)
     item = state.evidence.get(domain)
+    retained = (
+        deepcopy(state.fallback_result)
+        if isinstance(state.fallback_result, Mapping)
+        else None
+    )
+    blocked_result = retained or {
+        "action_loop_status": "BLOCKED",
+        "blocked_domains": [domain],
+        "context": {
+            "missing_domains": (
+                [domain]
+                if item is None or item.status is EvidenceStatus.MISSING
+                else []
+            ),
+            "conflicting_domains": (
+                [domain]
+                if item is not None
+                and item.status is EvidenceStatus.CONFLICTING
+                else []
+            ),
+        },
+    }
     store.block(
         run_id,
-        {
-            "action_loop_status": "BLOCKED",
-            "blocked_domains": [domain],
-            "context": {
-                "missing_domains": (
-                    [domain]
-                    if item is None or item.status is EvidenceStatus.MISSING
-                    else []
-                ),
-                "conflicting_domains": (
-                    [domain]
-                    if item is not None
-                    and item.status is EvidenceStatus.CONFLICTING
-                    else []
-                ),
+        blocked_result,
+        (
+            f"{domain.upper()}_ACTION_STALLED"
+            if stalled
+            else f"{domain.upper()}_EVIDENCE_BLOCKED"
+        ),
+    )
+
+
+def _timeout_actions(
+    run_id: str,
+    action_ids: list[str],
+    *,
+    store: InMemoryAgentStore,
+) -> None:
+    """Close actions that made no observable progress for 30 seconds."""
+
+    state = _state(run_id, store)
+    for action_id in action_ids:
+        if action_id in state.action_status:
+            state.action_status[action_id] = "blocked"
+        store.append_event(
+            run_id,
+            event_type="tool.timeout",
+            status="failed",
+            message=f"{_action_title(action_id)}超过30秒没有新进展。",
+            details={
+                "tool": action_id,
+                "timeout_seconds": 30,
             },
-        },
-        f"{domain.upper()}_EVIDENCE_BLOCKED",
+        )
+    _persist_loop_state(run_id, state, store)
+    _block_run(
+        run_id,
+        action_ids[0],
+        store=store,
+        stalled=True,
     )
 
 
@@ -1396,6 +1948,14 @@ def _load_loop_state(
         raise TravelAgentError(
             "persisted action loop has invalid result"
         )
+    raw_fallback = action.get("fallback_result")
+    if raw_fallback is not None and not isinstance(
+        raw_fallback,
+        Mapping,
+    ):
+        raise TravelAgentError(
+            "persisted action loop has invalid fallback_result"
+        )
     return _LoopState(
         evidence={item.domain: item for item in current},
         last_sourced_evidence={
@@ -1405,6 +1965,11 @@ def _load_loop_state(
         result=(
             deepcopy(dict(raw_result))
             if isinstance(raw_result, Mapping)
+            else None
+        ),
+        fallback_result=(
+            deepcopy(dict(raw_fallback))
+            if isinstance(raw_fallback, Mapping)
             else None
         ),
     )
@@ -1425,36 +1990,6 @@ def _evidence_items(
         for item in value
         if isinstance(item, Mapping)
     ]
-
-
-def _persist_plan_version(
-    run_id: str,
-    result: Mapping[str, object],
-    store: InMemoryAgentStore,
-) -> None:
-    run_directory = store.run_directory(run_id)
-    if run_directory is None:
-        return
-    versions = run_directory / "plans"
-    versions.mkdir(parents=True, exist_ok=True)
-    existing = sorted(versions.glob("plan-*.json"))
-    version = len(existing) + 1
-    plan = result.get("plan")
-    if not isinstance(plan, Mapping):
-        raise TravelAgentError("planner result omitted plan")
-    payload = {
-        "run_id": run_id,
-        "plan_version": version,
-        "plan": deepcopy(dict(plan)),
-    }
-    _atomic_runtime_json(
-        versions / f"plan-{version:04d}.json",
-        payload,
-    )
-    _atomic_runtime_json(
-        run_directory / "plan-version.json",
-        payload,
-    )
 
 
 def _runtime_json_object(path: Path) -> dict[str, object]:
@@ -1500,6 +2035,7 @@ def _atomic_runtime_json(
 __all__ = [
     "execute_registered_action",
     "get_next_actions",
+    "restart_action_loop_for_intent",
     "run_until_blocked",
     "start_action_loop",
     "submit_evidence",

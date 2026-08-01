@@ -98,6 +98,17 @@ class PlanningInputCompiler:
             web_item,
             earliest=earliest,
             latest=latest,
+            max_visit_minutes=int(
+                pace_values["max_continuous_attraction_minutes"]
+            ),
+            lunch_minutes=int(defaults["lunch_minutes"]),
+            lunch_window_end=time.fromisoformat(
+                str(defaults["lunch_window_end"])
+            ),
+            inter_event_buffer_minutes=int(
+                defaults["inter_event_buffer_minutes"]
+            ),
+            planner_defaults=defaults,
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -112,6 +123,14 @@ class PlanningInputCompiler:
             events_by_type=events_by_type,
             dependencies=dependencies,
             blockers=blockers,
+        )
+        _compile_free_time(
+            earliest=earliest,
+            latest=latest,
+            hotel_area=hotel_area,
+            days=days,
+            events_by_type=events_by_type,
+            dependencies=dependencies,
         )
         _record_evidence_blockers(evidence, blockers)
 
@@ -164,6 +183,7 @@ class PlanningInputCompiler:
             "cross_city_rail_events": rail_events,
             "attraction_events": events_by_type["attraction"],
             "local_transit_events": local_transit_events,
+            "map_points": _compiled_map_points(map_item, web_item),
             "meal_events": events_by_type["meal"],
             "hotel_events": events_by_type["hotel"],
             "buffer_events": events_by_type["buffer"],
@@ -236,6 +256,11 @@ def _compile_railway(
                 "status": "stale",
             }
         event["evidence_dependencies"] = [evidence_id]
+        event["location"] = {
+            "from": train.get("origin_station"),
+            "to": train.get("destination_station"),
+            "kind": "intercity_rail",
+        }
         _add_event(days, event)
         events_by_type["transit"].append(event)
         dependencies["transit"].append(evidence_id)
@@ -287,8 +312,19 @@ def _compile_local_transit(
             extra={
                 "from": route.get("from"),
                 "to": route.get("to"),
+                "location": {
+                    "from": route.get("from"),
+                    "to": route.get("to"),
+                    "kind": "local_transit",
+                },
+                "transport_mode": route.get("mode"),
                 "duration_seconds": duration,
                 "distance_meters": route.get("distance_meters"),
+                "from_location": deepcopy(route.get("from_location")),
+                "to_location": deepcopy(route.get("to_location")),
+                "polyline": deepcopy(route.get("polyline")),
+                "retrieved_at": route.get("retrieved_at"),
+                "evidence_status": route.get("evidence_status"),
                 "fare": deepcopy(
                     route.get(
                         "fare",
@@ -296,9 +332,14 @@ def _compile_local_transit(
                     )
                 ),
                 "evidence_dependencies": [evidence_id],
+                "reference_only": True,
+                "schedule_status": (
+                    evidence.get("value", {}).get("snapshot_status")
+                    if isinstance(evidence.get("value"), Mapping)
+                    else None
+                ),
             },
         )
-        _add_event(days, event)
         events_by_type["transit"].append(event)
         dependencies["transit"].append(evidence_id)
 
@@ -309,6 +350,11 @@ def _compile_attractions(
     *,
     earliest: datetime,
     latest: datetime,
+    max_visit_minutes: int,
+    lunch_minutes: int,
+    lunch_window_end: time,
+    inter_event_buffer_minutes: int,
+    planner_defaults: Mapping[str, object],
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],
@@ -331,6 +377,52 @@ def _compile_attractions(
     if not candidates:
         blockers.append(_blocker("ATTRACTION_EVIDENCE_MISSING", "web"))
         return
+    local_routes = [
+        event
+        for event in events_by_type["transit"]
+        if not str(event.get("event_id", "")).startswith("rail-")
+    ]
+
+    def route_position(item: tuple[Mapping[str, object], str]) -> int:
+        attraction = item[0]
+        name = str(attraction.get("name") or "")
+        route_query_name = str(attraction.get("route_query_name") or name)
+        for route_index, route in enumerate(local_routes):
+            destination = str(route.get("to") or "")
+            if (
+                name
+                and name in destination
+                or destination
+                and destination in route_query_name
+            ):
+                return route_index
+        return len(local_routes) + len(candidates)
+
+    candidates.sort(key=route_position)
+    arrival_ready = _rail_time(
+        events_by_type["transit"],
+        "rail-outbound",
+        "end_at",
+    )
+    if arrival_ready is not None:
+        arrival_ready += timedelta(
+            minutes=(
+                int(planner_defaults["arrival_buffer_minutes"])
+                + int(planner_defaults["hotel_checkin_minutes"])
+            )
+        )
+    return_cutoff = _rail_time(
+        events_by_type["transit"],
+        "rail-return",
+        "start_at",
+    )
+    if return_cutoff is not None:
+        return_cutoff -= timedelta(
+            minutes=(
+                int(planner_defaults["rail_wait_minutes"])
+                + int(planner_defaults["hotel_checkout_minutes"])
+            )
+        )
     for index, (attraction, evidence_id) in enumerate(candidates, start=1):
         start_at = _bounded_time(
             earliest,
@@ -345,6 +437,83 @@ def _compile_attractions(
             or minutes <= 0
         ):
             minutes = 120
+        minutes = min(minutes, max_visit_minutes)
+        if arrival_ready is not None and start_at.date() == arrival_ready.date():
+            start_at = max(start_at, arrival_ready)
+        if (
+            return_cutoff is not None
+            and start_at.date() == return_cutoff.date()
+            and start_at + timedelta(minutes=minutes) > return_cutoff
+        ):
+            blockers.append(
+                _blocker(
+                    "ATTRACTION_RETAINED_UNSCHEDULED",
+                    "web",
+                    reason=(
+                        f"{attraction.get('name')}在返程候车前没有足够时间，"
+                        "保留为未排入候选"
+                    ),
+                )
+            )
+            continue
+        matching_route = next(
+            (
+                route
+                for route in local_routes
+                if (
+                    str(attraction.get("name") or "")
+                    in str(route.get("to") or "")
+                    or str(route.get("to") or "")
+                    in str(
+                        attraction.get("route_query_name")
+                        or attraction.get("name")
+                        or ""
+                    )
+                )
+            ),
+            None,
+        )
+        if matching_route is not None:
+            matching_route["reference_only"] = False
+            route_duration = int(
+                matching_route.get("duration_seconds") or 0
+            )
+            route_end_at = start_at - timedelta(minutes=15)
+            matching_route["start_at"] = (
+                route_end_at - timedelta(seconds=route_duration)
+            ).isoformat(timespec="minutes")
+            matching_route["end_at"] = route_end_at.isoformat(
+                timespec="minutes"
+            )
+            _add_event(days, matching_route)
+            route_end = matching_route.get("end_at")
+            if isinstance(route_end, str):
+                start_at = max(
+                    start_at,
+                    datetime.fromisoformat(route_end)
+                    + timedelta(minutes=15),
+                )
+                latest_lunch_start = datetime.combine(
+                    start_at.date(),
+                    lunch_window_end,
+                ) - timedelta(
+                    minutes=(
+                        lunch_minutes
+                        + inter_event_buffer_minutes
+                    )
+                )
+                minutes = min(
+                    minutes,
+                    max(
+                        30,
+                        int(
+                            (
+                                latest_lunch_start - start_at
+                            ).total_seconds()
+                            // 60
+                        ),
+                    ),
+                )
         end_at = min(start_at + timedelta(minutes=minutes), latest)
         payload = {
             "id": str(
@@ -377,10 +546,46 @@ def _compile_attractions(
             phase="游览",
             why="按已取得的景点证据编入条件化日程",
         )
+        event["location"] = deepcopy(
+            attraction.get("location")
+            or {
+                "name": attraction.get("name"),
+                "kind": "attraction",
+            }
+        )
         event["evidence_dependencies"] = [evidence_id]
         _add_event(days, event)
         events_by_type["attraction"].append(event)
         dependencies["attraction"].append(evidence_id)
+        return_route = next(
+            (
+                route
+                for route in local_routes
+                if (
+                    str(attraction.get("name") or "")
+                    in str(route.get("from") or "")
+                    and route is not matching_route
+                )
+            ),
+            None,
+        )
+        if return_route is not None:
+            route_start = end_at + timedelta(
+                minutes=inter_event_buffer_minutes
+            )
+            route_duration = int(
+                return_route.get("duration_seconds") or 0
+            )
+            route_end = route_start + timedelta(seconds=route_duration)
+            if return_cutoff is None or route_end <= return_cutoff:
+                return_route["reference_only"] = False
+                return_route["start_at"] = route_start.isoformat(
+                    timespec="minutes"
+                )
+                return_route["end_at"] = route_end.isoformat(
+                    timespec="minutes"
+                )
+                _add_event(days, return_route)
 
 
 def _compile_defaults(
@@ -411,51 +616,13 @@ def _compile_defaults(
             )
         )
 
-    for day_index, day in enumerate(days):
-        date_value = datetime.fromisoformat(str(day["date"])).date()
-        lunch_at = datetime.combine(date_value, time(12, 0))
-        if earliest <= lunch_at < latest:
-            meal = make_meal_event(
-                event_id=f"meal-lunch-{day_index + 1}",
-                meal_kind="lunch",
-                start_at=lunch_at,
-                minutes=int(defaults["lunch_minutes"]),
-                location=hotel_area,
-                why="使用可编辑的Planner午餐默认约束",
-            )
-            meal["evidence_dependencies"] = [user_dependency]
-            _add_event(days, meal)
-            events_by_type["meal"].append(meal)
-            dependencies["meal"].append(user_dependency)
-
-        if day_index < len(days) - 1:
-            rest_start = datetime.combine(date_value, time(22, 0))
-            rest_end = datetime.combine(
-                date_value + timedelta(days=1),
-                time(7, 0),
-            )
-            if rest_start < latest and rest_end > earliest:
-                rest = make_event(
-                    event_id=f"rest-{day_index + 1}",
-                    event_type="rest",
-                    name="夜间休息",
-                    start_at=max(rest_start, earliest),
-                    end_at=min(rest_end, latest),
-                    why="使用可编辑的Planner休息默认约束",
-                    timing_status="estimated",
-                    value_origin="planner_default",
-                    adjustable=("start_at", "end_at"),
-                    extra={
-                        "location": hotel_area,
-                        "evidence_dependencies": [user_dependency],
-                    },
-                )
-                _add_event(days, rest)
-                events_by_type["rest"].append(rest)
-                dependencies["rest"].append(user_dependency)
-
     arrival = _rail_time(events_by_type["transit"], "rail-outbound", "end_at")
     if arrival is not None:
+        arrival_station = _rail_field(
+            events_by_type["transit"],
+            "rail-outbound",
+            "to",
+        )
         buffer_event = make_duration_event(
             event_id="arrival-buffer",
             event_type="buffer",
@@ -464,6 +631,7 @@ def _compile_defaults(
             minutes=int(defaults["arrival_buffer_minutes"]),
             why="使用可编辑的Planner到站缓冲默认约束",
             adjustable=("duration_minutes",),
+            extra={"location": arrival_station or "抵达车站"},
         )
         buffer_event["evidence_dependencies"] = [
             "railway-live-query",
@@ -524,6 +692,11 @@ def _compile_defaults(
             value_origin="planner_default",
             adjustable=("duration_minutes",),
             extra={
+                "location": _rail_field(
+                    events_by_type["transit"],
+                    "rail-return",
+                    "from",
+                ) or "返程车站",
                 "evidence_dependencies": [
                     "railway-live-query",
                     user_dependency,
@@ -533,6 +706,211 @@ def _compile_defaults(
         _add_event(days, wait)
         events_by_type["buffer"].append(wait)
         dependencies["buffer"].extend(wait["evidence_dependencies"])
+
+    for attraction in list(events_by_type["attraction"]):
+        end_value = attraction.get("end_at")
+        attraction_id = attraction.get("attraction_id")
+        if not isinstance(end_value, str) or not isinstance(
+            attraction_id,
+            str,
+        ):
+            continue
+        start_at = datetime.fromisoformat(end_value)
+        buffer_end = start_at + timedelta(
+            minutes=int(defaults["inter_event_buffer_minutes"])
+        )
+        day = next(
+            (
+                item
+                for item in days
+                if item["date"] == start_at.date().isoformat()
+            ),
+            None,
+        )
+        occupied = (
+            [
+                value
+                for value in day["events"]
+                if value is not attraction
+                and isinstance(value.get("start_at"), str)
+                and isinstance(value.get("end_at"), str)
+            ]
+            if day is not None
+            else []
+        )
+        if any(
+            datetime.fromisoformat(str(value["start_at"])) < buffer_end
+            and datetime.fromisoformat(str(value["end_at"])) > start_at
+            for value in occupied
+        ):
+            continue
+        buffer_event = make_event(
+            event_id=f"activity-buffer-{attraction_id}",
+            event_type="buffer",
+            name="活动间缓冲",
+            start_at=start_at,
+            end_at=buffer_end,
+            why="使用可编辑的Planner活动间缓冲默认约束",
+            timing_status="estimated",
+            value_origin="planner_default",
+            adjustable=("duration_minutes",),
+            extra={
+                "remove_with_attraction_id": attraction_id,
+                "location": deepcopy(attraction.get("location")),
+                "evidence_dependencies": [user_dependency],
+            },
+        )
+        _add_event(days, buffer_event)
+        events_by_type["buffer"].append(buffer_event)
+        dependencies["buffer"].append(user_dependency)
+
+    def scheduled_meal_start(
+        day: Mapping[str, object],
+        preferred: datetime,
+        minutes: int,
+        window_end: datetime | None,
+    ) -> tuple[datetime, str | None] | None:
+        cursor = max(preferred, earliest)
+        events = sorted(
+            (
+                value
+                for value in day["events"]
+                if isinstance(value.get("start_at"), str)
+                and isinstance(value.get("end_at"), str)
+            ),
+            key=lambda value: str(value["start_at"]),
+        )
+        while True:
+            end = cursor + timedelta(minutes=minutes)
+            overlap = next(
+                (
+                    value
+                    for value in events
+                    if datetime.fromisoformat(str(value["start_at"])) < end
+                    and datetime.fromisoformat(str(value["end_at"])) > cursor
+                ),
+                None,
+            )
+            if overlap is None:
+                if end <= latest and (
+                    window_end is None or end <= window_end
+                ):
+                    return cursor, None
+                break
+            cursor = datetime.fromisoformat(str(overlap["end_at"]))
+            if window_end is not None and cursor + timedelta(
+                minutes=minutes
+            ) > window_end:
+                break
+        rail = next(
+            (
+                value
+                for value in events
+                if str(value.get("event_id"))
+                in {"rail-outbound", "rail-return"}
+                and datetime.fromisoformat(str(value["start_at"]))
+                <= preferred
+                < datetime.fromisoformat(str(value["end_at"]))
+            ),
+            None,
+        )
+        if rail is not None:
+            rail_start = datetime.fromisoformat(str(rail["start_at"]))
+            rail_end = datetime.fromisoformat(str(rail["end_at"]))
+            meal_at = max(
+                rail_start,
+                min(preferred, rail_end - timedelta(minutes=minutes)),
+            )
+            if meal_at + timedelta(minutes=minutes) <= rail_end:
+                return meal_at, str(rail["event_id"])
+        return None
+
+    for day_index, day in enumerate(days):
+        date_value = datetime.fromisoformat(str(day["date"])).date()
+        meal_specs = (
+            (
+                "breakfast",
+                time(8, 0),
+                int(defaults["breakfast_minutes"]),
+                None,
+            ),
+            (
+                "lunch",
+                time.fromisoformat(str(defaults["lunch_window_start"])),
+                int(defaults["lunch_minutes"]),
+                time.fromisoformat(str(defaults["lunch_window_end"])),
+            ),
+            (
+                "dinner",
+                time.fromisoformat(str(defaults["dinner_window_start"])),
+                int(defaults["dinner_minutes"]),
+                time.fromisoformat(str(defaults["dinner_window_end"])),
+            ),
+        )
+        for meal_kind, preferred_clock, minutes, end_clock in meal_specs:
+            preferred = datetime.combine(date_value, preferred_clock)
+            window_end = (
+                datetime.combine(date_value, end_clock)
+                if end_clock is not None
+                else datetime.combine(date_value, time(10, 0))
+            )
+            slot = scheduled_meal_start(
+                day,
+                preferred,
+                minutes,
+                window_end,
+            )
+            if slot is None:
+                continue
+            meal_at, overlaps_event_id = slot
+            meal = make_meal_event(
+                event_id=f"meal-{meal_kind}-{day_index + 1}",
+                meal_kind=meal_kind,
+                start_at=meal_at,
+                minutes=minutes,
+                location=(
+                    "列车上（餐食待用户准备）"
+                    if overlaps_event_id is not None
+                    else _meal_location(
+                        meal_at,
+                        transit_events=events_by_type["transit"],
+                        hotel_area=hotel_area,
+                    )
+                ),
+                why="使用可编辑的Planner餐食默认约束；金额保持unknown",
+            )
+            if overlaps_event_id is not None:
+                meal["overlaps_event_id"] = overlaps_event_id
+            meal["evidence_dependencies"] = [user_dependency]
+            _add_event(days, meal)
+            events_by_type["meal"].append(meal)
+            dependencies["meal"].append(user_dependency)
+
+        if day_index < len(days) - 1:
+            rest_start = datetime.combine(date_value, time(22, 0))
+            rest_end = datetime.combine(
+                date_value + timedelta(days=1),
+                time(7, 0),
+            )
+            if rest_start < latest and rest_end > earliest:
+                rest = make_event(
+                    event_id=f"rest-{day_index + 1}",
+                    event_type="rest",
+                    name="夜间休息",
+                    start_at=max(rest_start, earliest),
+                    end_at=min(rest_end, latest),
+                    why="使用可编辑的Planner休息默认约束",
+                    timing_status="estimated",
+                    value_origin="planner_default",
+                    adjustable=("start_at", "end_at"),
+                    extra={
+                        "location": hotel_area,
+                        "evidence_dependencies": [user_dependency],
+                    },
+                )
+                _add_event(days, rest)
+                events_by_type["rest"].append(rest)
+                dependencies["rest"].append(user_dependency)
 
 
 def _record_evidence_blockers(
@@ -555,6 +933,204 @@ def _record_evidence_blockers(
             blockers.append(
                 _blocker(f"{domain.upper()}_CONFLICTING", domain)
             )
+
+
+def _rail_field(
+    events: list[dict[str, object]],
+    event_id: str,
+    field_name: str,
+) -> object:
+    event = next(
+        (value for value in events if value.get("event_id") == event_id),
+        None,
+    )
+    return event.get(field_name) if isinstance(event, Mapping) else None
+
+
+def _meal_location(
+    moment: datetime,
+    *,
+    transit_events: list[dict[str, object]],
+    hotel_area: str,
+) -> str:
+    outbound = next(
+        (
+            value
+            for value in transit_events
+            if value.get("event_id") == "rail-outbound"
+        ),
+        None,
+    )
+    returning = next(
+        (
+            value
+            for value in transit_events
+            if value.get("event_id") == "rail-return"
+        ),
+        None,
+    )
+    if isinstance(outbound, Mapping):
+        departure = outbound.get("start_at")
+        arrival = outbound.get("end_at")
+        if isinstance(departure, str) and moment < datetime.fromisoformat(
+            departure
+        ):
+            return str(outbound.get("from") or "出发地")
+        if (
+            isinstance(arrival, str)
+            and moment < datetime.fromisoformat(arrival)
+        ):
+            return "列车上（餐食待用户准备）"
+    if isinstance(returning, Mapping):
+        departure = returning.get("start_at")
+        arrival = returning.get("end_at")
+        if (
+            isinstance(departure, str)
+            and isinstance(arrival, str)
+            and datetime.fromisoformat(departure)
+            <= moment
+            < datetime.fromisoformat(arrival)
+        ):
+            return "列车上（餐食待用户准备）"
+        if isinstance(arrival, str) and moment >= datetime.fromisoformat(
+            arrival
+        ):
+            return str(returning.get("to") or "返回地")
+    return hotel_area
+
+
+def _compile_free_time(
+    *,
+    earliest: datetime,
+    latest: datetime,
+    hotel_area: str | None,
+    days: list[dict[str, object]],
+    events_by_type: dict[str, list[dict[str, object]]],
+    dependencies: dict[str, list[str]],
+) -> None:
+    """Make daytime gaps visible without treating them as attractions."""
+
+    dependency = "confirmed-travel-intent"
+    base = hotel_area or "当日所在地"
+    for day in days:
+        day_date = datetime.fromisoformat(str(day["date"])).date()
+        window_start = max(
+            earliest,
+            datetime.combine(day_date, time(9, 0)),
+        )
+        window_end = min(
+            latest,
+            datetime.combine(day_date, time(18, 0)),
+        )
+        if window_end <= window_start:
+            continue
+        occupied: list[tuple[datetime, datetime]] = []
+        for event in day["events"]:
+            start = event.get("start_at")
+            end = event.get("end_at")
+            if not isinstance(start, str) or not isinstance(end, str):
+                continue
+            start_at = max(window_start, datetime.fromisoformat(start))
+            end_at = min(window_end, datetime.fromisoformat(end))
+            if end_at > start_at:
+                occupied.append((start_at, end_at))
+        occupied.sort()
+        merged: list[tuple[datetime, datetime]] = []
+        for start_at, end_at in occupied:
+            if not merged or start_at > merged[-1][1]:
+                merged.append((start_at, end_at))
+            else:
+                merged[-1] = (
+                    merged[-1][0],
+                    max(merged[-1][1], end_at),
+                )
+        cursor = window_start
+        gap_index = 0
+        for start_at, end_at in [*merged, (window_end, window_end)]:
+            if (start_at - cursor).total_seconds() >= 30 * 60:
+                gap_index += 1
+                free = make_event(
+                    event_id=f"free-day-{day['day']}-{gap_index}",
+                    event_type="rest",
+                    name="自由活动 / 休息",
+                    start_at=cursor,
+                    end_at=start_at,
+                    why="日程空档显式保留，可由用户调整",
+                    timing_status="estimated",
+                    value_origin="rule_derived",
+                    adjustable=("start_at", "end_at"),
+                    extra={
+                        "location": base,
+                        "free_time": True,
+                        "evidence_dependencies": [dependency],
+                    },
+                )
+                _add_event(days, free)
+                events_by_type["rest"].append(free)
+                dependencies["rest"].append(dependency)
+            cursor = max(cursor, end_at)
+
+
+def _compiled_map_points(
+    map_item: Mapping[str, object] | None,
+    web_item: Mapping[str, object] | None,
+) -> list[dict[str, object]]:
+    values = [
+        deepcopy(dict(item))
+        for item in _value_list(map_item, "map_points")
+    ]
+    if web_item is None or web_item.get("status") != "sourced":
+        return values
+    web_value = web_item.get("value")
+    if not isinstance(web_value, Mapping):
+        return values
+    raw_web_points = web_value.get("map_points")
+    if isinstance(raw_web_points, list):
+        values.extend(
+            deepcopy(dict(item))
+            for item in raw_web_points
+            if isinstance(item, Mapping)
+        )
+    for collection, kind in (
+        (web_value.get("attractions"), "attraction"),
+        (web_value.get("hotel_candidates"), "hotel_candidate"),
+    ):
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if not isinstance(item, Mapping):
+                continue
+            position = item.get("location")
+            if not isinstance(position, Mapping):
+                continue
+            values.append(
+                {
+                    "name": item.get("name"),
+                    "kind": kind,
+                    "location": deepcopy(position),
+                    **deepcopy(dict(position)),
+                    "evidence_status": "LIVE",
+                    "retrieved_at": web_value.get("retrieved_at"),
+                }
+            )
+    base = web_value.get("hotel_area")
+    if isinstance(base, Mapping):
+        values.append(
+            {
+                "name": base.get("name"),
+                "kind": "accommodation",
+                "location": deepcopy(base.get("location")),
+                "longitude": base.get("longitude"),
+                "latitude": base.get("latitude"),
+                "coordinate_system": base.get(
+                    "coordinate_system",
+                    "GCJ-02",
+                ),
+                "evidence_status": "LIVE",
+                "retrieved_at": web_value.get("retrieved_at"),
+            }
+        )
+    return values
 
 
 def _evidence_by_domain(value: object) -> dict[str, Mapping[str, object]]:

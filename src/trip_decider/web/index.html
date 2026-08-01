@@ -16,14 +16,31 @@
         <small>旅行决策工作台</small>
       </span>
     </a>
-    <span class="runtime-pill" id="runtime-status">等待 Codex</span>
   </header>
 
   <main class="app-shell">
     <section id="landing" class="landing">
       <div class="landing-card">
-        <h1>请从 Codex 发起任务</h1>
+        <p class="eyebrow">新建旅行任务</p>
+        <h1>从这次需求开始</h1>
+        <p>用一句话说明出发地、时间、人数、预算和目的地倾向。系统会先让你确认结构化条件。</p>
+        <label class="trip-prompt-label" for="new-trip-text">旅行需求</label>
+        <textarea
+          id="new-trip-text"
+          rows="5"
+          placeholder="例如：从武汉出发，8月4日中午以后可以走……"
+        ></textarea>
+        <button class="button primary" type="button" id="new-trip-button">
+          创建新任务
+        </button>
         <p class="page-status" id="landing-status" role="status"></p>
+        <section class="history-panel">
+          <div class="history-heading">
+            <h2>历史行程</h2>
+            <a id="continue-last-link" class="button secondary hidden" href="/">继续上一次行程</a>
+          </div>
+          <div id="history-list" class="history-list"></div>
+        </section>
       </div>
     </section>
 
@@ -51,6 +68,21 @@
       </article>
     </section>
 
+    <section id="compact-progress" class="compact-progress hidden" aria-live="polite">
+      <div
+        class="compact-progress-track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+      >
+        <span id="compact-progress-fill"></span>
+      </div>
+      <strong id="compact-progress-percent">0%</strong>
+      <span id="compact-progress-task">理解旅行需求</span>
+      <span id="compact-progress-elapsed">已用 0 秒</span>
+    </section>
+
     <section id="workbench" class="workbench hidden" aria-live="polite">
       <aside class="intent-column">
         <div class="column-heading">
@@ -63,36 +95,18 @@
         </button>
       </aside>
 
-      <section class="progress-column">
+      <section id="map-column" class="map-column hidden" aria-label="每日路线地图">
         <div class="column-heading">
-          <span>规划进度</span>
-          <strong id="run-status">准备开始</strong>
+          <span>地图与路线</span>
+          <strong id="map-plan-version"></strong>
         </div>
-
-        <ol class="progress-grid" id="progress-grid">
-          <li data-step="understand" data-state="waiting">
-            <span>1</span><strong>理解需求</strong><em>等待</em>
-          </li>
-          <li data-step="collect" data-state="waiting">
-            <span>2</span><strong>查询真实数据</strong><em>等待</em>
-          </li>
-          <li data-step="validate" data-state="waiting">
-            <span>3</span><strong>验证可行性</strong><em>等待</em>
-          </li>
-          <li data-step="plan" data-state="waiting">
-            <span>4</span><strong>生成行程</strong><em>等待</em>
-          </li>
-        </ol>
-
-        <div class="run-message" id="run-message">
-          <span class="working-dot"></span>
-          <p>确认后开始执行。</p>
+        <div class="map-panel">
+          <div id="map-day-tabs" class="map-day-tabs" aria-label="选择地图日期"></div>
+          <p id="map-status" class="map-status" role="status"></p>
+          <div id="map-canvas" class="map-canvas hidden" aria-label="高德地图"></div>
+          <div id="railway-map-cards" class="railway-map-cards"></div>
+          <div id="map-missing-geometry" class="map-missing-geometry"></div>
         </div>
-
-        <details class="execution-details">
-          <summary>执行详情</summary>
-          <div id="event-stream" class="event-stream"></div>
-        </details>
       </section>
 
       <aside id="result-column" class="output-column hidden">
