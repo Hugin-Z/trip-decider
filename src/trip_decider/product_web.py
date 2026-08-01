@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import re
-import threading
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -17,38 +16,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from trip_decider.destination_runtime import (
-    collect_map_evidence,
-    collect_railway_evidence,
-    revise_destination_result,
-    unavailable_web_evidence,
-)
-from trip_decider.dynamic_discovery import collect_live_destination_profile
-from trip_decider.guided_discovery import (
-    build_guided_comparison,
-)
 from trip_decider.agent_actions import (
-    execute_registered_action,
-    get_next_actions,
-    restart_action_loop_for_intent,
-    run_until_blocked,
+    get_next_actions,  # compatibility export for existing local callers
     start_action_loop,
-    submit_evidence,
+)
+from trip_decider.trip_application import (
+    DEFAULT_TRIP_APPLICATION_SERVICE,
+    TripApplicationError,
+    TripApplicationService,
 )
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
     DEFAULT_AGENT_STORE,
-    EvidenceItem,
-    EvidenceStatus,
-    Revision,
     RunStatus,
     TaskMode,
     TravelIntent,
     TravelAgentError,
-    confirm_intent,
-    continue_run_with_intent,
-    create_run,
-    revise_run,
     runtime_status,
 )
 
@@ -61,12 +44,18 @@ _STATIC_FILES = {
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 _MAX_REQUEST_BYTES = 1_000_000
-_GUIDED_CANCELLATIONS: dict[str, threading.Event] = {}
-_GUIDED_CANCELLATIONS_LOCK = threading.RLock()
 
 
 class ProductRequestError(ValueError):
     """Raised for malformed local product API input."""
+
+
+def _application_service() -> TripApplicationService:
+    """Return the one application service over the active authoritative store."""
+
+    if DEFAULT_TRIP_APPLICATION_SERVICE.store is DEFAULT_AGENT_STORE:
+        return DEFAULT_TRIP_APPLICATION_SERVICE
+    return TripApplicationService(store=DEFAULT_AGENT_STORE)
 
 
 def _client_configuration() -> dict[str, object]:
@@ -114,85 +103,17 @@ def _json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _guided_evidence_path(run_id: str) -> Path | None:
-    run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
-    return (
-        run_directory / "evidence" / "guided-comparison.json"
-        if run_directory is not None
-        else None
-    )
-
-
-def _guided_evidence_read_path(run_id: str) -> Path | None:
-    path = _guided_evidence_path(run_id)
-    if path is None or path.is_file():
-        return path
-    run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
-    legacy = (
-        run_directory / "guided-evidence.json"
-        if run_directory is not None
-        else None
-    )
-    return legacy if legacy is not None and legacy.is_file() else path
-
-
 def _persist_guided_evidence(
     run_id: str,
     evidence_by_destination: Mapping[str, object],
 ) -> None:
-    path = _guided_evidence_path(run_id)
-    if path is None:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_bytes(
-        _json_bytes(
-            {
-                "version": 1,
-                "destinations": dict(evidence_by_destination),
-            }
-        )
-    )
-    os.replace(temporary, path)
-
-
-def _guided_evidence_for_selection(
-    run_id: str,
-    destination_id: str,
-) -> dict[str, EvidenceItem]:
-    path = _guided_evidence_read_path(run_id)
-    if path is None or not path.is_file():
-        return {}
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ProductRequestError(
-            "区域比较证据无法安全恢复。"
-        ) from error
-    destinations = (
-        document.get("destinations")
-        if isinstance(document, Mapping)
-        else None
-    )
-    selected = (
-        destinations.get(destination_id)
-        if isinstance(destinations, Mapping)
-        else None
-    )
-    if not isinstance(selected, Mapping):
-        return {}
-    evidence: dict[str, EvidenceItem] = {}
-    for domain, raw_item in selected.items():
-        if domain not in {"railway", "map", "web"}:
-            raise ProductRequestError(
-                "区域比较证据包含未知领域。"
-            )
-        if not isinstance(raw_item, Mapping):
-            raise ProductRequestError(
-                "区域比较证据格式无效。"
-            )
-        evidence[domain] = EvidenceItem.from_mapping(raw_item)
-    return evidence
+        _application_service().persist_guided_evidence(
+            run_id,
+            evidence_by_destination,
+        )
+    except TripApplicationError as error:
+        raise ProductRequestError(str(error)) from error
 
 
 def _run_response(run_id: str) -> dict[str, object]:
@@ -249,7 +170,7 @@ def _run_response(run_id: str) -> dict[str, object]:
     }
     if run.status is RunStatus.RUNNING:
         try:
-            action_loop = get_next_actions(run_id)
+            action_loop = _application_service().next_actions(run_id)
             response["action_loop"] = action_loop
             draft_source = {
                 "result": action_loop.get("result")
@@ -1492,28 +1413,7 @@ def _planning_handoff_contract(
 def _current_run_evidence(
     run_id: str,
 ) -> dict[str, Mapping[str, object]]:
-    if not run_id:
-        return {}
-    run_directory = DEFAULT_AGENT_STORE.run_directory(run_id)
-    if run_directory is None:
-        return {}
-    path = run_directory / "evidence" / "current.json"
-    legacy = run_directory / "evidence.json"
-    if not path.is_file() and legacy.is_file():
-        path = legacy
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return {}
-    current = document.get("current") if isinstance(document, Mapping) else None
-    if not isinstance(current, list):
-        return {}
-    return {
-        str(item["domain"]): item
-        for item in current
-        if isinstance(item, Mapping)
-        and isinstance(item.get("domain"), str)
-    }
+    return _application_service().current_run_evidence(run_id)
 
 
 def _intent_day_skeleton(
@@ -2084,39 +1984,15 @@ def _start_candidate_comparison(
     *,
     mode: TaskMode,
 ) -> dict[str, object]:
-    """Start candidate generation and coarse comparison for one mode."""
-
-    run = DEFAULT_AGENT_STORE.get_run(run_id)
-    if run.intent.task_mode is not mode:
-        raise ProductRequestError(
-            f"{mode.value} handler received another task mode"
+    try:
+        outcome = (
+            _application_service().execute_open_discovery(run_id)
+            if mode is TaskMode.OPEN_DISCOVERY
+            else _application_service().execute_guided_discovery(run_id)
         )
-    DEFAULT_AGENT_STORE.start(run_id)
-    with _GUIDED_CANCELLATIONS_LOCK:
-        _GUIDED_CANCELLATIONS[run_id] = threading.Event()
-    background = (
-        _open_discovery_background
-        if mode is TaskMode.OPEN_DISCOVERY
-        else _guided_discovery_background
-    )
-    thread = threading.Thread(
-        target=background,
-        args=(run_id,),
-        name=f"trip-decider-{mode.value.lower()}-{run_id}",
-        daemon=True,
-    )
-    thread.start()
-    return {
-        "run_id": run_id,
-        "status": "CANDIDATE_COMPARISON_RUNNING",
-        "task_mode": mode.value,
-        "pipeline": [
-            "candidate_generation",
-            "coarse_feasibility",
-            "candidate_comparison",
-            "user_selection",
-        ],
-    }
+    except TripApplicationError as error:
+        raise ProductRequestError(str(error)) from error
+    return dict(outcome.action_loop or {})
 
 
 def _execute_open_discovery(run_id: str) -> dict[str, object]:
@@ -2134,235 +2010,28 @@ def _execute_guided_discovery(run_id: str) -> dict[str, object]:
 
 
 def _execute_direct_plan(run_id: str) -> dict[str, object]:
-    run = DEFAULT_AGENT_STORE.get_run(run_id)
-    if run.intent.task_mode is not TaskMode.DIRECT_PLAN:
-        raise ProductRequestError(
-            "DIRECT_PLAN handler received another task mode"
-        )
-    action_state = start_action_loop(run_id)
-    thread = threading.Thread(
-        target=_run_action_loop_background,
-        args=(run_id,),
-        name=f"trip-decider-actions-{run_id}",
-        daemon=True,
-    )
-    thread.start()
-    return action_state
-
-
-def _audit_time(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    normalized = value.strip()
     try:
-        if "T" in normalized:
-            return datetime.fromisoformat(normalized)
-        parsed = datetime.strptime(normalized, "%H:%M")
-        return parsed
-    except ValueError:
-        return None
-
-
-def _audit_plan_document(value: Mapping[str, object]) -> dict[str, object]:
-    """Perform structural plan checks without invoking the Planner."""
-
-    conflicts: list[dict[str, object]] = []
-    suggestions: list[dict[str, str]] = []
-    days = value.get("days")
-    event_count = 0
-    if not isinstance(days, list) or not days:
-        conflicts.append(
-            {
-                "code": "AUDIT_DAYS_MISSING",
-                "path": "/days",
-                "message": "已有Plan没有可审计的每日安排。",
-            }
-        )
-    else:
-        for day_index, day in enumerate(days):
-            day_path = f"/days/{day_index}"
-            if not isinstance(day, Mapping):
-                conflicts.append(
-                    {
-                        "code": "AUDIT_DAY_INVALID",
-                        "path": day_path,
-                        "message": "每日安排必须是对象。",
-                    }
-                )
-                continue
-            events = day.get("events", day.get("activities"))
-            if not isinstance(events, list):
-                conflicts.append(
-                    {
-                        "code": "AUDIT_EVENTS_MISSING",
-                        "path": f"{day_path}/events",
-                        "message": "该日没有结构化事件列表。",
-                    }
-                )
-                continue
-            previous_end: datetime | None = None
-            for event_index, event in enumerate(events):
-                event_count += 1
-                event_path = f"{day_path}/events/{event_index}"
-                if not isinstance(event, Mapping):
-                    conflicts.append(
-                        {
-                            "code": "AUDIT_EVENT_INVALID",
-                            "path": event_path,
-                            "message": "行程事件必须是对象。",
-                        }
-                    )
-                    continue
-                start = _audit_time(
-                    event.get("start_at", event.get("start"))
-                )
-                end = _audit_time(event.get("end_at", event.get("end")))
-                if start is not None and end is not None and end <= start:
-                    conflicts.append(
-                        {
-                            "code": "AUDIT_TIME_ORDER_INVALID",
-                            "path": event_path,
-                            "message": "事件结束时间不晚于开始时间。",
-                        }
-                    )
-                if (
-                    previous_end is not None
-                    and start is not None
-                    and start < previous_end
-                ):
-                    conflicts.append(
-                        {
-                            "code": "AUDIT_EVENT_OVERLAP",
-                            "path": event_path,
-                            "message": "该事件与前一事件时间重叠。",
-                        }
-                    )
-                if end is not None:
-                    previous_end = end
-                event_type = event.get("type")
-                location = event.get("location", event.get("place"))
-                if (
-                    event_type in {"transit", "attraction", "hotel"}
-                    and not location
-                ):
-                    conflicts.append(
-                        {
-                            "code": "AUDIT_LOCATION_MISSING",
-                            "path": event_path,
-                            "message": "该事件缺少明确地点。",
-                        }
-                    )
-    if conflicts:
-        suggestions.append(
-            {
-                "code": "RESOLVE_AUDIT_CONFLICTS",
-                "message": "先补齐缺失字段并消除时间重叠，再修改原计划。",
-            }
-        )
-    else:
-        suggestions.append(
-            {
-                "code": "RETAIN_EXISTING_PLAN",
-                "message": "当前结构检查未发现冲突；仍需核验事实来源。",
-            }
-        )
-    return {
-        "input_kind": "structured_plan",
-        "parsed": {
-            "day_count": len(days) if isinstance(days, list) else 0,
-            "event_count": event_count,
-        },
-        "validation_status": (
-            "CONFLICTS_FOUND" if conflicts else "STRUCTURALLY_VALID"
-        ),
-        "conflicts": conflicts,
-        "modification_suggestions": suggestions,
-    }
-
-
-def _audit_guide_content(value: str) -> dict[str, object]:
-    lines = [line.strip() for line in value.splitlines() if line.strip()]
-    if not lines:
-        raise ProductRequestError("攻略内容不能为空")
-    timed_lines = [
-        index + 1
-        for index, line in enumerate(lines)
-        if re.search(r"(?:[01]?\d|2[0-3]):[0-5]\d", line)
-    ]
-    conflicts: list[dict[str, object]] = []
-    if not timed_lines:
-        conflicts.append(
-            {
-                "code": "AUDIT_TIMELINE_UNSTRUCTURED",
-                "path": "/content",
-                "message": "攻略未提供可验证的明确时间安排。",
-            }
-        )
-    return {
-        "input_kind": "guide_text",
-        "parsed": {
-            "nonempty_line_count": len(lines),
-            "timed_line_count": len(timed_lines),
-        },
-        "validation_status": (
-            "INSUFFICIENT_STRUCTURE" if conflicts else "PARSED_FOR_REVIEW"
-        ),
-        "conflicts": conflicts,
-        "modification_suggestions": [
-            {
-                "code": "STRUCTURE_GUIDE_TIMELINE",
-                "message": (
-                    "请补充每日时间、地点和交通衔接后再核验可行性。"
-                    if conflicts
-                    else "请继续核验交通、开放时间和费用来源。"
-                ),
-            }
-        ],
-    }
+        outcome = _application_service().execute_direct_plan(run_id)
+    except TripApplicationError as error:
+        raise ProductRequestError(str(error)) from error
+    return dict(outcome.action_loop or {})
 
 
 def _execute_plan_audit(
     run_id: str,
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    run = DEFAULT_AGENT_STORE.get_run(run_id)
-    if run.intent.task_mode is not TaskMode.PLAN_AUDIT:
-        raise ProductRequestError(
-            "audit endpoint only accepts PLAN_AUDIT runs"
-        )
-    if run.status is not RunStatus.CONFIRMED:
-        raise ProductRequestError("audit run must be confirmed")
     raw_plan = payload.get("plan")
     raw_content = payload.get("content")
-    if isinstance(raw_plan, Mapping) and raw_content is None:
-        audit = _audit_plan_document(raw_plan)
-    elif isinstance(raw_content, str) and raw_plan is None:
-        audit = _audit_guide_content(raw_content)
-    else:
-        raise ProductRequestError(
-            "audit requires exactly one of plan or content"
+    try:
+        outcome = _application_service().audit_trip(
+            run_id,
+            plan=(raw_plan if isinstance(raw_plan, Mapping) else None),
+            content=(raw_content if isinstance(raw_content, str) else None),
         )
-    DEFAULT_AGENT_STORE.start(run_id)
-    DEFAULT_AGENT_STORE.append_event(
-        run_id,
-        event_type="audit.completed",
-        status="completed",
-        message="已有计划审计完成。",
-        details={"planner_invoked": False},
-    )
-    DEFAULT_AGENT_STORE.complete(
-        run_id,
-        {
-            "stage": "plan_audit",
-            "task_mode": TaskMode.PLAN_AUDIT.value,
-            "audit": audit,
-            "planner_invoked": False,
-        },
-    )
-    return {
-        "status": "AUDIT_COMPLETED",
-        "planner_invoked": False,
-    }
+    except TripApplicationError as error:
+        raise ProductRequestError(str(error)) from error
+    return dict(outcome.audit_execution or {})
 
 
 _MODE_EXECUTION_HANDLERS = {
@@ -2383,7 +2052,7 @@ def _trip_post(
             intent = _intent_from_trip_text(text)
         if not isinstance(intent, Mapping):
             raise ProductRequestError("请输入旅行需求。")
-        run = create_run(intent)
+        run = _application_service().create_trip(intent)
         return HTTPStatus.CREATED, _run_response(run.run_id)
     parts = [unquote(part) for part in path.split("/") if part]
     if len(parts) < 4 or parts[:2] != ["api", "trips"]:
@@ -2411,231 +2080,79 @@ def _trip_post(
         intent = payload.get("intent")
         if intent is not None and not isinstance(intent, Mapping):
             raise ProductRequestError("intent must be an object")
-        run = confirm_intent(run_id, intent)
+        run = _application_service().confirm_trip(run_id, intent)
         return HTTPStatus.OK, _run_response(run.run_id)
     if action == "execute":
-        run = DEFAULT_AGENT_STORE.get_run(run_id)
-        if run.status is RunStatus.RUNNING:
-            action_id = payload.get("action_id")
-            action_state = (
-                execute_registered_action(run_id, action_id)
-                if isinstance(action_id, str)
-                else run_until_blocked(run_id)
-            )
-            response = _run_response(run_id)
-            response["action_loop"] = action_state
-            return HTTPStatus.OK, response
-        if (
-            run.status in {RunStatus.COMPLETED, RunStatus.BLOCKED}
-            and run.intent.task_mode is TaskMode.DIRECT_PLAN
-            and isinstance(run.result, Mapping)
-        ):
-            action_state = restart_action_loop_for_intent(
+        action_id = payload.get("action_id")
+        try:
+            outcome = _application_service().execute_trip(
                 run_id,
-                run.intent,
+                action_id=(action_id if isinstance(action_id, str) else None),
             )
-            thread = threading.Thread(
-                target=_run_action_loop_background,
-                args=(run_id,),
-                name=f"trip-decider-continue-{run_id}",
-                daemon=True,
-            )
-            thread.start()
-            response = _run_response(run_id)
-            response["action_loop"] = action_state
-            return HTTPStatus.ACCEPTED, response
-        if run.status is not RunStatus.CONFIRMED:
-            raise ProductRequestError(
-                "run must be confirmed before execution"
-            )
-        if run.intent.blocking_missing_fields:
-            raise ProductRequestError(
-                "旅行条件不完整，不能执行。"
-            )
-        if run.intent.task_mode is TaskMode.PLAN_AUDIT:
-            raise ProductRequestError(
-                "PLAN_AUDIT must use /api/trips/<id>/audit with plan or content"
-            )
-        handler = _MODE_EXECUTION_HANDLERS[run.intent.task_mode]
-        action_state = handler(run_id)
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
         response = _run_response(run_id)
-        response["action_loop"] = action_state
-        return HTTPStatus.ACCEPTED, response
+        if outcome.action_loop is not None:
+            response["action_loop"] = dict(outcome.action_loop)
+        return (
+            HTTPStatus.ACCEPTED if outcome.accepted else HTTPStatus.OK,
+            response,
+        )
     if action == "select-candidate":
         destination_id = payload.get("destination_id")
         if not isinstance(destination_id, str) or not destination_id:
             raise ProductRequestError("destination_id must be text")
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
-        result = previous.result
-        options = (
-            result.get("options")
-            if isinstance(result, Mapping)
-            and result.get("stage") in {
-                "open_discovery",
-                "guided_discovery",
-            }
-            else None
-        )
-        if (
-            previous.status is not RunStatus.COMPLETED
-            or not isinstance(options, list)
-        ):
-            raise ProductRequestError(
-                "guided comparison must complete before selection"
-            )
-        selected = next(
-            (
-                option
-                for option in options
-                if isinstance(option, Mapping)
-                and option.get("destination_id") == destination_id
-            ),
-            None,
-        )
-        if not isinstance(selected, Mapping):
-            raise ProductRequestError(
-                "destination_id is not in this comparison"
-            )
-        destination = selected.get("destination_anchor")
-        if not isinstance(destination, str) or not destination:
-            raise ProductRequestError(
-                "selected option omitted destination_anchor"
-            )
-        intent_value = previous.intent.to_dict()
-        intent_value.update(
-            {
-                "task_mode": TaskMode.DIRECT_PLAN.value,
-                "destination_anchor": destination,
-                "destination_expression": f"确定{destination}",
-                "classification_basis": "guided_option_selected",
-            }
-        )
-        continue_run_with_intent(run_id, intent_value)
-        action_state = start_action_loop(
-            run_id,
-            initial_evidence=_guided_evidence_for_selection(
+        try:
+            outcome = _application_service().select_candidate(
                 run_id,
                 destination_id,
-            ),
-        )
+            )
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
         response = _run_response(run_id)
-        response["action_loop"] = action_state
+        response["action_loop"] = dict(outcome.action_loop or {})
         return HTTPStatus.ACCEPTED, response
     if action == "retry-action":
         action_id = payload.get("action_id")
-        if action_id not in {"railway", "map", "web", "planner"}:
+        if not isinstance(action_id, str):
             raise ProductRequestError("action is not retryable")
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
-        if previous.intent.task_mode is not TaskMode.DIRECT_PLAN:
-            raise ProductRequestError(
-                "only DIRECT_PLAN tool actions can be retried"
+        try:
+            outcome = _application_service().retry_action(
+                run_id,
+                action_id,
             )
-        if previous.status in {
-            RunStatus.COMPLETED,
-            RunStatus.BLOCKED,
-            RunStatus.FAILED,
-        }:
-            restart_action_loop_for_intent(run_id, previous.intent)
-        action_state = execute_registered_action(run_id, action_id)
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
         response = _run_response(run_id)
-        response["action_loop"] = action_state
+        response["action_loop"] = dict(outcome.action_loop or {})
         return HTTPStatus.OK, response
     if action == "evidence" and isinstance(payload.get("hotel_id"), str):
         hotel_id = payload.get("hotel_id")
         if not isinstance(hotel_id, str) or not hotel_id:
             raise ProductRequestError("hotel_id must be text")
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
-        evidence = _current_run_evidence(run_id)
-        web = evidence.get("web")
-        value = (
-            deepcopy(dict(web.get("value")))
-            if isinstance(web, Mapping)
-            and isinstance(web.get("value"), Mapping)
-            else None
-        )
-        if value is None:
-            raise ProductRequestError("当前没有可选住宿候选。")
-        hotels = value.get("hotel_candidates")
-        selected = next(
-            (
-                item
-                for item in hotels
-                if isinstance(item, Mapping)
-                and item.get("hotel_id") == hotel_id
-            ),
-            None,
-        ) if isinstance(hotels, list) else None
-        if not isinstance(selected, Mapping):
-            raise ProductRequestError("住宿候选不属于当前run。")
-        value["hotel_area"] = {
-            "name": selected.get("name"),
-            "route_query_name": selected.get("name"),
-            "kind": "selected_hotel",
-            "temporary_base": False,
-            "specific_hotel_selected": True,
-            "location": deepcopy(selected.get("location")),
-            "longitude": (
-                selected.get("location", {}).get("longitude")
-                if isinstance(selected.get("location"), Mapping)
-                else None
-            ),
-            "latitude": (
-                selected.get("location", {}).get("latitude")
-                if isinstance(selected.get("location"), Mapping)
-                else None
-            ),
-            "coordinate_system": "GCJ-02",
-            "price": deepcopy(selected.get("price")),
-            "source": selected.get("source"),
-        }
-        attractions = value.get("attractions")
-        value["route_sequence"] = [
-            str(selected.get("name")),
-            *[
-                str(item.get("route_query_name") or item.get("name"))
-                for item in (
-                    attractions if isinstance(attractions, list) else []
-                )[:3]
-                if isinstance(item, Mapping)
-                and isinstance(
-                    item.get("route_query_name") or item.get("name"),
-                    str,
-                )
-            ],
-        ]
-        restart_action_loop_for_intent(run_id, previous.intent)
-        action_state = submit_evidence(
-            run_id,
-            {
-                "action_id": "web",
-                "evidence_id": str(web.get("evidence_id")),
-                "domain": "web",
-                "status": "sourced",
-                "value": value,
-                "sources": deepcopy(web.get("sources", [])),
-            },
-        )
-        thread = threading.Thread(
-            target=_run_action_loop_background,
-            args=(run_id,),
-            name=f"trip-decider-hotel-{run_id}",
-            daemon=True,
-        )
-        thread.start()
+        try:
+            outcome = _application_service().select_hotel(run_id, hotel_id)
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
         response = _run_response(run_id)
-        response["action_loop"] = action_state
+        response["action_loop"] = dict(outcome.action_loop or {})
         return HTTPStatus.ACCEPTED, response
     if action == "evidence":
         evidence = payload.get("evidence")
         if not isinstance(evidence, Mapping):
             raise ProductRequestError("evidence must be an object")
-        action_state = submit_evidence(run_id, evidence)
+        try:
+            outcome = _application_service().submit_run_evidence(
+                run_id,
+                evidence,
+            )
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
         response = _run_response(run_id)
-        response["action_loop"] = action_state
+        response["action_loop"] = dict(outcome.action_loop or {})
         return HTTPStatus.OK, response
     if action == "revisions" and "intent" not in payload:
         revision = payload.get("revision")
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
         text = payload.get("text")
         if isinstance(text, str):
             revision = _revision_from_user_text(text)
@@ -2643,57 +2160,29 @@ def _trip_post(
             raise ProductRequestError(
                 "请输入可识别的修改，或提供结构化 Revision。"
             )
-        contract = Revision.from_mapping(revision)
-        revised = revise_run(
-            run_id,
-            contract,
-            executor=revise_destination_result,
-        )
-        return HTTPStatus.OK, _run_response(revised.run_id)
+        try:
+            outcome = _application_service().revise_trip(
+                run_id,
+                revision=revision,
+            )
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
+        return HTTPStatus.OK, _run_response(outcome.run_id)
     if action == "revisions":
         intent = payload.get("intent")
         if not isinstance(intent, Mapping):
             raise ProductRequestError("intent must be an object")
-        previous = DEFAULT_AGENT_STORE.get_run(run_id)
-        corrected = TravelIntent.from_mapping(intent)
-        changed_fields = {
-            field_name
-            for field_name, value in corrected.to_dict().items()
-            if value != previous.intent.to_dict().get(field_name)
-        }
-        if not changed_fields or changed_fields <= {"pace"}:
-            revision = Revision(
-                pace=(
-                    corrected.pace
-                    if corrected.pace != previous.intent.pace
-                    else None
-                ),
-                user_message=(
-                    "用户再次确认旅行条件，条件未改变。"
-                    if not changed_fields
-                    else "用户修改旅行节奏。"
-                ),
-            )
-            revised = revise_run(
+        try:
+            outcome = _application_service().revise_trip(
                 run_id,
-                revision,
-                executor=revise_destination_result,
-                intent=corrected,
+                intent=intent,
             )
-            return HTTPStatus.OK, _run_response(revised.run_id)
-        action_state = restart_action_loop_for_intent(
-            run_id,
-            corrected,
-        )
-        thread = threading.Thread(
-            target=_run_action_loop_background,
-            args=(run_id,),
-            name=f"trip-decider-revision-{run_id}",
-            daemon=True,
-        )
-        thread.start()
+        except TripApplicationError as error:
+            raise ProductRequestError(str(error)) from error
+        if not outcome.accepted:
+            return HTTPStatus.OK, _run_response(outcome.run_id)
         response = _run_response(run_id)
-        response["action_loop"] = action_state
+        response["action_loop"] = dict(outcome.action_loop or {})
         return HTTPStatus.ACCEPTED, response
     if action == "audit":
         audit_state = _execute_plan_audit(run_id, payload)
@@ -2758,214 +2247,6 @@ def _revision_from_user_text(text: str) -> dict[str, object]:
         },
         "user_message": normalized,
     }
-
-
-def _open_discovery_background(run_id: str) -> None:
-    _candidate_comparison_background(
-        run_id,
-        expected_mode=TaskMode.OPEN_DISCOVERY,
-    )
-
-
-def _guided_discovery_background(run_id: str) -> None:
-    _candidate_comparison_background(
-        run_id,
-        expected_mode=TaskMode.GUIDED_DISCOVERY,
-    )
-
-
-def _candidate_comparison_background(
-    run_id: str,
-    *,
-    expected_mode: TaskMode,
-) -> None:
-    event_prefix = (
-        "open" if expected_mode is TaskMode.OPEN_DISCOVERY else "guided"
-    )
-
-    def progress(
-        status: str,
-        destination: str,
-        details: Mapping[str, object] | None,
-    ) -> None:
-        event_type = {
-            "comparison_started": f"{event_prefix}.comparison.started",
-            "candidate_started": f"{event_prefix}.candidate.started",
-            "domain_started": f"{event_prefix}.domain.started",
-            "domain_completed": f"{event_prefix}.domain.completed",
-            "domain_timeout": f"{event_prefix}.domain.timeout",
-            "candidate_completed": f"{event_prefix}.candidate.completed",
-        }.get(status, f"{event_prefix}.progress")
-        message = {
-            "comparison_started": "开始并行比较倾向区域内的方案。",
-            "candidate_started": "候选方案进入并行核验。",
-            "domain_started": "开始核验一项真实数据。",
-            "domain_completed": "一项真实数据核验完成。",
-            "domain_timeout": "一项真实数据超时，继续其他核验。",
-            "candidate_completed": "一个候选方案已可展示。",
-        }.get(status, "区域方案比较有新进展。")
-        DEFAULT_AGENT_STORE.append_event(
-            run_id,
-            event_type=event_type,
-            status=(
-                "completed"
-                if status in {
-                    "domain_completed",
-                    "domain_timeout",
-                    "candidate_completed",
-                }
-                else "started"
-            ),
-            message=message,
-            details={
-                "tool": (
-                    str(details.get("domain"))
-                    if isinstance(details, Mapping)
-                    and details.get("domain") in {"railway", "map", "web"}
-                    else "destination_context"
-                ),
-                "destination_label": destination,
-                **dict(details or {}),
-            },
-        )
-
-    try:
-        run = DEFAULT_AGENT_STORE.get_run(run_id)
-        if run.intent.task_mode is not expected_mode:
-            raise TravelAgentError(
-                f"{expected_mode.value} comparison received another mode"
-            )
-        with _GUIDED_CANCELLATIONS_LOCK:
-            cancellation = _GUIDED_CANCELLATIONS.get(run_id)
-        result = build_guided_comparison(
-            run.intent,
-            railway_collector=collect_railway_evidence,
-            map_collector=collect_map_evidence,
-            web_collector=collect_live_destination_profile,
-            run_id=run_id,
-            initial_evidence=None,
-            progress=progress,
-            should_cancel=(
-                cancellation.is_set
-                if cancellation is not None
-                else None
-            ),
-        )
-        reusable_evidence = result.pop("reusable_evidence", {})
-        if not isinstance(reusable_evidence, Mapping):
-            raise TravelAgentError(
-                "guided comparison omitted reusable evidence"
-            )
-        _persist_guided_evidence(run_id, reusable_evidence)
-        DEFAULT_AGENT_STORE.append_event(
-            run_id,
-            event_type=f"{event_prefix}.comparison.completed",
-            status="completed",
-            message="区域方案均已完成粗粒度可行性检查。",
-            details={
-                "tool": "validator",
-                "option_count": result["option_count"],
-            },
-        )
-        DEFAULT_AGENT_STORE.complete(run_id, result)
-    except Exception as error:
-        current = DEFAULT_AGENT_STORE.get_run(run_id)
-        if current.status is RunStatus.RUNNING:
-            DEFAULT_AGENT_STORE.block(
-                run_id,
-                {
-                    "stage": (
-                        "open_discovery"
-                        if expected_mode is TaskMode.OPEN_DISCOVERY
-                        else "guided_discovery"
-                    ),
-                    "task_mode": current.intent.task_mode.value,
-                    "options": [],
-                    "selection_required": True,
-                    "blockers": [
-                        {
-                            "code": "GUIDED_COMPARISON_UNAVAILABLE",
-                            "reason": type(error).__name__,
-                        }
-                    ],
-                },
-                "GUIDED_COMPARISON_UNAVAILABLE",
-            )
-    finally:
-        with _GUIDED_CANCELLATIONS_LOCK:
-            _GUIDED_CANCELLATIONS.pop(run_id, None)
-
-
-def _run_action_loop_background(run_id: str) -> None:
-    """Drive one local action loop and close any non-executable pause."""
-
-    try:
-        snapshot = run_until_blocked(
-            run_id,
-            max_wait_seconds=30.0,
-        )
-        if snapshot.get("status") != "NEED_USER_INPUT":
-            return
-        run = DEFAULT_AGENT_STORE.get_run(run_id)
-        if run.status is not RunStatus.RUNNING:
-            return
-        actions = snapshot.get("actions")
-        action_types = [
-            str(action.get("action_type"))
-            for action in actions
-            if isinstance(action, Mapping)
-        ] if isinstance(actions, list) else []
-        reason = (
-            "WEB_EVIDENCE_REQUIRED"
-            if any(value.startswith("codex") for value in action_types)
-            else "USER_INPUT_REQUIRED"
-        )
-        snapshot_result = snapshot.get("result")
-        retained = (
-            deepcopy(dict(snapshot_result))
-            if isinstance(snapshot_result, Mapping)
-            else run.result
-            if isinstance(run.result, Mapping)
-            else {
-                "action_loop_status": "BLOCKED",
-                "blocked_domains": [],
-            }
-        )
-        DEFAULT_AGENT_STORE.block(
-            run_id,
-            retained,
-            reason,
-        )
-    except Exception as error:
-        current = DEFAULT_AGENT_STORE.get_run(run_id)
-        if current.status is RunStatus.RUNNING:
-            DEFAULT_AGENT_STORE.block(
-                run_id,
-                (
-                    current.result
-                    if isinstance(current.result, Mapping)
-                    else {
-                        "action_loop_status": "BLOCKED",
-                        "blocked_domains": [],
-                    }
-                ),
-                f"ACTION_LOOP_{type(error).__name__.upper()}",
-            )
-
-
-def _revise_agent_background(
-    run_id: str,
-    revision: Revision,
-) -> None:
-    try:
-        revise_run(
-            run_id,
-            revision,
-            executor=revise_destination_result,
-        )
-    except Exception:
-        # The runtime has already persisted a stable failure event.
-        return
 
 
 def _sse_event(event: Mapping[str, object]) -> bytes:

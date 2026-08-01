@@ -219,6 +219,7 @@ def run_until_blocked(
     run_id: str,
     *,
     store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
     max_wait_seconds: float = 30.0,
 ) -> dict[str, object]:
     """Execute local registered tools and pause at external evidence actions.
@@ -301,6 +302,7 @@ def run_until_blocked(
                         run_id,
                         str(action["action_id"]),
                         store=store,
+                        evidence_broker=evidence_broker,
                     )
                     for action in batch
                 ]
@@ -346,6 +348,7 @@ def run_until_blocked(
                 run_id,
                 action_id,
                 store=store,
+                evidence_broker=evidence_broker,
             )
             completed, pending = wait(
                 (future,),
