@@ -34,6 +34,8 @@ from trip_decider.travel_agent import (
     TravelIntent,
 )
 
+from tests.evidence_factory import evidence as factory_evidence
+
 BASELINE_PATH = Path(__file__).with_name("characterization_baseline.json")
 
 NOW = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
@@ -73,169 +75,23 @@ def intent() -> TravelIntent:
 # ---------------------------------------------------------------------------
 
 
-def _estimated_status() -> Any:
-    """取 EvidenceStatus.ESTIMATED；枚举扩展前它还不存在。
+# 证据构造统一走 tests/evidence_factory（persistence-v2.md §10）。本模块此前
+# 自带一份 railway/map/web 的形状定义，与 invariant_support 里的那份是两套——
+# 正是 P4-a 清点出的 9 种键集合中的两种。
 
-    改造前返回 None，调用方据此跳过 estimated 场景——那是新增行为，没有
-    「改造前」可比。
-    """
+
+def _estimated_status():
+    """枚举扩展前 ESTIMATED 不存在；保留以兼容表征基线的历史语义。"""
 
     return getattr(EvidenceStatus, "ESTIMATED", None)
 
 
-def railway_value(*, retrieved_at: str = FRESH_AT) -> dict[str, Any]:
-    return {
-        "domain": "railway",
-        "origin": "甲站",
-        "destination": "乙站",
-        "outbound": {
-            "train_code": "G100",
-            "origin_station": "甲站",
-            "destination_station": "乙站",
-            "departure_at": "2026-08-04T13:00",
-            "arrival_at": "2026-08-04T16:00",
-            "duration_seconds": 10800,
-            "second_class_fare_cny_per_person": 200.0,
-            "second_class_availability": "available",
-        },
-        "return": {
-            "train_code": "G101",
-            "origin_station": "乙站",
-            "destination_station": "甲站",
-            "departure_at": "2026-08-07T18:00",
-            "arrival_at": "2026-08-07T21:00",
-            "duration_seconds": 10800,
-            "second_class_fare_cny_per_person": 200.0,
-            "second_class_availability": "available",
-        },
-        "snapshot": {
-            "status": "LIVE",
-            "retrieved_at": retrieved_at,
-            "attempted_at": retrieved_at,
-            "availability_semantics": "current_at_retrieval_only",
-            "display": f"LIVE · 采集于 {retrieved_at}",
-        },
-        "roundtrip_fare_cny": 800.0,
-        "roundtrip_duration_seconds": 21600,
-        "retrieved_at": retrieved_at,
-    }
+def evidence(domain: str, state: str, *, retrieved_at: str = FRESH_AT):
+    """委托给共享工厂。返回 None 表示该 state 在当前枚举下不可构造。"""
 
-
-def map_value(*, retrieved_at: str = FRESH_AT) -> dict[str, Any]:
-    return {
-        "destination": {"name": "乙地", "adcode": "999999"},
-        "retrieved_at": retrieved_at,
-        "local_transit": [
-            {
-                "route_id": f"route-{index}",
-                "from": "住宿片区",
-                "to": f"景点{index}",
-                "duration_seconds": 1200,
-                "distance_meters": 6000,
-                "fare": {"status": "unknown", "amount_cny": None},
-            }
-            for index in range(1, 4)
-        ],
-        "map_points": [
-            {"name": f"景点{index}", "longitude": 117.8 + index / 100, "latitude": 29.2}
-            for index in range(1, 4)
-        ],
-    }
-
-
-def web_value(*, retrieved_at: str = FRESH_AT) -> dict[str, Any]:
-    return {
-        "destination_official_name": "乙地",
-        "retrieved_at": retrieved_at,
-        "attractions": [
-            {
-                "attraction_id": f"spot-{index}",
-                "name": f"景点{index}",
-                "visit_minutes": 90,
-                "opening_hours": {"status": "unknown"},
-                "ticket": {"status": "unknown"},
-            }
-            for index in range(1, 4)
-        ],
-        "hotel_area": {"name": "住宿片区", "longitude": 117.86, "latitude": 29.25},
-        "route_sequence": ["住宿片区", "景点1", "景点2", "景点3"],
-        "route_segments": [["住宿片区", f"景点{index}"] for index in range(1, 4)],
-    }
-
-
-_VALUE_BY_DOMAIN = {
-    "railway": railway_value,
-    "map": map_value,
-    "web": web_value,
-}
-
-
-def evidence(
-    domain: str,
-    state: str,
-    *,
-    retrieved_at: str = FRESH_AT,
-) -> EvidenceItem | None:
-    """按目标 support 态构造一条证据。
-
-    ``state`` ∈ {sourced, estimated, conflicting, unknown, confirmed_absent}。
-    枚举扩展前 ``estimated`` 返回 None——它在改造前无法构造。
-    """
-
-    builder = _VALUE_BY_DOMAIN[domain]
-    sources = ({"provider": f"controlled-{domain}", "retrieved_at": retrieved_at},)
-
-    if state == "unknown":
-        return EvidenceItem(
-            evidence_id=f"{domain}-missing",
-            domain=domain,
-            status=EvidenceStatus.MISSING,
-            value=None,
-            missing_reason="collector_error",
-        )
-    if state == "conflicting":
-        return EvidenceItem(
-            evidence_id=f"{domain}-conflicting",
-            domain=domain,
-            status=EvidenceStatus.CONFLICTING,
-            value=builder(retrieved_at=retrieved_at),
-            sources=sources,
-            conflict_details=("来源A与来源B不一致",),
-        )
-    if state == "confirmed_absent":
-        return EvidenceItem(
-            evidence_id=f"{domain}-absent",
-            domain=domain,
-            status=EvidenceStatus.SOURCED,
-            value={
-                "kind": "confirmed_absent",
-                "scope": {
-                    "origin": "甲站",
-                    "destination": "乙站",
-                    "window": "2026-08-04~2026-08-07",
-                },
-                "retrieved_at": retrieved_at,
-            },
-            sources=sources,
-        )
-    if state == "estimated":
-        status = _estimated_status()
-        if status is None:
-            return None
-        return EvidenceItem(
-            evidence_id=f"{domain}-estimated",
-            domain=domain,
-            status=status,
-            value=builder(retrieved_at=retrieved_at),
-            sources=sources,
-        )
-    return EvidenceItem(
-        evidence_id=f"{domain}-sourced",
-        domain=domain,
-        status=EvidenceStatus.SOURCED,
-        value=builder(retrieved_at=retrieved_at),
-        sources=sources,
-    )
+    if state == "estimated" and _estimated_status() is None:
+        return None
+    return factory_evidence(domain, state, retrieved_at=retrieved_at)
 
 
 # ---------------------------------------------------------------------------

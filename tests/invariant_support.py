@@ -22,6 +22,7 @@ import re
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.trip_application import TripApplicationService
 from trip_decider.trip_query import TripQueryService
+from tests.evidence_factory import evidence as factory_evidence
 from trip_decider.travel_agent import (
     EvidenceItem,
     EvidenceStatus,
@@ -373,119 +374,21 @@ def offline_intent() -> dict[str, object]:
     }
 
 
+# 三个域的受控证据统一走 tests/evidence_factory（persistence-v2.md §10）。
+# 此前本模块自带一份形状定义，与 characterization_support 里的那份是两套——
+# P4-a 清点出的 9 种键集合中的两种（p4a-fixture-shapes.md §0）。
+
+
 def controlled_railway() -> EvidenceItem:
-    retrieved_at = "2026-08-01T09:00:00+08:00"
-    return EvidenceItem(
-        evidence_id="controlled-railway",
-        domain="railway",
-        status=EvidenceStatus.SOURCED,
-        value={
-            "evidence_status": "sourced",
-            "domain": "railway",
-            "origin": "甲站",
-            "destination": "乙站",
-            "outbound": {
-                "train_code": "G100",
-                "origin_station": "甲站",
-                "destination_station": "乙站",
-                "departure_at": "2026-08-04T13:00",
-                "arrival_at": "2026-08-04T16:00",
-                "duration_seconds": 10800,
-                "second_class_fare_cny_per_person": 200.0,
-                "second_class_availability": "available",
-            },
-            "return": {
-                "train_code": "G101",
-                "origin_station": "乙站",
-                "destination_station": "甲站",
-                "departure_at": "2026-08-07T18:00",
-                "arrival_at": "2026-08-07T21:00",
-                "duration_seconds": 10800,
-                "second_class_fare_cny_per_person": 200.0,
-                "second_class_availability": "available",
-            },
-            "snapshot": {
-                "status": "LIVE",
-                "retrieved_at": retrieved_at,
-                "attempted_at": retrieved_at,
-                "availability_semantics": "current_at_retrieval_only",
-                "display": "LIVE",
-            },
-            "roundtrip_fare_cny": 800.0,
-            "roundtrip_duration_seconds": 21600,
-        },
-        sources=(
-            {"provider": "controlled-rail", "retrieved_at": retrieved_at},
-        ),
-    )
+    return factory_evidence("railway", retrieved_at="2026-08-01T09:00:00+08:00")
 
 
 def controlled_map() -> EvidenceItem:
-    return EvidenceItem(
-        evidence_id="controlled-map",
-        domain="map",
-        status=EvidenceStatus.SOURCED,
-        value={
-            "destination": {"name": "乙地"},
-            "retrieved_at": "2026-08-01T09:00:00+08:00",
-            "local_transit": [
-                {
-                    "route_id": "route-station-base",
-                    "from": "乙站",
-                    "to": "住宿片区",
-                    "duration_seconds": 1800,
-                    "distance_meters": 12000,
-                    "fare": {"status": "unknown", "amount_cny": None},
-                },
-                {
-                    "route_id": "route-base-spot",
-                    "from": "住宿片区",
-                    "to": "景点甲",
-                    "duration_seconds": 1200,
-                    "distance_meters": 6000,
-                    "fare": {"status": "unknown", "amount_cny": None},
-                },
-            ],
-        },
-        sources=(
-            {
-                "provider": "controlled-map",
-                "retrieved_at": "2026-08-01T09:00:00+08:00",
-            },
-        ),
-    )
+    return factory_evidence("map", retrieved_at="2026-08-01T09:00:00+08:00")
 
 
 def controlled_web() -> EvidenceItem:
-    return EvidenceItem(
-        evidence_id="controlled-web",
-        domain="web",
-        status=EvidenceStatus.SOURCED,
-        value={
-            "destination_official_name": "乙地",
-            "retrieved_at": "2026-08-01T09:00:00+08:00",
-            "verified_facts": [
-                {
-                    "field": "official_administrative_name",
-                    "value": "乙地",
-                }
-            ],
-            "attractions": [
-                {
-                    "attraction_id": "spot-1",
-                    "name": "景点甲",
-                    "visit_minutes": 90,
-                }
-            ],
-            "hotel_area": {"name": "住宿片区"},
-        },
-        sources=(
-            {
-                "publisher": "controlled-web",
-                "retrieved_at": "2026-08-01T09:00:00+08:00",
-            },
-        ),
-    )
+    return factory_evidence("web", retrieved_at="2026-08-01T09:00:00+08:00")
 
 
 def controlled_option() -> dict[str, object]:
