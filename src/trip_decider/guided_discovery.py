@@ -17,13 +17,11 @@ from uuid import uuid4
 
 from trip_decider.evidence_core import (
     FRESHNESS_STALE,
-    SUPPORT_ESTIMATED,
-    SUPPORT_SOURCED,
     is_confirmed_absent,
     normalized_retrieved_at,
     token_freshness,
 )
-from trip_decider.evidence_projection import project_domain
+from trip_decider.evidence_projection import project_domain, usable_fact_values
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
 from trip_decider.evidence_broker import (
     default_evidence_broker,
@@ -506,7 +504,7 @@ def _coarse_option(
 ) -> dict[str, object]:
     rail_check = checks["railway"]
     evidence = rail_check.evidence
-    rail = _usable_fact_values(evidence)
+    rail = usable_fact_values(evidence.facts)
     duration = _nonnegative_number(
         rail.get("roundtrip_duration_seconds")
     )
@@ -679,9 +677,6 @@ def _missing_check(
     return replace(check, timed_out=timed_out)
 
 
-_USABLE_SUPPORT = frozenset({SUPPORT_SOURCED, SUPPORT_ESTIMATED})
-
-
 def _is_stale(token: str) -> bool:
     """陈旧与否由读取时刻决定。
 
@@ -691,21 +686,6 @@ def _is_stale(token: str) -> bool:
     """
 
     return token_freshness(token) == FRESHNESS_STALE
-
-
-def _usable_fact_values(evidence: EvidenceItem) -> dict[str, object]:
-    """字段级可用值：support 不可用的字段根本不出现。
-
-    item 级 support 说不出"时刻可靠而余票未知"，字段级说得出
-    （persistence-v2.md §1.3）。
-    """
-
-    return {
-        str(fact["field"]): fact["value"]
-        for fact in evidence.facts
-        if str(fact.get("support")) in _USABLE_SUPPORT
-        and fact.get("value") is not None
-    }
 
 
 def _evidence_collected_at(evidence: EvidenceItem) -> str:

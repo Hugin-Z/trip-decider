@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from trip_decider.evidence_core import TOKEN_UNKNOWN, FactVerdict
 from trip_decider.evidence_projection import (
     is_supported,
+    item_facts,
+    item_retrieved_at,
     project_domain,
+    usable_fact_values,
     verdict_payload,
 )
 from trip_decider.travel_agent import RunStatus, TaskMode
@@ -209,29 +212,10 @@ def _map_payload_contract(
     }
 
     def evidence_value(domain: str) -> Mapping[str, object]:
-        item = evidence.get(domain)
-        value = item.get("value") if isinstance(item, Mapping) else None
-        return value if isinstance(value, Mapping) else {}
+        return usable_fact_values(item_facts(evidence.get(domain)))
 
     def retrieved_at(domain: str) -> str | None:
-        item = evidence.get(domain)
-        value = evidence_value(domain)
-        snapshot = value.get("snapshot")
-        if (
-            isinstance(snapshot, Mapping)
-            and isinstance(snapshot.get("retrieved_at"), str)
-        ):
-            return str(snapshot["retrieved_at"])
-        if isinstance(value.get("retrieved_at"), str):
-            return str(value["retrieved_at"])
-        sources = item.get("sources") if isinstance(item, Mapping) else None
-        values = [
-            str(source["retrieved_at"])
-            for source in (sources if isinstance(sources, list) else [])
-            if isinstance(source, Mapping)
-            and isinstance(source.get("retrieved_at"), str)
-        ]
-        return max(values) if values else None
+        return item_retrieved_at(evidence.get(domain))
 
     verdicts: dict[str, FactVerdict] = {}
 
@@ -756,25 +740,7 @@ def _presentation_contract(
         return project_domain({}, domain, now=read_at, absent_reason=reason)
 
     def context_retrieved_at(domain: str) -> str | None:
-        item = evidence_by_domain.get(domain)
-        value = item.get("value") if isinstance(item, Mapping) else None
-        if isinstance(value, Mapping):
-            snapshot = value.get("snapshot")
-            if isinstance(snapshot, Mapping) and isinstance(
-                snapshot.get("retrieved_at"),
-                str,
-            ):
-                return str(snapshot["retrieved_at"])
-            if isinstance(value.get("retrieved_at"), str):
-                return str(value["retrieved_at"])
-        sources = item.get("sources") if isinstance(item, Mapping) else None
-        timestamps = [
-            str(source["retrieved_at"])
-            for source in (sources if isinstance(sources, list) else [])
-            if isinstance(source, Mapping)
-            and isinstance(source.get("retrieved_at"), str)
-        ]
-        return max(timestamps) if timestamps else None
+        return item_retrieved_at(evidence_by_domain.get(domain))
 
     days = plan.get("days") if isinstance(plan, Mapping) else None
     safe_days = days if isinstance(days, list) else []
@@ -875,13 +841,7 @@ def _presentation_contract(
         if event_id not in budget_event_ids:
             budget_events.append(event)
             budget_event_ids.add(event_id)
-    web_item = evidence_by_domain.get("web")
-    web_value = (
-        web_item.get("value")
-        if isinstance(web_item, Mapping)
-        and isinstance(web_item.get("value"), Mapping)
-        else {}
-    )
+    web_value = usable_fact_values(item_facts(evidence_by_domain.get("web")))
     return {
         "day_count": len(safe_days),
         "event_count": len(events),
@@ -1009,24 +969,9 @@ def _planning_handoff_contract(
     railway = live.get("railway")
     web = live.get("web")
     map_item = live.get("map")
-    web_value = (
-        web.get("value")
-        if isinstance(web, Mapping)
-        and isinstance(web.get("value"), Mapping)
-        else {}
-    )
-    map_value = (
-        map_item.get("value")
-        if isinstance(map_item, Mapping)
-        and isinstance(map_item.get("value"), Mapping)
-        else {}
-    )
-    railway_value = (
-        railway.get("value")
-        if isinstance(railway, Mapping)
-        and isinstance(railway.get("value"), Mapping)
-        else {}
-    )
+    web_value = usable_fact_values(item_facts(web))
+    map_value = usable_fact_values(item_facts(map_item))
+    railway_value = usable_fact_values(item_facts(railway))
     attractions = [
         {
             "attraction_id": item.get("attraction_id") or item.get("id"),

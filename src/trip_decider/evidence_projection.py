@@ -15,7 +15,8 @@ P3a 边界：本模块只读不写。持久化内容逐字节不变，重分类�
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+import re
 from datetime import datetime
 from types import MappingProxyType
 from typing import Any
@@ -24,13 +25,20 @@ from trip_decider.evidence_core import (
     FactInput,
     FactVerdict,
     FreshnessPolicy,
+    SUPPORT_ESTIMATED,
+    SUPPORT_SOURCED,
     SourceRef,
+    derive_facts,
     evaluate_fact,
+    normalized_retrieved_at,
     token_support,
 )
 
 __all__ = [
     "DOMAIN_DATA_TYPES",
+    "item_facts",
+    "item_retrieved_at",
+    "usable_fact_values",
     "INTERNAL_CONTRACT_VIOLATION_EVENT",
     "READ_POLICIES",
     "internal_contract_violation_event",
@@ -412,3 +420,140 @@ def verdict_payload(verdict: FactVerdict) -> dict[str, Any]:
     if verdict.next_action is not None:
         payload["next_action"] = dict(verdict.next_action)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# 字段级读取（persistence-v2.md §1.3）
+#
+# `EvidenceItem.facts` 服务对象形态的调用方；下面两个函数服务 dict 形态的
+# ——读取层拿到的大多是已落盘的 mapping，没有对象可用。两条路走同一个
+# `derive_facts`，不允许出现第二套推导。
+
+USABLE_SUPPORT = frozenset({SUPPORT_SOURCED, SUPPORT_ESTIMATED})
+
+
+def item_facts(item: Any) -> tuple[Mapping[str, Any], ...]:
+    """落盘证据 mapping → 字段级 facts。
+
+    与 `EvidenceItem.facts` 同样是双读：已带 facts 键就直读，否则从 v1 的裸
+    value 推导。P4-b3 生产端切换后，走的是前一条分支。
+    """
+
+    if not isinstance(item, Mapping):
+        return ()
+    value = item.get("value")
+    if isinstance(value, Mapping) and isinstance(
+        value.get("facts"), (list, tuple)
+    ):
+        return tuple(
+            fact for fact in value["facts"] if isinstance(fact, Mapping)
+        )
+    status = item.get("status")
+    support = str(status) if isinstance(status, str) else SUPPORT_SOURCED
+    if support == "missing":  # 枚举名与 support 轴只差这一个名字
+        support = "unknown"
+    domain = str(item.get("domain") or "")
+    conflict_details = item.get("conflict_details")
+    return derive_facts(
+        value,
+        str(item.get("evidence_id") or domain),
+        domain,
+        item_support=support,
+        data_type=DOMAIN_DATA_TYPES.get(domain, ""),
+        retrieved_at=item_retrieved_at(item),
+        reason=(
+            str(item["missing_reason"])
+            if isinstance(item.get("missing_reason"), str)
+            else None
+        ),
+        conflict_details=(
+            tuple(str(entry) for entry in conflict_details)
+            if isinstance(conflict_details, (list, tuple))
+            else ()
+        ),
+    )
+
+
+def item_retrieved_at(item: Any) -> str | None:
+    """采集时刻，按 persistence-v2.md §1.3.1 的归一顺序取。
+
+    source 级是回落项：多个来源时取最晚的一个，因为整条证据不会比它最新的
+    那次采集更旧。
+    """
+
+    if not isinstance(item, Mapping):
+        return None
+    sources = item.get("sources")
+    stamps = [
+        str(source["retrieved_at"])
+        for source in (sources if isinstance(sources, (list, tuple)) else ())
+        if isinstance(source, Mapping)
+        and isinstance(source.get("retrieved_at"), str)
+        and source["retrieved_at"]
+    ]
+    return normalized_retrieved_at(
+        item.get("value"),
+        max(stamps) if stamps else None,
+    )
+
+
+_PATH_STEP = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
+
+
+def usable_fact_values(
+    facts: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """字段级可用值，**按原嵌套形状重建**。
+
+    support 不可用的字段根本不出现——item 级 support 说不出"时刻可靠而余票
+    未知"，字段级说得出。调用方因此不需要自己判断：拿不到的字段就是不该用
+    的字段。
+
+    重建而非返回扁平点号键，是因为消费端读的是 ``value["local_transit"][0]``
+    这样的结构。扁平化只是 facts 的内部表示，不是对外形状。
+    """
+
+    root: dict[str, Any] = {}
+    for fact in facts:
+        if str(fact.get("support")) not in USABLE_SUPPORT:
+            continue
+        value = fact.get("value")
+        if value is None:
+            continue
+        steps = [
+            key if key else int(index)
+            for key, index in _PATH_STEP.findall(str(fact.get("field", "")))
+        ]
+        if not steps:
+            continue
+        _plant(root, steps, value)
+    return root
+
+
+def _plant(root: dict[str, Any], steps: list[Any], value: Any) -> None:
+    """把一个叶子按路径种回去，沿途缺什么建什么。
+
+    下标可能跳号——中间那条路线整条 unknown 时它就不会出现——所以列表按
+    需补 ``None`` 占位，保持其余下标不移位。
+    """
+
+    cursor: Any = root
+    for step, nxt in zip(steps, steps[1:]):
+        child = [] if isinstance(nxt, int) else {}
+        if isinstance(step, int):
+            while len(cursor) <= step:
+                cursor.append(None)
+            if not isinstance(cursor[step], (dict, list)):
+                cursor[step] = child
+            cursor = cursor[step]
+        else:
+            if not isinstance(cursor.get(step), (dict, list)):
+                cursor[step] = child
+            cursor = cursor[step]
+    last = steps[-1]
+    if isinstance(last, int):
+        while len(cursor) <= last:
+            cursor.append(None)
+        cursor[last] = value
+    else:
+        cursor[last] = value
