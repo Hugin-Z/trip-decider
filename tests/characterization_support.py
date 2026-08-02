@@ -237,6 +237,56 @@ def _planning_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
     }
 
 
+def _full_run_snapshot() -> dict[str, Any]:
+    """完整 run 直到计划安装——**哑火检测器**。
+
+    P4-a 的 fixture 收编把动作循环掐断了：run 停在 RUNNING，
+    ``plan-version.json`` 与 ``plans/`` 根本没写出来，而套件全绿、无异常。
+    后果是 I1 的落盘测量少了 227 处命中却没人发现（差点当成截肢的成果）。
+
+    其余场景都只驱动 ``build_guided_comparison`` 与 ``PlanningInputCompiler``，
+    走不到动作循环，因此抓不到那类断裂。这一条驱动到计划真正落盘为止。
+    """
+
+    from tempfile import TemporaryDirectory
+
+    from tests.invariant_support import drive_offline_run
+
+    with TemporaryDirectory() as temporary:
+        try:
+            application, _query, run_id = drive_offline_run(
+                Path(temporary) / "sessions"
+            )
+        except Exception as error:  # noqa: BLE001 - 表征测试要记录异常本身
+            return {"error": f"{type(error).__name__}: {error}"}
+        directory = application.store.run_directory(run_id)
+        if directory is None:
+            return {"error": "run_directory is None"}
+        plan_version_path = directory / "plan-version.json"
+        installed = (
+            json.loads(plan_version_path.read_text(encoding="utf-8"))
+            if plan_version_path.is_file()
+            else None
+        )
+        return {
+            "run_status": application.store.get_run(run_id).status.value,
+            "plan_version_written": plan_version_path.is_file(),
+            "plan_version_number": (
+                installed.get("plan_version")
+                if isinstance(installed, dict)
+                else None
+            ),
+            "plans_directory_count": len(
+                sorted((directory / "plans").glob("plan-*.json"))
+            ),
+            "files": sorted(
+                path.relative_to(directory).as_posix()
+                for path in directory.rglob("*")
+                if path.is_file()
+            ),
+        }
+
+
 def capture() -> dict[str, Any]:
     """跑全部场景，返回规范化快照。"""
 
@@ -257,6 +307,8 @@ def capture() -> dict[str, Any]:
             "decision_point_1_guided": _guided_snapshot(items),
             "decision_point_2_3_planning": _planning_snapshot(items),
         }
+    # 完整 run 只跑一次——它驱动真实动作循环，比其余场景重得多。
+    snapshot["full_run_until_plan_installed"] = _full_run_snapshot()
     return snapshot
 
 

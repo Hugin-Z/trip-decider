@@ -34,14 +34,17 @@
       "attraction_event_count": 3,
       "blocker_fact_refs": [],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
       ],
       "destination_resolved": true,
-      "displayable": true,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
-      "missing_requirements": [],
-      "planning_state": "PLAN_READY",
+      "displayable": false,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
+      "missing_requirements": [
+        "attraction_transit_coverage"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
       "rail_event_count": 2,
       "status": "PARTIAL_PLAN_WITH_BLOCKERS"
     }
@@ -78,14 +81,17 @@
       "attraction_event_count": 3,
       "blocker_fact_refs": [],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
       ],
       "destination_resolved": true,
-      "displayable": true,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
-      "missing_requirements": [],
-      "planning_state": "PLAN_READY",
+      "displayable": false,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
+      "missing_requirements": [
+        "attraction_transit_coverage"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
       "rail_event_count": 2,
       "status": "PARTIAL_PLAN_WITH_BLOCKERS"
     }
@@ -150,6 +156,23 @@
       "rail_event_count": 0,
       "status": "PARTIAL_PLAN_WITH_BLOCKERS"
     }
+  },
+  "full_run_until_plan_installed": {
+    "files": [
+      "action-loop.json",
+      "events.jsonl",
+      "evidence/current.json",
+      "evidence/guided-comparison.json",
+      "evidence/namespace.json",
+      "plan-version.json",
+      "plans/plan-0001.json",
+      "run.json",
+      "session.json"
+    ],
+    "plan_version_number": 1,
+    "plan_version_written": true,
+    "plans_directory_count": 1,
+    "run_status": "COMPLETED"
   },
   "map_conflicting": {
     "decision_point_1_guided": {
@@ -233,14 +256,17 @@
       "attraction_event_count": 3,
       "blocker_fact_refs": [],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
       ],
       "destination_resolved": true,
-      "displayable": true,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
-      "missing_requirements": [],
-      "planning_state": "PLAN_READY",
+      "displayable": false,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
+      "missing_requirements": [
+        "attraction_transit_coverage"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
       "rail_event_count": 2,
       "status": "PARTIAL_PLAN_WITH_BLOCKERS"
     }
@@ -329,14 +355,16 @@
         "railway-absent"
       ],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
         "RAILWAY_NO_DIRECT_TRAIN"
       ],
       "destination_resolved": true,
       "displayable": false,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
       "missing_requirements": [
+        "attraction_transit_coverage",
         "outbound_transport",
         "return_transport"
       ],
@@ -383,15 +411,17 @@
         "railway-conflicting"
       ],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
         "RAILWAY_CONFLICTING",
         "RAILWAY_EVIDENCE_MISSING"
       ],
       "destination_resolved": true,
       "displayable": false,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
       "missing_requirements": [
+        "attraction_transit_coverage",
         "outbound_transport",
         "return_transport"
       ],
@@ -435,14 +465,17 @@
       "attraction_event_count": 3,
       "blocker_fact_refs": [],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
       ],
       "destination_resolved": true,
-      "displayable": true,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
-      "missing_requirements": [],
-      "planning_state": "PLAN_READY",
+      "displayable": false,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
+      "missing_requirements": [
+        "attraction_transit_coverage"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
       "rail_event_count": 2,
       "status": "PARTIAL_PLAN_WITH_BLOCKERS"
     }
@@ -482,15 +515,17 @@
         "railway-missing"
       ],
       "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
         "RAILWAY_EVIDENCE_MISSING",
         "RAILWAY_MISSING"
       ],
       "destination_resolved": true,
       "displayable": false,
-      "local_transit_event_count": 3,
-      "map_point_count": 4,
+      "local_transit_event_count": 2,
+      "map_point_count": 2,
       "missing_requirements": [
+        "attraction_transit_coverage",
         "outbound_transport",
         "return_transport"
       ],
@@ -537,8 +572,8 @@
       ],
       "destination_resolved": true,
       "displayable": false,
-      "local_transit_event_count": 3,
-      "map_point_count": 3,
+      "local_transit_event_count": 2,
+      "map_point_count": 1,
       "missing_requirements": [
         "accommodation_base",
         "attraction",
