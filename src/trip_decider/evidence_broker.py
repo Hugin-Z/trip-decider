@@ -20,6 +20,7 @@ from threading import RLock
 from typing import Callable
 from uuid import uuid4
 
+from trip_decider.evidence_projection import item_retrieved_at
 from trip_decider.travel_agent import (
     default_runtime_root,
     EvidenceItem,
@@ -243,23 +244,13 @@ class EvidenceBroker:
 
 
 def evidence_collected_at(evidence: EvidenceItem) -> str | None:
-    value = evidence.value
-    if isinstance(value, Mapping):
-        snapshot = value.get("snapshot")
-        if isinstance(snapshot, Mapping):
-            retrieved_at = snapshot.get("retrieved_at")
-            if isinstance(retrieved_at, str) and retrieved_at:
-                return retrieved_at
-        retrieved_at = value.get("retrieved_at")
-        if isinstance(retrieved_at, str) and retrieved_at:
-            return retrieved_at
-    values = [
-        str(source["retrieved_at"])
-        for source in evidence.sources
-        if isinstance(source.get("retrieved_at"), str)
-        and str(source["retrieved_at"])
-    ]
-    return max(values) if values else None
+    """采集时刻，按 persistence-v2.md §1.3.1 的归一顺序取。
+
+    这曾是同一段查找的第三份手写副本（另两份在 guided_discovery 与
+    trip_read_model）。归一规则只许有一处实现。
+    """
+
+    return item_retrieved_at(evidence.to_dict())
 
 
 def evidence_query(
