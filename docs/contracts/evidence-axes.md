@@ -469,7 +469,10 @@ next_action:
 
 ### 6.3 运行时枚举的映射（`travel_agent.py:128-131`）
 
-在线路径当前使用的是另一套三态枚举 `EvidenceStatus`：
+> **终态已确定（P4-b3 收口，2026-08-02）。** 见 §6.3.1。以下映射表保留为
+> 历史记录：它描述的是迁移**之前**的状态。
+
+在线路径当时使用的是另一套三态枚举 `EvidenceStatus`：
 
 | 旧 `EvidenceStatus` | 新 support | 备注 |
 |---|---|---|
@@ -484,6 +487,23 @@ next_action:
 - 规划器的默认停留时长与节奏参数（`itinerary_planner.py:160-170` 已自行标为 `"support": "estimated"`，但该字段不受 `EvidenceStatus` 约束，是一套独立的自由字段）。
 
 完整的重分类清单【待验证：需在 P1 阶段逐个 provider 出口清点】。
+
+### 6.3.1 终态：枚举保留为类型载体，词表只此一套
+
+**该待办到此关闭。** 「退役 `EvidenceStatus`」不是终点，词表合一才是——两者
+在 P4-b2 中期被混为一谈过，这里写清区别。
+
+| 项 | 终态 |
+|---|---|
+| 枚举本身 | **保留**。`EvidenceItem.status` 是 §1.3 明文保留的 item 级便捷字段，由 I10 守它不与 facts 聚合漂移；枚举退化为它的类型载体，无危害 |
+| 字面量 | **已归一到轴名**。P4-b3 把采集器协议的 `evidence_status: missing/sourced/conflicting` 改为 `support: unknown/sourced/conflicting`（26 处 + 7 处消费点），词表的第二套名字就此消失 |
+| 映射实现 | **只此一份**：`evidence_core.support_from_legacy_name`。P4-b2 曾出现第二份（`item_facts` 内联），当场收敛 |
+| 唯一出口 | `EvidenceStatus.support`（轴取值）与 `EvidenceStatus.is_usable`（`{sourced, estimated}`）。消费方不再直接读 `.value` |
+| `estimated` 缺位 | 已补。枚举现为四态，§6.4 的重分类问题随之消解 |
+
+**为什么不删枚举**：删它要给 `EvidenceItem.status` 换一个类型，收益是少一个名字，
+代价是动一个受不变式守护的持久化字段。基线报告 M1 数的是「四套词表」不是「四个类型」
+——词表已合一，类型载体留着不构成第二套词表。
 
 ### 6.4 这次映射会改变行为的地方
 
