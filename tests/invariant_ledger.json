@@ -7,7 +7,7 @@
     {
       "test_id": "tests.test_invariant_i1_no_persisted_display_status.PersistedDisplayStatusCase.test_i1_fresh_run_output_has_no_display_status_fields",
       "invariant": "I1",
-      "expected_green_at": "P4",
+      "expected_green_at": "P4b",
       "failing_assertion": "assertEqual([], 命中列表)：一次全新离线 run 的落盘产物中出现 464 处禁用展示状态字段（去重后），分布在 action-loop.json / run.json / plan-version.json / plans/plan-0001.json",
       "blocked_on": null
     },
@@ -33,16 +33,18 @@
     "P2",
     "P3a",
     "P3b",
-    "P4",
+    "P4a",
+    "P4b",
+    "P4c",
     "P5"
   ],
   "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
   "exemptions": [
     {
       "invariant": "I6",
-      "scope": "7 个写入侧模块仍在产出展示态字面量：agent_actions(10) / dynamic_discovery(1) / evidence_broker(6) / guided_discovery(5) / intercity_rail(9) / itinerary_planner(10) / planning_input_compiler(7)。P3b 后 guided_discovery 由 12 降至 5。",
+      "scope": "6 个写入侧模块仍在产出展示态字面量（P4-a 截肢后 dynamic_discovery 保留、离线管线已删）。清零动作见 persistence-v2.md §11.3，属 P4-b。",
       "reason": "这些字面量不是读取层的并行 token 实现，而是被烘进落盘内容的持久化展示态。删除它们会改变 run.json / plan-version.json / evidence-cache 的字节内容，违反 P3a「不碰持久化」的硬边界。清理属于 P4（I1 的范围）。读取层没有豁免——trip_read_model 的 36 处已在本阶段清零。",
-      "expires_at_phase": "P4",
+      "expires_at_phase": "P4b",
       "tracked_in": "docs/contracts/invariants.md",
       "paths": [
         "src/trip_decider/agent_actions.py",

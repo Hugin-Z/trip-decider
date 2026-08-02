@@ -24,7 +24,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LEDGER_PATH = Path(__file__).with_name("invariant_ledger.json")
 INVARIANT_PATTERN = "test_invariant_i*.py"
 
-_PHASE_ORDER = ("P0", "P1", "P2", "P3a", "P3b", "P4", "P5")
+# P4 在 P4-a 阶段拆为三段：a 截肢与惰性化、b 字段级 facts 与删展示态、
+# c 历史 run 处置与收口。
+_PHASE_ORDER = ("P0", "P1", "P2", "P3a", "P3b", "P4a", "P4b", "P4c", "P5")
 _VALID_PHASES = frozenset(_PHASE_ORDER)
 _REQUIRED_FIELDS = ("test_id", "invariant", "expected_green_at", "failing_assertion")
 _EXEMPTION_FIELDS = (
