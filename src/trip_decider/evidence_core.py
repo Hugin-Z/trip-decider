@@ -67,10 +67,12 @@ __all__ = [
     "compute_freshness",
     "confirmed_absent",
     "evaluate_fact",
+    "fact_id",
     "is_confirmed_absent",
     "parse_timestamp",
     "resolve_blocking",
     "resolve_freshness",
+    "split_fact_id",
     "token_freshness",
     "token_support",
     "validate_next_action",
@@ -374,6 +376,44 @@ def is_confirmed_absent(value: Any) -> bool:
         and isinstance(value.get("scope"), Mapping)
         and bool(value.get("scope"))
     )
+
+
+
+# ---------------------------------------------------------------------------
+# fact_id 生成（persistence-v2.md §5 的引用基石）
+# ---------------------------------------------------------------------------
+
+
+def fact_id(evidence_id: str, field: str) -> str:
+    """由 ``(evidence_id, field)`` 生成稳定的 fact 标识。
+
+    **全仓唯一的生成规则。** 写入侧与测试共用它——P4-c 的 PlanVersion 与候选卡
+    靠 ``fact_id`` 指向事实，两侧各自拼一套会让引用在读取时对不上，而对不上
+    只会表现为「引用解析失败」，看不出是规则不一致造成的。
+
+    规则刻意保持可读且可逆：``<evidence_id>#<field>``。不做哈希——排查引用
+    问题时能一眼看出它指向谁，比短标识值钱。
+    """
+
+    left = str(evidence_id).strip()
+    right = str(field).strip()
+    if not left:
+        raise EvidenceCoreError("fact_id requires an evidence_id")
+    if not right:
+        raise EvidenceCoreError("fact_id requires a field path")
+    if "#" in left:
+        raise EvidenceCoreError("evidence_id must not contain '#'")
+    return f"{left}#{right}"
+
+
+def split_fact_id(value: str) -> tuple[str, str]:
+    """``fact_id`` 的逆运算，返回 ``(evidence_id, field)``。"""
+
+    text = str(value)
+    if "#" not in text:
+        raise EvidenceCoreError(f"not a fact_id: {value!r}")
+    left, _, right = text.partition("#")
+    return left, right
 
 
 # ---------------------------------------------------------------------------

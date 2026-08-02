@@ -763,14 +763,14 @@ class ProductWebContractTests(unittest.TestCase):
                         "destination_anchor": "乙地",
                         "feasibility_status": "CONDITIONALLY_FEASIBLE",
                         "roundtrip_transport": {
-                            "status": "LIVE",
+                            "token": "verified",
                             "duration_seconds": 7200,
                             "known_cost_cny": 400,
                         },
                         "evidence_statuses": [
-                            {"domain": "railway", "status": "LIVE"},
-                            {"domain": "map", "status": "LIVE"},
-                            {"domain": "web", "status": "MISSING"},
+                            {"domain": "railway", "token": "verified"},
+                            {"domain": "map", "token": "verified"},
+                            {"domain": "web", "token": "unknown"},
                         ],
                         "evidence_missing": ["网页事实"],
                     }
@@ -1020,6 +1020,7 @@ class ProductWebContractTests(unittest.TestCase):
                 "context": {
                     "evidence": [
                         {
+                            "evidence_id": "railway-fixture-1",
                             "domain": "railway",
                             "status": "sourced",
                             "value": {
@@ -1031,6 +1032,7 @@ class ProductWebContractTests(unittest.TestCase):
                             "sources": [],
                         },
                         {
+                            "evidence_id": "web-fixture-2",
                             "domain": "web",
                             "status": "sourced",
                             "value": {
@@ -1044,6 +1046,7 @@ class ProductWebContractTests(unittest.TestCase):
                             "sources": [],
                         },
                         {
+                            "evidence_id": "map-fixture-3",
                             "domain": "map",
                             "status": "sourced",
                             "value": {
@@ -1150,7 +1153,10 @@ class ProductWebContractTests(unittest.TestCase):
                     "context": {
                         "evidence": [
                             {
+                                "evidence_id": "map-geometry-probe",
+                                "evidence_id": "map-fixture-4",
                                 "domain": "map",
+                                "status": "sourced",
                                 "value": {
                                     "local_transit": [
                                         {"route_id": "map-local-1"}
@@ -1455,6 +1461,7 @@ class ProductWebContractTests(unittest.TestCase):
         read_at = datetime(2026, 7, 30, 13, 0, tzinfo=timezone.utc)
         context_evidence = [
             {
+                "evidence_id": "railway-fixture-5",
                 "domain": "railway",
                 "status": "sourced",
                 "value": {
@@ -1466,12 +1473,14 @@ class ProductWebContractTests(unittest.TestCase):
                 "sources": [],
             },
             {
+                "evidence_id": "web-fixture-6",
                 "domain": "web",
                 "status": "sourced",
                 "value": {"retrieved_at": "2026-07-30T12:01:00+08:00"},
                 "sources": [],
             },
             {
+                "evidence_id": "map-fixture-7",
                 "domain": "map",
                 "status": "sourced",
                 "value": {
@@ -1588,6 +1597,7 @@ class ProductWebContractTests(unittest.TestCase):
             {
                 "action_id": "web",
                 "evidence_id": "web-test",
+                "evidence_id": "web-fixture-8",
                 "domain": "web",
                 "status": "sourced",
                 "value": {
@@ -1680,6 +1690,7 @@ class ProductWebContractTests(unittest.TestCase):
             {
                 "action_id": "web",
                 "evidence_id": "web-missing",
+                "evidence_id": "web-fixture-9",
                 "domain": "web",
                 "status": "missing",
                 "value": None,

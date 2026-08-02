@@ -81,7 +81,7 @@
 
 **现状**：至少三种放法——`value.retrieved_at`、`value.snapshot.retrieved_at`、`sources[].retrieved_at`。生产端三种都用（不同 provider 不同），读取层的 `_retrieved_at` 按优先级依次找（`evidence_projection.py`）。
 
-**P4-b 后果**：**有**。v2 把 `retrieved_at` 提到 **fact 级**（每个 fact 一个），三种放法要归一。归一规则需要在 P4-b 定：同一条证据的不同字段可以有不同采集时刻（这正是字段级的动机），但同一个 fact 只能有一个。
+**P4-b 后果**：**有**。归一规则已定，见 `persistence-v2.md` §1.3.1——fact 级权威且必带，source 级保留表示该来源的采集时刻，其余放法全部废除。
 
 ---
 

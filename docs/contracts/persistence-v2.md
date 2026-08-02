@@ -78,6 +78,28 @@
 
 **这是本规格里改动面最大的一项**，`value` 的形状变了，全部生产者与消费者都受影响。
 
+### 1.3.1 `retrieved_at` 归一规则
+
+**2026-08-02（P4-b）裁决。** v1 有三种放法——`value.retrieved_at`、
+`value.snapshot.retrieved_at`、`sources[].retrieved_at`——读取端按优先级依次找
+（`evidence_projection._retrieved_at`）。字段级 facts 之后必须归一，否则同一条
+证据的不同字段拿到的采集时刻取决于查找顺序而不是事实。
+
+| 层 | 规定 |
+|---|---|
+| **fact 级** `facts[].retrieved_at` | **权威，每个 fact 必带**。同一条证据的不同字段**可以**有不同采集时刻——这正是字段级的动机 |
+| **source 级** `sources[].retrieved_at` | **保留**（`SourceRef` 本就有）。表示**该来源**的采集时刻；多来源时各自独立 |
+| item 级 / `value` 内嵌的其他放法 | **全部废除**。读取端不再识别 `value.retrieved_at`、`value.snapshot.retrieved_at`、`value.freshness.retrieved_at` |
+
+**fact 级与 source 级的关系**：一个 fact 由一个或多个 source 支撑。fact 的
+`retrieved_at` 是该 fact 被确定下来的时刻；source 的是那次外部调用返回的时刻。
+单来源时两者通常相等，多来源时 fact 级取哪一个由生产者决定并写死——读取端不
+再推断。
+
+**为什么不只留一层**：只留 fact 级会丢掉「这条来源是什么时候取的」，多来源冲突
+时无法判断谁更新；只留 source 级则回到 v1 的查找顺序问题。两层各自回答不同的
+问题，都要留。
+
 ### 1.4 `refresh_failure`
 
 已由 P3b 前置修正转正为契约字段（`evidence-axes.md` §3.4），v2 规范其位置：
