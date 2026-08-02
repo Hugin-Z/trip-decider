@@ -1493,16 +1493,16 @@ def _web_route_inputs(
     if (
         evidence is None
         or not evidence.status.is_usable
-        or not isinstance(evidence.value, Mapping)
     ):
         return None
-    hotel = evidence.value.get("hotel_area")
+    web_value = usable_fact_values(evidence.facts)
+    hotel = web_value.get("hotel_area")
     base = (
         hotel.get("route_query_name", hotel.get("name"))
         if isinstance(hotel, Mapping)
         else None
     )
-    attractions = evidence.value.get("attractions")
+    attractions = web_value.get("attractions")
     if (
         not isinstance(base, str)
         or not base.strip()
@@ -1519,7 +1519,7 @@ def _web_route_inputs(
         and str(item.get("route_query_name", item["name"])).strip()
     ]
     unique_names = list(dict.fromkeys(names))
-    explicit_sequence = evidence.value.get("route_sequence")
+    explicit_sequence = web_value.get("route_sequence")
     if isinstance(explicit_sequence, list):
         sequence = [
             str(value).strip()
@@ -1547,17 +1547,17 @@ def _web_route_points(
     if (
         evidence is None
         or not evidence.status.is_usable
-        or not isinstance(evidence.value, Mapping)
     ):
         return None
+    web_value = usable_fact_values(evidence.facts)
     values: dict[str, Mapping[str, object]] = {}
-    hotel = evidence.value.get("hotel_area")
+    hotel = web_value.get("hotel_area")
     if isinstance(hotel, Mapping):
         name = hotel.get("route_query_name", hotel.get("name"))
         location = hotel.get("location")
         if isinstance(name, str) and isinstance(location, Mapping):
             values[name.strip()] = location
-    attractions = evidence.value.get("attractions")
+    attractions = web_value.get("attractions")
     if isinstance(attractions, list):
         for item in attractions:
             if not isinstance(item, Mapping):
@@ -1580,9 +1580,8 @@ def _web_route_segments(
     if (
         evidence is not None
         and evidence.status.is_usable
-        and isinstance(evidence.value, Mapping)
     ):
-        raw_segments = evidence.value.get("route_segments")
+        raw_segments = usable_fact_values(evidence.facts).get("route_segments")
         if isinstance(raw_segments, list):
             result = [
                 (str(item[0]).strip(), str(item[1]).strip())
