@@ -1,7 +1,10 @@
 """翻面双向核对器。
 
-`p4b-baseline-flip-preview.md` §4 的可执行形式。把重刷基线从一次信任动作变成
-一次核对动作：预期写在冻结版 preview 里，这里只负责判决实际与预期是否一致。
+`p4b-baseline-flip-preview-v2.md` §4 的可执行形式。把重刷基线从一次信任动作
+变成一次核对动作：预期写在 v2 里，这里只负责判决实际与预期是否一致。
+
+v1 已作废——它量错了夹具，预测的增量在真实夹具下不可达。那次失配由本模块的
+负向验证抓住，处置记录在 v2 §0。
 
 **双向**，缺一不可：
 
@@ -29,11 +32,17 @@ from tests.characterization_support import (
     save_baseline,
 )
 
-# preview 冻结版：范围 6a6a605，分类 636fa91，回滚探测器 25466a0。
-PREVIEW_BASELINE = "6a6a605 (范围) / 636fa91 (分类)"
+# 核对基准：v2（前置固定读取时刻 6f9a9f7）。
+PREVIEW_BASELINE = "p4b-baseline-flip-preview-v2.md（v1 已作废）"
 
-# §1 表：7 个场景各 +2 条 blocker。
+# v2 §2.2：7 个场景各 +2 条 blocker。
 _STALE_BLOCKERS = ("RAILWAY_SNAPSHOT_STALE", "RAILWAY_AVAILABILITY_UNKNOWN")
+
+# v2 §2.2：增量只出现在 stale_read_planning（@STALE_NOW）这一格。
+GAIN_FIELD = "stale_read_planning"
+
+# v2 §2.1：CHAR_NOW 下无一场景 token 为 stale，这一格必须零变化。
+FRESH_FIELD = "decision_point_2_3_planning"
 
 EXPECTED_GAIN = {
     "all_sourced": _STALE_BLOCKERS,
@@ -45,8 +54,9 @@ EXPECTED_GAIN = {
     "railway_estimated": _STALE_BLOCKERS,
 }
 
-# §1 表：四个场景零变化，_is_usable 或确认否定分支挡在前面。它们是阴性对照
-# ——这四个若也动了，说明改的位置不对。
+# v2 §2.3：四个场景两格皆零变化。railway_confirmed_absent 最有价值——它
+# @STALE_NOW 的 token 确实是 sourced_stale，却不该产 stale blocker，因为确认否定
+# 分支先 return。只按 token 判而漏了分支顺序的改法会在这里露馅。
 EXPECTED_UNCHANGED = frozenset(
     {
         "railway_unknown",
@@ -56,11 +66,12 @@ EXPECTED_UNCHANGED = frozenset(
     }
 )
 
-# §1.1 的删除线三行：已由 timing_status 退役（1eda5ea）提前完成。它们**再次
+# v2 §2.4 的回滚哨兵三行：已由 timing_status 退役（1eda5ea）提前完成。它们**再次
 # 出现**即意味着退役被回滚。
 ROLLBACK_SENTINELS = ("schedule_status", "fare.status", "timing_status")
 
-# §2 高危项：这三项若翻，是分类错误不是翻面正确。
+# v2 §3：完整 run 走 CHAR_NOW，证据新鲜，这三项预期零变化。翻了是改造把新鲜
+# 证据也拦了——纯粹的改造错误。
 CRITICAL_SCENARIO = "full_run_until_plan_installed"
 CRITICAL_FIELDS = ("run_status", "plan_version_written", "plans_directory_count")
 
@@ -93,14 +104,22 @@ def check() -> list[str]:
             mismatches.append(
                 f"[范围外场景] {scenario} 不在预期表里，实际有 {len(lines)} 条"
             )
+        for line in lines:
+            if FRESH_FIELD in line:
+                mismatches.append(
+                    f"[新鲜格被触动] {line.strip()[:70]}"
+                    " —— CHAR_NOW 下无 stale token，A 组不该在新鲜证据上产 blocker"
+                )
 
     # 方向二：预期 -> 实际。少掉的是没改到。
     for scenario, blockers in sorted(EXPECTED_GAIN.items()):
-        body = "\n".join(touched.get(scenario, ()))
+        body = "\n".join(
+            line for line in touched.get(scenario, ()) if GAIN_FIELD in line
+        )
         for blocker in blockers:
             if blocker not in body:
                 mismatches.append(
-                    f"[预期未兑现] {scenario} 应新增 {blocker}，实际未出现"
+                    f"[预期未兑现] {scenario}.{GAIN_FIELD} 应新增 {blocker}，实际未出现"
                 )
 
     # 回滚探测器：§1.1 那三行不该再冒出来。
