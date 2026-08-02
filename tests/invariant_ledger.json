@@ -26,7 +26,7 @@
       "blocked_on": null
     }
   ],
-  "current_phase": "P4a",
+  "current_phase": "P4b",
   "phase_order": [
     "P0",
     "P1",
@@ -42,9 +42,9 @@
   "exemptions": [
     {
       "invariant": "I6",
-      "scope": "6 个写入侧模块仍在产出展示态字面量（P4-a 截肢后 dynamic_discovery 保留、离线管线已删）。清零动作见 persistence-v2.md §11.3，属 P4-b。",
-      "reason": "这些字面量不是读取层的并行 token 实现，而是被烘进落盘内容的持久化展示态。删除它们会改变 run.json / plan-version.json / evidence-cache 的字节内容，违反 P3a「不碰持久化」的硬边界。清理属于 P4（I1 的范围）。读取层没有豁免——trip_read_model 的 36 处已在本阶段清零。",
-      "expires_at_phase": "P4b",
+      "scope": "6 个写入侧模块仍在产出 token 字面量。P4-b2 结束时另测得写入侧展示态字段产出 35 处（口径不同：本条只管 token 字面量）。清零动作属 P4-b3，见 persistence-v2.md §11.3。",
+      "reason": "P4-b2 的范围是读取侧：消费点迁到 facts、判定点改读取时 token。写入侧清零会改变 run.json / plan-version.json 的字节内容，属 P4-b3。本阶段已提前吃掉两块——timing_status 退役（1eda5ea）移除了整套第四词表的生产点，local_transit_outcome 改名（636fa91）把 4 处误判为展示态的采集元数据移出范围。延期至 P4c，即 P4-b3 完成后必须清零。",
+      "expires_at_phase": "P4c",
       "tracked_in": "docs/contracts/invariants.md",
       "paths": [
         "src/trip_decider/agent_actions.py",

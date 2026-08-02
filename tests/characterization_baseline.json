@@ -53,7 +53,9 @@
       "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
-        "HOTEL_DETAIL_PENDING"
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -118,7 +120,9 @@
       "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
-        "HOTEL_DETAIL_PENDING"
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -297,7 +301,9 @@
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
         "LOCAL_TRANSIT_EVIDENCE_MISSING",
-        "MAP_CONFLICTING"
+        "MAP_CONFLICTING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -363,7 +369,9 @@
       "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
-        "HOTEL_DETAIL_PENDING"
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -433,7 +441,9 @@
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
         "LOCAL_TRANSIT_EVIDENCE_MISSING",
-        "MAP_MISSING"
+        "MAP_MISSING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -658,7 +668,9 @@
       "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
-        "HOTEL_DETAIL_PENDING"
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE"
       ],
       "destination_resolved": true,
       "displayable": false,
@@ -805,6 +817,8 @@
       "blockers": [
         "ATTRACTION_EVIDENCE_MISSING",
         "HOTEL_SELECTION_MISSING",
+        "RAILWAY_AVAILABILITY_UNKNOWN",
+        "RAILWAY_SNAPSHOT_STALE",
         "WEB_MISSING"
       ],
       "destination_resolved": true,

@@ -1,0 +1,64 @@
+{
+  "_meta": {
+    "fixture_retrieved_at": "FRESH_AT = 2026-08-02T18:00:00+08:00",
+    "produced_by": "P4-b2 翻面（preview v2）",
+    "purpose": "P4-c 安装闸门读时重算的第一个真实输入样例",
+    "read_clock": "CHAR_NOW = 2026-08-02T11:00:00+00:00",
+    "source": "tests/invariant_support.drive_offline_run"
+  },
+  "conditional_blockers": [
+    {
+      "blocker_id": "RAILWAY_SNAPSHOT_STALE",
+      "domain": "railway",
+      "reason": null,
+      "severity": "conditional",
+      "suggested_actions": [
+        "重新查询铁路",
+        "手动填写车次"
+      ]
+    },
+    {
+      "blocker_id": "RAILWAY_AVAILABILITY_UNKNOWN",
+      "domain": "railway",
+      "reason": null,
+      "severity": "conditional",
+      "suggested_actions": [
+        "重新查询铁路",
+        "手动填写车次"
+      ]
+    },
+    {
+      "blocker_id": "HOTEL_DETAIL_PENDING",
+      "domain": "web",
+      "reason": "具体酒店未选择，当前使用住宿片区或交通枢纽；首末段交通待酒店确定后细化",
+      "severity": "advisory",
+      "suggested_actions": [
+        "搜索景点、开放时间或住宿片区",
+        "用户补充住宿基地"
+      ]
+    }
+  ],
+  "display_requirements": {
+    "accommodation_base": true,
+    "attraction": true,
+    "attraction_transit_coverage": true,
+    "cross_city_transport": true,
+    "destination_resolved": true,
+    "hard_constraints_clear": true,
+    "local_transit": true,
+    "outbound_transport": true,
+    "return_transport": true
+  },
+  "hard_blockers": [],
+  "install_gate_input": {
+    "action_loop_status": "READY",
+    "installable_states": [
+      "PARTIAL_READY",
+      "PLAN_READY"
+    ],
+    "installed": true,
+    "planning_state": "PARTIAL_READY"
+  },
+  "missing_requirements": [],
+  "plan_version_written": true
+}
