@@ -476,41 +476,51 @@ def split_fact_id(value: str) -> tuple[str, str]:
 # ``snapshot`` / ``freshness`` / ``refresh_failure`` 记录「怎么取到的」；
 # ``*_status`` / ``display`` 是展示态（P4-b3 的删除对象）。
 # 剪掉整棵子树的键：它们自上而下都是取证元数据。
-_NON_FACT_KEYS = frozenset(
+# 采集元数据登记表（persistence-v2.md §1.4.1）。**一个符号，三处使用**：
+# 剪枝（_is_non_fact_path）、保留（collection_metadata）、声呐（SonarValue）。
+#
+# 值为 None：整棵子树都是元数据。
+# 值为一组叶子名：该键是**重载键**——它本身装着事实（``snapshot`` 下面是车次
+# 本体），只有列出的叶子是元数据。
+#
+# 合并成一份是刻意的。分成两个符号时，「剪掉了但没保留」与「保留了但没放行」
+# 在语法上都成立，而这两个错各犯过一次：collection_metadata 漏了重载键让元
+# 数据凭空消失，SonarValue 漏了同一批键报出 8 条假阳性。
+_NON_FACT_PATHS: Mapping[str, frozenset[str] | None] = MappingProxyType(
     {
-        "freshness",
-        "refresh_failure",
-        "local_transit_refresh_failure",
+        "freshness": None,
+        "refresh_failure": None,
+        "local_transit_refresh_failure": None,
         # 采集结果（AVAILABLE / PARTIAL / FAILED），与 refresh_failure 同族：
-        # 是取证元数据，可以持久化，但不是关于世界的事实。按名字列在这里，
+        # 是取证元数据，可以持久化，但不是关于世界的事实。按名字登记，
         # 不靠 _status 后缀——后缀是按拼写认的，这个字段正是被它误伤过。
-        "local_transit_outcome",
+        "local_transit_outcome": None,
+        # 采集请求的签名：记录这次向服务商问了哪些点，与 outcome 同族。
+        "local_transit_input_signature": None,
         # 采集器写在 value 顶层的 item 级 support（P4-b3 甲类改名后的形态）。
-        # 它是关于这条证据的元数据，不是关于世界的事实。
-        "support",
-        "source",
-        "sources",
-        "retrieved_at",
-        "domain",
-        "network_attempts",
-        "conditions",
-        "display",
-        "availability_semantics",
+        "support": None,
+        "source": None,
+        "sources": None,
+        "retrieved_at": None,
+        "domain": None,
+        "network_attempts": None,
+        "conditions": None,
+        "display": None,
+        "availability_semantics": None,
+        # 重载键：装着车次本体，只有这几片叶子是元数据。
+        "snapshot": frozenset({"status", "retrieved_at", "source", "provider"}),
     }
 )
 
-# 写入端用这个字面量表示「该字段本身不可知」——``_stale_projection`` 把余票
-# 抹成它（persistence-v2.md §3.1 的唯一有损项）。推导成 support=unknown 正是
-# 字段级 support 存在的理由：item 级表达不了「时刻可靠、余票未知」。
-_UNKNOWABLE_SENTINEL = "UNKNOWN"
-
-
-# 重载的键：多数域里 ``snapshot`` 装 ``{status, retrieved_at}`` 这样的采集
-# 元数据，铁路域里它装的是去返程车次本体。因此不能整棵剪——只剪它下面已知
-# 的元数据叶子，其余是事实。非事实性是叶子的属性，不是子树的属性。
-_NON_FACT_LEAVES_UNDER = MappingProxyType(
-    {"snapshot": frozenset({"status", "retrieved_at", "source", "provider"})}
+_NON_FACT_KEYS = frozenset(
+    key for key, leaves in _NON_FACT_PATHS.items() if leaves is None
 )
+_NON_FACT_LEAVES_UNDER = MappingProxyType(
+    {key: leaves for key, leaves in _NON_FACT_PATHS.items() if leaves is not None}
+)
+
+# _stale_projection 抹除不可知字段时写的字面量。见 persistence-v2.md §3.1。
+_UNKNOWABLE_SENTINEL = "UNKNOWN"
 
 
 def _is_non_fact_key(key: str) -> bool:
