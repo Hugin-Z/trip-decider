@@ -119,3 +119,101 @@
    在实际 diff 里出现**。双向核对，缺一不可。
 4. 先确认 §2 的三项未翻。
 5. 全部对上后才 `save_baseline`。任何一条对不上，停下来查，不要重刷。
+
+---
+
+# 5. 补录：翻面范围冻结（`_status` 全仓普查后）
+
+> 补录日期：2026-08-02。依据：全仓 `*_status` 普查（34 处读取点）。
+> **本节冻结翻面范围。补录完成后再发现新判定点，属流程失败。**
+
+§1 的表是只按 `planning_input_compiler:323` 一处写的。普查查出同类判定点共 **6 组**，
+分属三个模块。逐组的旧判据、新判据与预期增量如下。
+
+## 5.1 已完成、无需补录
+
+| 项 | 结论 |
+|---|---|
+| `timing_status` 退役 | 已于 `1eda5ea` 完成。表征 **零 diff**——原因见 §6 盲区说明 |
+
+## 5.2 换 token 条件即可覆盖（4 组）
+
+| # | 位置 | 旧判据 | 新判据 | 预期增量 |
+|---|---|---|---|---|
+| A | `planning_input_compiler:304` | `snapshot.status == "STALE"` | `token_freshness == "stale"` | §1 表：7 场景各 +2 blocker |
+| B | `planning_input_compiler:445` | `value.snapshot_status` 盖到事件 | 删除盖写，挂 `fact_refs` | 事件少一字段，**表征看不见**，靠单测守 |
+| C | `agent_actions:1727` / `:1749` | `value["freshness"]["status"] == "STALE"` | `token_freshness == "stale"` | 本地交通可采集性判定，见 §5.4 |
+| D | `trip_read_model:925` | `web_value["hotel_price_status"] == "UNKNOWN"` | **字段级 support**，非 token | `price_filter_status` 的产出条件换源，值域不变 |
+
+### 5.2.1 C 组与 `guided_discovery:357` 同源
+
+`agent_actions:1727` / `:1749` 读的是 `evidence.value["freshness"]["status"]`——与批次 1
+已迁的 `guided_discovery:357` **一字不差**，同一个 I5 违反的第二、第三次出现。
+
+验收可直接复用 `tests/test_guided_discovery_freshness_is_read_time.py` 的三条断言结构：
+同一份落盘、两个 `now`、结论必须不同，外加 `collected_at` 不随 `now` 变的对照组。
+对照组不可省——没有它，"把两个字段都接到 now"能作弊通过。
+
+### 5.2.2 D 组为什么不走 token
+
+房价字段的 support 是 `unknown` 时，它根本走不到 freshness 那一步——token 是给
+"有值、需评估新鲜度"的字段用的。support 轴够用时不要拉 freshness 入伙。
+
+## 5.3 需要裁决：`local_transit_result_status` 可能不是展示态
+
+涉及 `agent_actions:1338` / `:1479` / `:1720` 与 `evidence_broker:343`，共 4 处。
+
+它被 `_is_non_fact_key` 按 `_status` 后缀剪掉，因此走 facts 的消费点读不到它。但它的
+取值域是 **`AVAILABLE` / `PARTIAL` / `FAILED`**——那不是 support 轴、不是 freshness 轴，
+是**采集结果**。按 `evidence-axes.md` §3.4 与 `persistence-v2.md` §1.4，采集元数据
+（`refresh_failure` 那一类）是**可以持久化**的，它不是展示态。
+
+若判定为采集元数据，正确处置不是"换 token 条件"，而是：
+
+1. 从 `_is_non_fact_key` 的 `_status` 后缀规则里豁免它（后缀匹配太粗，误伤了采集元数据）；
+2. 四处消费点保持读取，但改从证据的采集元数据区读，不再从 facts 找；
+3. 更好的做法是改名去掉 `_status` 后缀（例如 `local_transit_collection_outcome`），
+   让机械规则不必开特例——**后缀规则开特例是 M1 的复发路径**。
+
+**这一组在裁决前不动，也不计入 §1 的预期增量。** 若裁决为采集元数据，翻面时它零变化。
+
+## 5.4 高危复核项
+
+C 组改动落在 `_needs_local_transit` / `_can_collect_local_transit`——它们决定要不要再采一次
+本地交通。判据从"落盘说陈旧"换成"读取时算出陈旧"后，**采集次数可能变化**：夹具采集于
+一天前，读取时恒为 stale，可能触发本不该发生的重采。
+
+翻面时必须确认 `network_calls` 与 `run_status` 不变。这两项若动，不是预期变化。
+
+## 5.5 冻结后的翻面清单
+
+| 组 | 处数 | 预期 |
+|---|---|---|
+| A | 1 | 7 场景各 +2 blocker（§1 表） |
+| B | 1 | 事件少一字段，表征零变化 |
+| C | 2 | 见 §5.4，`network_calls` 须不变 |
+| D | 1 | 值域不变，产出条件换源 |
+| §5.3 | 4 | **待裁决**，暂定零变化 |
+
+---
+
+# 6. 盲区说明：三层守卫各管各的
+
+`timing_status` 退役删掉了每个铁路事件的四个字段，**表征 diff 为零**。原因不是没变，是
+表征快照记录的是 `blockers` / `rail_event_count` / `missing_requirements` 这类**判定结果**，
+不逐字段记事件内容。
+
+同一个盲区已经出现三次，三个面：
+
+| 现象 | 例子 |
+|---|---|
+| 值不变、来源变了 | 余票 `"UNKNOWN"` 改由字段级 support 产生，字面量相同 |
+| 字段消失、表征看不见 | `timing_status` 等四字段被删 |
+| 断言靠巧合成立 | 用 `snapshot_status` 当铁路事件筛选器，"恰好对"是因为恰好只有去返程带它 |
+
+三者是同一个主题：**守卫的语义和守卫的机制没对齐**。结论：
+
+> **表征守判定结果，单测守数据形状，不变式守契约性质。三层各管各的，哪层缺位哪层的变化就静默。**
+
+翻面时凡是预期"表征会响"而实际没响的，先问是不是落进了单测或不变式的辖区，不要当成
+"没变"。
