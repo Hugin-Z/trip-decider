@@ -15,7 +15,14 @@ import time
 from typing import Protocol
 from uuid import uuid4
 
-from trip_decider.evidence_core import is_confirmed_absent
+from trip_decider.evidence_core import (
+    FRESHNESS_STALE,
+    SUPPORT_ESTIMATED,
+    SUPPORT_SOURCED,
+    is_confirmed_absent,
+    normalized_retrieved_at,
+    token_freshness,
+)
 from trip_decider.evidence_projection import project_domain
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
 from trip_decider.evidence_broker import (
@@ -353,15 +360,7 @@ def build_guided_comparison(
                     check = _check_from_evidence(evidence, now=read_at)
                     checks[seed_id][domain] = replace(
                         check,
-                        from_cache=(
-                            isinstance(evidence.value, Mapping)
-                            and isinstance(
-                                evidence.value.get("freshness"),
-                                Mapping,
-                            )
-                            and evidence.value["freshness"].get("status")
-                            == "STALE"
-                        ),
+                        from_cache=_is_stale(check.display_status),
                     )
                 except Exception as error:
                     failure = _missing_check(
@@ -507,11 +506,7 @@ def _coarse_option(
 ) -> dict[str, object]:
     rail_check = checks["railway"]
     evidence = rail_check.evidence
-    rail = (
-        dict(evidence.value)
-        if isinstance(evidence.value, Mapping)
-        else {}
-    )
+    rail = _usable_fact_values(evidence)
     duration = _nonnegative_number(
         rail.get("roundtrip_duration_seconds")
     )
@@ -534,7 +529,9 @@ def _coarse_option(
     #   confirmed_absent -> 已核实没有直达车，是一个确定的可行性结论
     #   sourced/estimated -> 可参与判定；estimated 必须携带 conditional（裁决 5）
     #   unknown/conflicting -> 结论未知，原因必须可见（I7）
-    rail_absent = is_confirmed_absent(evidence.value)
+    rail_absent = any(
+        is_confirmed_absent(fact.get("value")) for fact in evidence.facts
+    )
     rail_usable = (
         evidence.status.is_usable
         and not rail_absent
@@ -682,22 +679,46 @@ def _missing_check(
     return replace(check, timed_out=timed_out)
 
 
+_USABLE_SUPPORT = frozenset({SUPPORT_SOURCED, SUPPORT_ESTIMATED})
+
+
+def _is_stale(token: str) -> bool:
+    """陈旧与否由读取时刻决定。
+
+    旧实现读 ``value["freshness"]["status"]``——那是采集时冻结的判断，同一份
+    落盘无论何时读都给同一个答案，正是 I5 要禁的东西。token 出自
+    ``project_domain(now=...)``，换一个 now 就能换一个结论。
+    """
+
+    return token_freshness(token) == FRESHNESS_STALE
+
+
+def _usable_fact_values(evidence: EvidenceItem) -> dict[str, object]:
+    """字段级可用值：support 不可用的字段根本不出现。
+
+    item 级 support 说不出"时刻可靠而余票未知"，字段级说得出
+    （persistence-v2.md §1.3）。
+    """
+
+    return {
+        str(fact["field"]): fact["value"]
+        for fact in evidence.facts
+        if str(fact.get("support")) in _USABLE_SUPPORT
+        and fact.get("value") is not None
+    }
+
+
 def _evidence_collected_at(evidence: EvidenceItem) -> str:
-    value = evidence.value
-    if isinstance(value, Mapping):
-        snapshot = value.get("snapshot")
-        if isinstance(snapshot, Mapping):
-            retrieved_at = snapshot.get("retrieved_at")
-            if isinstance(retrieved_at, str) and retrieved_at:
-                return retrieved_at
-        retrieved_at = value.get("retrieved_at")
-        if isinstance(retrieved_at, str) and retrieved_at:
-            return retrieved_at
-    for source in evidence.sources:
-        retrieved_at = source.get("retrieved_at")
-        if isinstance(retrieved_at, str) and retrieved_at:
-            return retrieved_at
-    return _now_iso()
+    source_stamp = next(
+        (
+            str(source["retrieved_at"])
+            for source in evidence.sources
+            if isinstance(source.get("retrieved_at"), str)
+            and source["retrieved_at"]
+        ),
+        None,
+    )
+    return normalized_retrieved_at(evidence.value, source_stamp) or _now_iso()
 
 
 def _now_iso() -> str:

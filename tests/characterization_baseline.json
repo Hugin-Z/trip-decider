@@ -402,7 +402,7 @@
         "map",
         "web"
       ],
-      "playable_time_seconds": 273600.0,
+      "playable_time_seconds": null,
       "roundtrip_transport_status": "conflicting"
     },
     "decision_point_2_3_planning": {
