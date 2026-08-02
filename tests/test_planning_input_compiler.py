@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -40,6 +42,12 @@ def _intent(destination: str) -> TravelIntent:
             "transport_preferences": ["high_speed_rail"],
         }
     )
+
+
+# 读取时刻钉死在夹具采集时刻之后 1 小时。不钉的话编译器读墙钟，而夹具时间戳
+# 是写死的——两者差值每天在变，同一份夹具隔天会得到不同的 freshness。这与
+# characterization_support.CHAR_NOW 是同一件事。
+READ_AT = datetime(2026, 7, 30, 3, 44, tzinfo=timezone.utc)  # = 11:44+08:00
 
 
 def _railway(status: str = "LIVE") -> EvidenceItem:
@@ -172,7 +180,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 ),
                 built_at="2026-07-30T11:00:00+08:00",
             )
-            compiled = PlanningInputCompiler().compile(context)
+            compiled = PlanningInputCompiler().compile(context, now=READ_AT)
             event_types = {
                 event["type"]
                 for day in compiled["days"]
@@ -242,7 +250,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ),
             built_at="2026-07-30T11:00:00+08:00",
         )
-        compiled = PlanningInputCompiler().compile(context)
+        compiled = PlanningInputCompiler().compile(context, now=READ_AT)
         self.assertEqual(
             compiled["status"],
             "PARTIAL_PLAN_WITH_BLOCKERS",
@@ -396,7 +404,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ),
             built_at="2026-07-30T11:00:00+08:00",
         )
-        compiled = PlanningInputCompiler().compile(context)
+        compiled = PlanningInputCompiler().compile(context, now=READ_AT)
         self.assertFalse(compiled["displayable"])
         self.assertEqual(
             compiled["display_requirements"],
@@ -540,6 +548,10 @@ class PlanningInputCompilerTests(unittest.TestCase):
     def test_runtime_restart_restores_session_evidence_and_plan_version(
         self,
     ) -> None:
+        # 这条走真实动作循环，读取时刻来自 agent_actions._READ_CLOCK（产品
+        # 默认墙钟）。钉住它，理由同 READ_AT。
+        agent_actions.set_read_clock(lambda: READ_AT)
+        self.addCleanup(agent_actions.reset_read_clock)
         with TemporaryDirectory() as temporary:
             runtime_root = Path(temporary) / "sessions"
             store = InMemoryAgentStore(runtime_root)

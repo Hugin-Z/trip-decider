@@ -6,8 +6,18 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 
-from trip_decider.evidence_core import is_confirmed_absent
-from trip_decider.evidence_projection import item_facts, usable_fact_values
+from trip_decider.evidence_core import (
+    FRESHNESS_STALE,
+    SUPPORT_UNKNOWN,
+    is_confirmed_absent,
+    token_freshness,
+    token_support,
+)
+from trip_decider.evidence_projection import (
+    item_facts,
+    project_domain,
+    usable_fact_values,
+)
 from trip_decider.itinerary_planner import (
     make_attraction_event,
     make_duration_event,
@@ -316,12 +326,14 @@ def _compile_railway(
             )
         )
         return
-    snapshot = value.get("snapshot")
-    if not isinstance(snapshot, Mapping):
+    # 时刻可靠性由读取时刻判定，不再读落盘的 snapshot.status——那是采集时
+    # 冻结的判断，同一份字节无论何时读都给同一个答案（I5）。
+    # 本判定排在确认否定分支**之后**：已核实无直达车是确定结论，与新鲜度无关。
+    token = project_domain({"railway": evidence}, "railway", now=now).token
+    if token_support(token) == SUPPORT_UNKNOWN:
         blockers.append(_blocker("RAILWAY_SNAPSHOT_UNKNOWN", "railway"))
         return
-    snapshot_status = snapshot.get("status")
-    if snapshot_status == "STALE":
+    if token_freshness(token) == FRESHNESS_STALE:
         blockers.extend(
             (
                 _blocker("RAILWAY_SNAPSHOT_STALE", "railway"),
@@ -332,11 +344,12 @@ def _compile_railway(
             )
         )
     evidence_id = str(evidence.get("evidence_id"))
+    usable = usable_fact_values(item_facts(evidence))
     for direction, prefix in (
         ("outbound", "去程"),
         ("return", "返程"),
     ):
-        train = value.get(direction)
+        train = usable.get(direction)
         if not isinstance(train, Mapping):
             blockers.append(
                 _blocker(
@@ -357,10 +370,10 @@ def _compile_railway(
                 )
             ],
         )
-        event["second_class_availability"] = (
-            "UNKNOWN"
-            if snapshot_status in {"STALE", "UNKNOWN"}
-            else train.get("second_class_availability", "UNKNOWN")
+        # 无需新条件：support 不可用的字段根本不在 usable 里，默认值即兜底
+        # （v1 §0.2 对照表第三行）。
+        event["second_class_availability"] = train.get(
+            "second_class_availability", "UNKNOWN"
         )
         event["evidence_dependencies"] = [evidence_id]
         event["location"] = {
@@ -439,11 +452,13 @@ def _compile_local_transit(
                 ),
                 "evidence_dependencies": [evidence_id],
                 "reference_only": True,
-                "schedule_status": (
-                    evidence.get("value", {}).get("snapshot_status")
-                    if isinstance(evidence.get("value"), Mapping)
-                    else None
-                ),
+                "fact_refs": [
+                    str(fact["fact_id"])
+                    for fact in item_facts(evidence)
+                    if str(fact.get("field", "")).startswith(
+                        f"local_transit[{index - 1}]."
+                    )
+                ],
             },
         )
         events_by_type["transit"].append(event)

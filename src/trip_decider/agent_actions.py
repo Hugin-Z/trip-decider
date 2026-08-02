@@ -26,7 +26,11 @@ from trip_decider.destination_runtime import (
     collect_railway_evidence,
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
-from trip_decider.evidence_projection import usable_fact_values
+from trip_decider.evidence_core import FRESHNESS_STALE, token_freshness
+from trip_decider.evidence_projection import (
+    project_domain,
+    usable_fact_values,
+)
 from trip_decider.evidence_broker import (
     default_evidence_broker,
     EvidenceBroker,
@@ -1717,6 +1721,20 @@ def _web_action(intent: TravelIntent) -> dict[str, object]:
     }
 
 
+def _read_token(evidence: EvidenceItem) -> str:
+    """该域在**读取时刻**的 token。
+
+    取代 ``value["freshness"]["status"]``——那是采集时冻结的判断，同一份落盘
+    无论何时读都给同一个答案（I5）。读取时刻走 ``_READ_CLOCK``，产品默认墙钟。
+    """
+
+    return project_domain(
+        {evidence.domain: evidence.to_dict()},
+        evidence.domain,
+        now=_READ_CLOCK(),
+    ).token
+
+
 def _needs_local_transit(state: _LoopState) -> bool:
     evidence = state.evidence.get("map")
     if (
@@ -1745,11 +1763,7 @@ def _needs_local_transit(state: _LoopState) -> bool:
             # The exact route request already consumed its automatic retry.
             # Keep the failure explicit and let Planner return a partial plan;
             # only an explicit user re-query may run the same parameters again.
-            freshness = evidence.value.get("freshness")
-            if not (
-                isinstance(freshness, Mapping)
-                and freshness.get("status") == "STALE"
-            ):
+            if token_freshness(_read_token(evidence)) != FRESHNESS_STALE:
                 return False
     return not isinstance(routes, list) or not routes
 
@@ -1767,11 +1781,7 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
         return False
     base, attractions = route_inputs
     expected_signature = [base, *attractions]
-    freshness = map_item.value.get("freshness")
-    stale = (
-        isinstance(freshness, Mapping)
-        and freshness.get("status") == "STALE"
-    )
+    stale = token_freshness(_read_token(map_item)) == FRESHNESS_STALE
     if (
         "local_transit_outcome" in map_item.value
         and map_item.value.get("local_transit_input_signature")

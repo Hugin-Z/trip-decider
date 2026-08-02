@@ -17,6 +17,29 @@ from trip_decider.evidence_projection import (
 )
 from trip_decider.travel_agent import RunStatus, TaskMode
 
+
+def _has_usable_hotel_price(usable: Mapping[str, object]) -> bool:
+    """可用值里还剩得下房价字段即为真。
+
+    入参已经过 ``usable_fact_values`` 过滤——support 不可用的字段根本不在
+    里面。旧实现读落盘的 ``hotel_price_status``，那是写入侧对同一件事的判断
+    的复制品；字段级 support 直接回答它，不必拉 freshness 入伙（support 为
+    unknown 的字段走不到 freshness 那一步）。
+    """
+
+    candidates = usable.get("hotel_candidates")
+    if not isinstance(candidates, list):
+        return False
+    return any(
+        isinstance(candidate, Mapping)
+        and any(
+            "price" in str(key).lower() and value is not None
+            for key, value in candidate.items()
+        )
+        for candidate in candidates
+    )
+
+
 def _planning_draft_read_model(
     run: Mapping[str, object],
 ) -> dict[str, object] | None:
@@ -920,10 +943,13 @@ def _presentation_contract(
                 if isinstance(intent_value, Mapping)
                 else None
             ),
+            # 走 support 轴不走 token：房价字段 support 为 unknown 时它根本
+            # 到不了 freshness 那一步，拉 freshness 入伙只会多一层无谓判定
+            # （p4b-baseline-flip-preview-v2 沿用 v1 §5.2.2）。
             "price_filter_status": (
-                "UNAVAILABLE_NO_PRICE_SOURCE"
-                if web_value.get("hotel_price_status") == "UNKNOWN"
-                else "AVAILABLE"
+                "AVAILABLE"
+                if _has_usable_hotel_price(web_value)
+                else "UNAVAILABLE_NO_PRICE_SOURCE"
             ),
             "current_base": deepcopy(web_value.get("hotel_area")),
             "candidates": deepcopy(
