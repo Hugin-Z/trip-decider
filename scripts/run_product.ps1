@@ -10,6 +10,10 @@ $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $sourceRoot = Join-Path $repoRoot 'src'
 $productModule = Join-Path $sourceRoot 'trip_decider\product_web.py'
 $bindAddress = '127.0.0.1'
+
+# runtime 根目录必须显式声明。默认工厂回落到 cwd，从不同目录启动会用到不同
+# 的 runtime——脚本入口不能把这件事交给运气（persistence-v2.md 裁决 13.2）。
+$env:TRIP_DECIDER_RUNTIME_ROOT = Join-Path $repoRoot 'runtime\sessions'
 $port = 8765
 $productUrl = "http://${bindAddress}:${port}/"
 

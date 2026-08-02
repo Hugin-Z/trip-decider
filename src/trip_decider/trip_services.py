@@ -12,14 +12,14 @@ from pathlib import Path
 
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.trip_application import (
-    DEFAULT_TRIP_APPLICATION_SERVICE,
+    default_trip_application_service,
     ComparisonBuilder,
     EvidenceCollector,
     RevisionExecutor,
     TripApplicationService,
 )
 from trip_decider.trip_query import (
-    DEFAULT_TRIP_QUERY_SERVICE,
+    default_trip_query_service,
     TripQueryService,
 )
 from trip_decider.travel_agent import InMemoryAgentStore
@@ -41,10 +41,20 @@ class TripServices:
             raise ValueError("trip services must share one authoritative store")
 
 
-DEFAULT_TRIP_SERVICES = TripServices(
-    application=DEFAULT_TRIP_APPLICATION_SERVICE,
-    query=DEFAULT_TRIP_QUERY_SERVICE,
-)
+_DEFAULT_SERVICES: TripServices | None = None
+
+
+def default_trip_services() -> TripServices:
+    """进程级默认服务组合，首次调用时才构造（invariants.md I11）。"""
+
+    global _DEFAULT_SERVICES
+    if _DEFAULT_SERVICES is None:
+        application = default_trip_application_service()
+        _DEFAULT_SERVICES = TripServices(
+            application=application,
+            query=default_trip_query_service(),
+        )
+    return _DEFAULT_SERVICES
 
 
 def build_trip_services(
@@ -88,7 +98,7 @@ def build_trip_services(
 
 
 __all__ = [
-    "DEFAULT_TRIP_SERVICES",
+    "default_trip_services()",
     "TripServices",
     "build_trip_services",
 ]

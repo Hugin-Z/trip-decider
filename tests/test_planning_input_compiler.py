@@ -502,7 +502,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             with patch.object(
                 product_web,
-                "DEFAULT_AGENT_STORE",
+                "_CONFIGURED_STORE",
                 store,
             ), patch.object(
                 product_web,
@@ -599,7 +599,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 self.assertTrue((run_directory / relative).is_file())
             with patch.object(
                 product_web,
-                "DEFAULT_AGENT_STORE",
+                "_CONFIGURED_STORE",
                 restored,
             ):
                 installed = product_web._current_plan_response(run.run_id)

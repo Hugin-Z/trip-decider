@@ -20,12 +20,12 @@ from trip_decider.agent_actions import (
     start_action_loop,
 )
 from trip_decider.trip_application import (
-    DEFAULT_TRIP_APPLICATION_SERVICE,
+    default_trip_application_service,
     TripApplicationError,
     TripApplicationService,
 )
 from trip_decider.trip_query import (
-    DEFAULT_TRIP_QUERY_SERVICE,
+    default_trip_query_service,
     TripQueryError,
     TripQueryService,
 )
@@ -45,7 +45,7 @@ from trip_decider.trip_read_model import (
 )
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
-    DEFAULT_AGENT_STORE,
+    default_agent_store,
     TaskMode,
     TravelIntent,
     TravelAgentError,
@@ -67,6 +67,33 @@ class ProductRequestError(ValueError):
     """Raised for malformed local product API input."""
 
 
+# 由 configure_services 注入的 store。为 None 时回落到进程级默认工厂。
+_CONFIGURED_STORE = None
+_CONFIGURED_APPLICATION = None
+_CONFIGURED_QUERY = None
+
+
+def reset_configured_services() -> None:
+    """清除 configure_services 注入的服务，回落到进程级默认工厂。
+
+    测试隔离用。此前测试的做法是伸手取模块全局再塞回去，那依赖于全局在
+    import 时就已构造——惰性化之后不成立了。
+    """
+
+    global _CONFIGURED_STORE
+    global _CONFIGURED_APPLICATION
+    global _CONFIGURED_QUERY
+    _CONFIGURED_STORE = None
+    _CONFIGURED_APPLICATION = None
+    _CONFIGURED_QUERY = None
+
+
+def _active_store():
+    """当前生效的 store：优先注入的，其次进程级默认（惰性构造）。"""
+
+    return _CONFIGURED_STORE if _CONFIGURED_STORE is not None else default_agent_store()
+
+
 def configure_services(
     application: TripApplicationService,
     query: TripQueryService,
@@ -83,33 +110,35 @@ def configure_services(
         )
     if query.store is not application.store:
         raise ValueError("Web command and query services must share one store")
-    global DEFAULT_AGENT_STORE
-    global DEFAULT_TRIP_APPLICATION_SERVICE
-    global DEFAULT_TRIP_QUERY_SERVICE
-    DEFAULT_AGENT_STORE = application.store
-    DEFAULT_TRIP_APPLICATION_SERVICE = application
-    DEFAULT_TRIP_QUERY_SERVICE = query
+    global _CONFIGURED_STORE
+    global _CONFIGURED_APPLICATION
+    global _CONFIGURED_QUERY
+    _CONFIGURED_STORE = application.store
+    _CONFIGURED_APPLICATION = application
+    _CONFIGURED_QUERY = query
 
 
 def _application_service() -> TripApplicationService:
     """Return the one application service over the active authoritative store."""
 
-    if DEFAULT_TRIP_APPLICATION_SERVICE.store is DEFAULT_AGENT_STORE:
-        return DEFAULT_TRIP_APPLICATION_SERVICE
-    return TripApplicationService(store=DEFAULT_AGENT_STORE)
+    configured = _CONFIGURED_APPLICATION or default_trip_application_service()
+    if configured.store is _active_store():
+        return configured
+    return TripApplicationService(store=_active_store())
 
 
 def _query_service() -> TripQueryService:
     """Return the query facade over the same authoritative runtime."""
 
     application = _application_service()
+    configured = _CONFIGURED_QUERY or default_trip_query_service()
     if (
-        DEFAULT_TRIP_QUERY_SERVICE.store is DEFAULT_AGENT_STORE
-        and DEFAULT_TRIP_QUERY_SERVICE.application_service is application
+        configured.store is _active_store()
+        and configured.application_service is application
     ):
-        return DEFAULT_TRIP_QUERY_SERVICE
+        return configured
     return TripQueryService(
-        store=DEFAULT_AGENT_STORE,
+        store=_active_store(),
         application_service=application,
     )
 

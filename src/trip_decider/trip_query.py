@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import json
 
 from trip_decider.trip_application import (
-    DEFAULT_TRIP_APPLICATION_SERVICE,
+    default_trip_application_service,
     TripApplicationService,
 )
 from trip_decider.trip_read_model import (
@@ -22,7 +22,7 @@ from trip_decider.trip_read_model import (
     _presentation_contract,
 )
 from trip_decider.travel_agent import (
-    DEFAULT_AGENT_STORE,
+    default_agent_store,
     InMemoryAgentStore,
     RunStatus,
     TaskMode,
@@ -43,12 +43,15 @@ class TripQueryService:
     def __init__(
         self,
         *,
-        store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
-        application_service: TripApplicationService = (
-            DEFAULT_TRIP_APPLICATION_SERVICE
-        ),
+        store: InMemoryAgentStore | None = None,
+        application_service: TripApplicationService | None = None,
         clock: Clock | None = None,
     ) -> None:
+        store = store if store is not None else default_agent_store()
+        if application_service is None:
+            application_service = default_trip_application_service()
+        if store is None:
+            store = application_service.store
         if application_service.store is not store:
             raise ValueError(
                 "query and application services must share one run store"
@@ -336,7 +339,23 @@ class TripQueryService:
         return deepcopy(dict(value))
 
 
-DEFAULT_TRIP_QUERY_SERVICE = TripQueryService()
+_DEFAULT_QUERY: TripQueryService | None = None
+
+
+def default_trip_query_service() -> TripQueryService:
+    """进程级默认查询服务，首次调用时才构造（invariants.md I11）。"""
+
+    global _DEFAULT_QUERY
+    if _DEFAULT_QUERY is None:
+        _DEFAULT_QUERY = TripQueryService()
+    return _DEFAULT_QUERY
+
+
+def reset_default_trip_query_service() -> None:
+    """丢弃已构造的默认查询服务。仅供测试隔离使用。"""
+
+    global _DEFAULT_QUERY
+    _DEFAULT_QUERY = None
 
 
 __all__ = [

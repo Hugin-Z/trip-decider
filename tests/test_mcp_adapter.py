@@ -231,7 +231,7 @@ class TripMCPAdapterTests(unittest.TestCase):
         source = inspect.getsource(mcp_adapter)
         for forbidden in (
             "InMemoryAgentStore",
-            "DEFAULT_AGENT_STORE",
+            "_CONFIGURED_STORE",
             "product_web",
             "urllib",
             "trip_read_model",
@@ -279,10 +279,6 @@ class TripMCPAdapterTests(unittest.TestCase):
     async def _lifecycle(self) -> None:
         with TemporaryDirectory() as temporary:
             sessions_root = Path(temporary) / "sessions"
-            old_services = (
-                product_web.DEFAULT_TRIP_APPLICATION_SERVICE,
-                product_web.DEFAULT_TRIP_QUERY_SERVICE,
-            )
             application, query = _services(sessions_root)
             product_web.configure_services(application, query)
             web_server = product_web.make_server("127.0.0.1", 0)
@@ -583,7 +579,7 @@ class TripMCPAdapterTests(unittest.TestCase):
                 restored_web.shutdown()
                 restored_web.server_close()
                 restored_thread.join(timeout=5)
-                product_web.configure_services(*old_services)
+                product_web.reset_configured_services()
 
 
 if __name__ == "__main__":

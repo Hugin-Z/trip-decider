@@ -19,7 +19,7 @@ from trip_decider.evidence_core import is_confirmed_absent
 from trip_decider.evidence_projection import project_domain
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
 from trip_decider.evidence_broker import (
-    DEFAULT_EVIDENCE_BROKER,
+    default_evidence_broker,
     EvidenceBroker,
     evidence_collected_at,
     query_for_intent_domain,
@@ -109,7 +109,7 @@ def build_guided_comparison(
     web_collector: EvidenceCollector | None = None,
     timeouts: Mapping[str, float] | None = None,
     run_id: str | None = None,
-    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
+    evidence_broker: EvidenceBroker | None = None,
     initial_evidence: Mapping[
         str,
         Mapping[str, EvidenceItem],
@@ -121,6 +121,8 @@ def build_guided_comparison(
 ) -> dict[str, object]:
     """Check regional options concurrently and stream each completed card."""
     read_at = (clock or (lambda: datetime.now(timezone.utc)))()
+    if evidence_broker is None:
+        evidence_broker = default_evidence_broker()
 
     active_run_id = run_id or f"ephemeral-guided-{uuid4()}"
     seeds = guided_region_seeds(intent, limit=3)

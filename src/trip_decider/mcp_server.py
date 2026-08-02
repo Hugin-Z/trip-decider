@@ -23,7 +23,7 @@ from trip_decider.mcp_app import (
     load_trip_mcp_app_html,
 )
 from trip_decider.trip_services import (
-    DEFAULT_TRIP_SERVICES,
+    default_trip_services,
     TripServices,
     build_trip_services,
 )
@@ -297,7 +297,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _services_for(arguments: argparse.Namespace) -> TripServices:
     if arguments.runtime_root is None:
-        return DEFAULT_TRIP_SERVICES
+        return default_trip_services()
     return build_trip_services(arguments.runtime_root)
 
 

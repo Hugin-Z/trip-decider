@@ -369,6 +369,78 @@ freshness 无法对未登记的 data_type 计算，静默默认会让新数据�
 
 ---
 
+## I10 持久化证据的 item 级 `status` 必须等于其 facts 聚合
+
+### 增列理由
+
+`persistence-v2.md` §1.3 把 support 从 item 级改为字段级，但保留 item 级
+`status` 作为派生的便捷字段——29 处闸门刚在 P3b 统一到 `EvidenceStatus.is_usable`，
+直接删掉会把它们全部推倒重来。保留一个派生字段就必须守它不漂移。
+
+### 陈述
+
+任何持久化证据对象的 item 级 `status`，必须等于其 `facts[]` 按
+`evidence-axes.md` §2.4 聚合规则算出的结果。
+
+### 判定方法
+
+扫描一个已完成 run 目录下全部证据对象，逐条用 `facts[]` 重算聚合并与 `status`
+比较。不等即失败。
+
+**实现约束（裁决 13.3）**：重算**必须调用内核的 `aggregate_support`**，不许写入侧
+自己实现一份聚合——否则这条不变式守的就不是「不漂移」，而是「两份实现恰好一致」。
+
+写入侧 import 内核算 support **不违反 I6**：I6 管的是 token，support 聚合不是 token。
+
+### 当前状态：未生效
+
+字段级 facts 形状属 P4-b，本批只收录文档。
+
+### 对应测试文件
+
+`tests/test_invariant_i10_item_status_matches_facts.py`（随 P4-b 落地）
+
+### 债务编号
+
+P3a 问题 4（域级粒度掩盖字段级差异）。
+
+---
+
+## I11 import 不得产生磁盘副作用
+
+### 增列理由
+
+基线报告 M8：`travel_agent.py` 在模块尾部构造 `DEFAULT_AGENT_STORE`，于是任何
+`import trip_decider.travel_agent` 都会 `mkdir` 加全量读盘。本次核对自己就撞到过
+这个副作用（接手基线报告 §0 记录了它在只读摸底期间新建了一个 session 目录）。
+
+### 陈述
+
+`import trip_decider.<任一模块>` 不得创建或读取 `runtime/` 下任何路径。
+
+### 判定方法
+
+子进程中 patch `Path.mkdir` / `Path.open` / `Path.read_text` 记录被触碰的路径，
+逐个 import 全部产品模块，断言没有任何 `runtime/` 路径被触碰。
+
+用子进程而不是同进程：同进程里模块可能已被别的测试导入过，副作用发生在
+patch 之前就看不见了。
+
+### 当前状态：成立（P4-a 转绿）
+
+默认 store / broker / 应用服务 / 查询服务 / 服务组合全部改为显式工厂
+（`default_agent_store` 等），首次调用时才构造。
+
+### 对应测试文件
+
+`tests/test_invariant_i11_import_has_no_disk_side_effect.py`
+
+### 债务编号
+
+M8（模块级 I/O 副作用与脆弱的路径假设）。
+
+---
+
 ## 附：不变式与阶段闸门的对应
 
 | 不变式 | 预期转绿阶段 | 依据 |
@@ -377,7 +449,8 @@ freshness 无法对未登记的 data_type 计算，静默默认会让新数据�
 | I2、I3a（内核范围） | P2 | 证据内核建成后在内核范围内即可成立 |
 | I5、I6、I3b、I2 / I3a（读取层范围） | P3a | I6 需扫描整个 `src/`，P2 阶段旧的并行实现仍在，不可能绿；I5 需读真实 run 目录并跨两个读取时刻，超出纯函数内核范围。二者均待读取层接管后成立。I2 在 P3a 允许有豁免项（3 处高德时长），见 `PLAN.md` v4 §12 的 P3a 闸门 3 |
 | I7、I2（无豁免） | P3b | 需要 29 处 `sourced` 硬闸门四态化，重分类才能生效 |
-| I1 | P4 | 需要落盘契约变更 |
+| I11 | P4-a | 默认实例改惰性工厂，不依赖落盘契约变更 |
+| I1、I10 | P4-b/c | 需要落盘契约变更（字段级 facts + 删展示态） |
 | I4、I9 | P5 | I4 需要 `hotel_price` 生产者落地；I9 需要候选生成脱离硬编码目的地 |
 
 **2026-08-02 修订（A1）**：原表把 I5、I6 列为「P2 → P3」，与 `PLAN.md` v4 §12 的 P2 闸门第 3 条一并修正——P2 只转绿 I2 与 I3a，且只在内核范围。

@@ -26,7 +26,7 @@ from trip_decider.destination_runtime import (
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.evidence_broker import (
-    DEFAULT_EVIDENCE_BROKER,
+    default_evidence_broker,
     EvidenceBroker,
     evidence_collected_at,
     query_for_intent_domain,
@@ -44,7 +44,7 @@ from trip_decider.simple_live import (
     estimate_live_public_transport_segments,
 )
 from trip_decider.travel_agent import (
-    DEFAULT_AGENT_STORE,
+    default_agent_store,
     EvidenceItem,
     EvidenceStatus,
     InMemoryAgentStore,
@@ -103,9 +103,10 @@ def start_action_loop(
     run_id: str,
     *,
     initial_evidence: Mapping[str, EvidenceItem] | None = None,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> dict[str, object]:
     """Move a confirmed run into its action-driven execution state."""
+    store = store if store is not None else default_agent_store()
 
     run = store.get_run(run_id)
     if run.status is not RunStatus.CONFIRMED:
@@ -181,9 +182,10 @@ def restart_action_loop_for_intent(
     run_id: str,
     intent: TravelIntent | Mapping[str, object],
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> dict[str, object]:
     """Start a same-run revision while reusing still-applicable evidence."""
+    store = store if store is not None else default_agent_store()
 
     previous = store.get_run(run_id)
     contract = (
@@ -220,8 +222,8 @@ def restart_action_loop_for_intent(
 def run_until_blocked(
     run_id: str,
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
-    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
+    store: InMemoryAgentStore | None = None,
+    evidence_broker: EvidenceBroker | None = None,
     max_wait_seconds: float = 30.0,
 ) -> dict[str, object]:
     """Execute local registered tools and pause at external evidence actions.
@@ -230,6 +232,12 @@ def run_until_blocked(
     actions expose both explicit re-query and manual train entry.  This keeps
     retry authority with the caller and prevents an implicit retry loop.
     """
+    evidence_broker = (
+        evidence_broker
+        if evidence_broker is not None
+        else default_evidence_broker()
+    )
+    store = store if store is not None else default_agent_store()
 
     if (
         not isinstance(max_wait_seconds, (int, float))
@@ -375,9 +383,10 @@ def run_until_blocked(
 def get_next_actions(
     run_id: str,
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> dict[str, object]:
     """Return the next honest state and executable actions for Codex."""
+    store = store if store is not None else default_agent_store()
 
     run = store.get_run(run_id)
     if run.status is RunStatus.AWAITING_CONFIRMATION:
@@ -503,10 +512,16 @@ def execute_registered_action(
     run_id: str,
     action_id: str,
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
-    evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
+    store: InMemoryAgentStore | None = None,
+    evidence_broker: EvidenceBroker | None = None,
 ) -> dict[str, object]:
     """Execute one registered 12306, AMap, or Planner action."""
+    evidence_broker = (
+        evidence_broker
+        if evidence_broker is not None
+        else default_evidence_broker()
+    )
+    store = store if store is not None else default_agent_store()
 
     run = store.get_run(run_id)
     if (
@@ -672,9 +687,10 @@ def submit_evidence(
     run_id: str,
     evidence: EvidenceItem | Mapping[str, object],
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> dict[str, object]:
     """Validate and attach one action-owned evidence item."""
+    store = store if store is not None else default_agent_store()
 
     run = store.get_run(run_id)
     if run.status is not RunStatus.RUNNING:
@@ -1985,8 +2001,9 @@ def _snapshot(
 
 def _state(
     run_id: str,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> _LoopState:
+    store = store if store is not None else default_agent_store()
     with _LOCK:
         state = _STATES.get(run_id)
         if state is None:

@@ -26,7 +26,7 @@
       "blocked_on": null
     }
   ],
-  "current_phase": "P3b",
+  "current_phase": "P4a",
   "phase_order": [
     "P0",
     "P1",
@@ -67,7 +67,8 @@
     "I5",
     "I6",
     "I7",
-    "I8"
+    "I8",
+    "I11"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a 转绿；I3a 与 I7 于 P3b 全部转绿。I2 的 estimated 豁免已随枚举扩展清零。I6 的写入侧豁免保留至 P4（I1 的范围）。"
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a。I10 已收录文档，测试随 P4-b 的 facts 形状落地。I6 的写入侧豁免仍在，到期 P4。"
 }

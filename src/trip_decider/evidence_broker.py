@@ -21,6 +21,7 @@ from typing import Callable
 from uuid import uuid4
 
 from trip_decider.travel_agent import (
+    default_runtime_root,
     EvidenceItem,
     EvidenceStatus,
     TravelAgentError,
@@ -593,14 +594,35 @@ def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
             temporary.unlink()
 
 
-_DEFAULT_CACHE_ROOT = (
-    Path(__file__).resolve().parents[2] / "runtime" / "evidence-cache"
-)
-DEFAULT_EVIDENCE_BROKER = EvidenceBroker(_DEFAULT_CACHE_ROOT)
+_DEFAULT_BROKER: EvidenceBroker | None = None
+
+
+def default_cache_root() -> Path:
+    """证据缓存根目录，与 runtime 根同源（travel_agent.default_runtime_root）。"""
+
+    return default_runtime_root().parent / "evidence-cache"
+
+
+def default_evidence_broker() -> EvidenceBroker:
+    """进程级默认 broker，首次调用时才建目录读盘（invariants.md I11）。"""
+
+    global _DEFAULT_BROKER
+    if _DEFAULT_BROKER is None:
+        _DEFAULT_BROKER = EvidenceBroker(default_cache_root())
+    return _DEFAULT_BROKER
+
+
+def reset_default_evidence_broker() -> None:
+    """丢弃已构造的默认 broker。仅供测试隔离使用。"""
+
+    global _DEFAULT_BROKER
+    _DEFAULT_BROKER = None
 
 
 __all__ = [
-    "DEFAULT_EVIDENCE_BROKER",
+    "default_cache_root",
+    "default_evidence_broker",
+    "reset_default_evidence_broker",
     "EvidenceBroker",
     "EvidenceQuery",
     "FRESHNESS_POLICIES",

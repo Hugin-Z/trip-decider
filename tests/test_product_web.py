@@ -42,7 +42,7 @@ from trip_decider.guided_discovery import (
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
-    DEFAULT_AGENT_STORE,
+    default_agent_store,
     DestinationCollectors,
     EvidenceItem,
     EvidenceStatus,
@@ -249,7 +249,7 @@ class ProductWebContractTests(unittest.TestCase):
         run_id = created["run"]["run_id"]
         self.addCleanup(
             shutil.rmtree,
-            DEFAULT_AGENT_STORE.runtime_root / run_id,
+            default_agent_store().runtime_root / run_id,
             True,
         )
         _trip_post(f"/api/trips/{run_id}/confirm", {})
@@ -749,7 +749,7 @@ class ProductWebContractTests(unittest.TestCase):
         )
         self.addCleanup(
             shutil.rmtree,
-            DEFAULT_AGENT_STORE.runtime_root / created.run_id,
+            default_agent_store().runtime_root / created.run_id,
             True,
         )
         confirm_intent(created.run_id)
@@ -1730,7 +1730,7 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertEqual(status.value, 201)
         self.addCleanup(
             shutil.rmtree,
-            DEFAULT_AGENT_STORE.runtime_root / response["run"]["run_id"],
+            default_agent_store().runtime_root / response["run"]["run_id"],
             True,
         )
         intent = response["run"]["intent"]

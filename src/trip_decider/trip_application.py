@@ -33,12 +33,12 @@ from trip_decider.destination_runtime import (
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.evidence_broker import (
-    DEFAULT_EVIDENCE_BROKER,
+    default_evidence_broker,
     EvidenceBroker,
 )
 from trip_decider.guided_discovery import build_guided_comparison
 from trip_decider.travel_agent import (
-    DEFAULT_AGENT_STORE,
+    default_agent_store,
     AgentRun,
     EvidenceItem,
     EvidenceStatus,
@@ -81,16 +81,21 @@ class TripApplicationService:
     def __init__(
         self,
         *,
-        store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
-        evidence_broker: EvidenceBroker = DEFAULT_EVIDENCE_BROKER,
+        store: InMemoryAgentStore | None = None,
+        evidence_broker: EvidenceBroker | None = None,
         railway_collector: EvidenceCollector = collect_railway_evidence,
         map_collector: EvidenceCollector = collect_map_evidence,
         web_collector: EvidenceCollector = collect_live_destination_profile,
         comparison_builder: ComparisonBuilder = build_guided_comparison,
         revision_executor: RevisionExecutor = revise_destination_result,
     ) -> None:
+        store = store if store is not None else default_agent_store()
         self.store = store
-        self.evidence_broker = evidence_broker
+        self.evidence_broker = (
+            evidence_broker
+            if evidence_broker is not None
+            else default_evidence_broker()
+        )
         self.railway_collector = railway_collector
         self.map_collector = map_collector
         self.web_collector = web_collector
@@ -1054,7 +1059,23 @@ def _required_text(value: object, field_name: str) -> str:
 
 
 
-DEFAULT_TRIP_APPLICATION_SERVICE = TripApplicationService()
+_DEFAULT_APPLICATION: TripApplicationService | None = None
+
+
+def default_trip_application_service() -> TripApplicationService:
+    """进程级默认应用服务，首次调用时才构造（invariants.md I11）。"""
+
+    global _DEFAULT_APPLICATION
+    if _DEFAULT_APPLICATION is None:
+        _DEFAULT_APPLICATION = TripApplicationService()
+    return _DEFAULT_APPLICATION
+
+
+def reset_default_trip_application_service() -> None:
+    """丢弃已构造的默认应用服务。仅供测试隔离使用。"""
+
+    global _DEFAULT_APPLICATION
+    _DEFAULT_APPLICATION = None
 
 
 __all__ = [

@@ -149,12 +149,12 @@ class TripQueryServiceTests(unittest.TestCase):
     def test_web_adapter_does_not_read_store_business_state(self) -> None:
         source = inspect.getsource(product_web)
         for forbidden in (
-            "DEFAULT_AGENT_STORE.get_run(",
-            "DEFAULT_AGENT_STORE.get_session(",
-            "DEFAULT_AGENT_STORE.list_runs(",
-            "DEFAULT_AGENT_STORE.run_directory(",
-            "DEFAULT_AGENT_STORE.events_after(",
-            "DEFAULT_AGENT_STORE.wait_for_events(",
+            "default_agent_store().get_run(",
+            "default_agent_store().get_session(",
+            "default_agent_store().list_runs(",
+            "default_agent_store().run_directory(",
+            "default_agent_store().events_after(",
+            "default_agent_store().wait_for_events(",
         ):
             self.assertNotIn(forbidden, source)
         self.assertIn("_query_service().trip(run_id)", source)

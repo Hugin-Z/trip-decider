@@ -1672,18 +1672,55 @@ def _event_from_mapping(value: Mapping[str, object]) -> AgentEvent:
     )
 
 
-_DEFAULT_RUNTIME_ROOT = (
-    Path(__file__).resolve().parents[2] / "runtime" / "sessions"
-)
-DEFAULT_AGENT_STORE = InMemoryAgentStore(_DEFAULT_RUNTIME_ROOT)
+_RUNTIME_ROOT_ENV = "TRIP_DECIDER_RUNTIME_ROOT"
+_DEFAULT_STORE: InMemoryAgentStore | None = None
+
+
+def default_runtime_root() -> Path:
+    """runtime 根目录。环境变量优先，其次当前工作目录。
+
+    v1 用的是 ``Path(__file__).resolve().parents[2]``，假定源码位于
+    ``<repo>/src/trip_decider/``——装成 wheel 后它指向 site-packages 的上两级，
+    本来就是错的（基线报告 M8）。运行数据不该住在包目录里，所以改为显式的
+    环境变量加 cwd。脚本入口一律显式设置 ``TRIP_DECIDER_RUNTIME_ROOT``。
+    """
+
+    override = os.environ.get(_RUNTIME_ROOT_ENV)
+    if override and override.strip():
+        return Path(override).expanduser()
+    return Path.cwd() / "runtime" / "sessions"
+
+
+def default_agent_store() -> InMemoryAgentStore:
+    """进程级默认 store，**首次调用时**才建目录读盘。
+
+    v1 在 import 时就构造它，于是任何 ``import trip_decider.travel_agent``
+    都会 mkdir 加全量读盘（基线报告 M8）。改为显式工厂而不是模块级
+    ``__getattr__`` 懒加载，两个理由：默认参数在函数定义时求值，
+    ``def f(store=DEFAULT_AGENT_STORE)`` 会在 import 时就触发 ``__getattr__``，
+    延迟不了；而且工厂让「这里有 I/O」在调用点看得见。
+    """
+
+    global _DEFAULT_STORE
+    if _DEFAULT_STORE is None:
+        _DEFAULT_STORE = InMemoryAgentStore(default_runtime_root())
+    return _DEFAULT_STORE
+
+
+def reset_default_agent_store() -> None:
+    """丢弃已构造的默认 store。仅供测试隔离使用。"""
+
+    global _DEFAULT_STORE
+    _DEFAULT_STORE = None
 
 
 def create_run(
     intent: TravelIntent | Mapping[str, object],
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> AgentRun:
     """Create a new session and an unconfirmed run."""
+    store = store if store is not None else default_agent_store()
 
     contract = (
         intent
@@ -1697,9 +1734,10 @@ def confirm_intent(
     run_id: str,
     intent: TravelIntent | Mapping[str, object] | None = None,
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> AgentRun:
     """Confirm the extracted contract once, optionally with user corrections."""
+    store = store if store is not None else default_agent_store()
 
     contract = (
         intent
@@ -1723,9 +1761,10 @@ def execute_run(
     run_id: str,
     *,
     executor: RunExecutor,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> AgentRun:
     """Execute one confirmed run and persist public tool events."""
+    store = store if store is not None else default_agent_store()
 
     run = store.start(run_id)
 
@@ -1757,9 +1796,10 @@ def continue_run_with_intent(
     run_id: str,
     intent: TravelIntent | Mapping[str, object],
     *,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> AgentRun:
     """Keep the same session/run while advancing discovery into planning."""
+    store = store if store is not None else default_agent_store()
 
     contract = (
         intent
@@ -1941,9 +1981,10 @@ def revise_run(
     *,
     executor: RevisionExecutor,
     intent: TravelIntent | Mapping[str, object] | None = None,
-    store: InMemoryAgentStore = DEFAULT_AGENT_STORE,
+    store: InMemoryAgentStore | None = None,
 ) -> AgentRun:
     """Create and atomically install a new version on the same run."""
+    store = store if store is not None else default_agent_store()
 
     previous = store.get_run(run_id)
     if (
@@ -2123,7 +2164,9 @@ __all__ = [
     "AgentRuntimeMode",
     "AgentRun",
     "AgentSession",
-    "DEFAULT_AGENT_STORE",
+    "default_agent_store",
+    "default_runtime_root",
+    "reset_default_agent_store",
     "DestinationCollectors",
     "DestinationContext",
     "EvidenceItem",
