@@ -38,8 +38,18 @@ from tests.evidence_factory import evidence as factory_evidence
 
 BASELINE_PATH = Path(__file__).with_name("characterization_baseline.json")
 
-NOW = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
-FRESH_AT = "2026-08-02T18:00:00+08:00"  # = 10:00 UTC，各 data_type 均在窗内
+FRESH_AT = "2026-08-02T18:00:00+08:00"  # = 10:00 UTC
+# 表征的读取时刻。与 FRESH_AT 的关系是契约：**恰好晚 1 小时**，因此全部
+# data_type 都在各自的容差窗内（最短的是 hotel_price 的 0 秒容差，它靠
+# stale_allowed=False 单独处理，不受此常量影响）。
+#
+# 读取时刻必须是钉死的输入。P4-b2 之前表征靠墙钟，而夹具时间戳是写死的
+# 今天——两者的差值每天在变，改造后基线会自行翻面。要造陈旧场景就加第二个
+# 常量，不要动 FRESH_AT。
+CHAR_NOW = datetime(2026, 8, 2, 11, 0, tzinfo=timezone.utc)  # = 19:00+08:00
+# FRESH_AT 后 7 小时：超出铁路 6 小时容差，用于翻面路径的正向用例。
+STALE_NOW = datetime(2026, 8, 2, 17, 0, tzinfo=timezone.utc)  # = 次日 01:00+08:00
+NOW = CHAR_NOW  # 兼容既有引用；同一个时刻只许有一份定义
 
 _SEEDS = [
     {
@@ -131,10 +141,14 @@ SCENARIOS: tuple[tuple[str, dict[str, str]], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _guided_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
+def _guided_snapshot(
+    items: dict[str, EvidenceItem],
+    *,
+    now: datetime = CHAR_NOW,
+) -> dict[str, Any]:
     """判定点 1：候选 feasibility_status 与候选卡的证据状态。"""
 
-    broker = EvidenceBroker(clock=lambda: NOW)
+    broker = EvidenceBroker(clock=lambda: now)
 
     def collector(_intent: TravelIntent) -> EvidenceItem:
         return items["railway"]
@@ -149,7 +163,7 @@ def _guided_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
                 railway_collector=collector,
                 run_id="characterization",
                 evidence_broker=broker,
-                clock=lambda: NOW,
+                clock=lambda: now,
             )
     except Exception as error:  # noqa: BLE001 - 表征测试要记录异常本身
         return {"error": f"{type(error).__name__}: {error}"}
@@ -182,7 +196,11 @@ def _guided_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
     }
 
 
-def _planning_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
+def _planning_snapshot(
+    items: dict[str, EvidenceItem],
+    *,
+    now: datetime = CHAR_NOW,
+) -> dict[str, Any]:
     """判定点 2 与 3：planning_state 与 conditional_blockers。"""
 
     context = {
@@ -201,7 +219,7 @@ def _planning_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
         "built_at": FRESH_AT,
     }
     try:
-        compiled = PlanningInputCompiler().compile(context)
+        compiled = PlanningInputCompiler().compile(context, now=now)
     except Exception as error:  # noqa: BLE001
         return {"error": f"{type(error).__name__}: {error}"}
 
@@ -237,7 +255,7 @@ def _planning_snapshot(items: dict[str, EvidenceItem]) -> dict[str, Any]:
     }
 
 
-def _full_run_snapshot() -> dict[str, Any]:
+def _full_run_snapshot(*, now: datetime = CHAR_NOW) -> dict[str, Any]:
     """完整 run 直到计划安装——**哑火检测器**。
 
     P4-a 的 fixture 收编把动作循环掐断了：run 停在 RUNNING，
@@ -248,6 +266,19 @@ def _full_run_snapshot() -> dict[str, Any]:
     走不到动作循环，因此抓不到那类断裂。这一条驱动到计划真正落盘为止。
     """
 
+    from tempfile import TemporaryDirectory
+
+    from trip_decider.agent_actions import reset_read_clock, set_read_clock
+    from tests.invariant_support import drive_offline_run
+
+    set_read_clock(lambda: now)
+    try:
+        return _full_run_body(now)
+    finally:
+        reset_read_clock()
+
+
+def _full_run_body(now: datetime) -> dict[str, Any]:
     from tempfile import TemporaryDirectory
 
     from tests.invariant_support import drive_offline_run
@@ -306,6 +337,7 @@ def capture() -> dict[str, Any]:
         snapshot[label] = {
             "decision_point_1_guided": _guided_snapshot(items),
             "decision_point_2_3_planning": _planning_snapshot(items),
+            "stale_read_planning": _planning_snapshot(items, now=STALE_NOW),
         }
     # 完整 run 只跑一次——它驱动真实动作循环，比其余场景重得多。
     snapshot["full_run_until_plan_installed"] = _full_run_snapshot()

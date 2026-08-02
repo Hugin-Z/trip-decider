@@ -100,6 +100,28 @@ class _LoopState:
 _LOCK = RLock()
 _STATES: dict[str, _LoopState] = {}
 
+# 读取时刻的注入点。产品默认是墙钟——判定"这份证据现在还新鲜吗"本来就该问
+# 现在几点。表征需要它固定，否则同一份夹具隔天读会得到不同的 freshness，
+# 基线会在没有代码改动的情况下自行翻面。
+#
+# 走模块级而非穿参：_LoopState 与 drive_offline_run 之间隔着应用服务，
+# 穿参要改产品 API 来迁就测试。参照 reset_default_agent_store() 的先例。
+_READ_CLOCK: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+
+def set_read_clock(clock: Callable[[], datetime]) -> Callable[[], datetime]:
+    """注入读取时刻，返回原时钟供调用方还原。仅供测试。"""
+
+    global _READ_CLOCK
+    previous = _READ_CLOCK
+    _READ_CLOCK = clock
+    return previous
+
+
+def reset_read_clock() -> None:
+    global _READ_CLOCK
+    _READ_CLOCK = lambda: datetime.now(timezone.utc)
+
 
 def start_action_loop(
     run_id: str,
@@ -1000,10 +1022,7 @@ def _planner_handler(
         intent,
         (user, *(state.evidence[domain] for domain in _DOMAINS)),
     )
-    compiled = PlanningInputCompiler().compile(
-        context,
-        now=datetime.now(timezone.utc),
-    )
+    compiled = PlanningInputCompiler().compile(context, now=_READ_CLOCK())
     planning_draft = plan_destination_context(context.to_dict())
     planning_draft = {
         **planning_draft,
