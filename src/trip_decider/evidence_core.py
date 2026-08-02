@@ -448,9 +448,9 @@ def split_fact_id(value: str) -> tuple[str, str]:
 # 这些键是取证元数据或展示态，不是事实本身，不产出 fact。
 # ``snapshot`` / ``freshness`` / ``refresh_failure`` 记录「怎么取到的」；
 # ``*_status`` / ``display`` 是展示态（P4-b3 的删除对象）。
+# 剪掉整棵子树的键：它们自上而下都是取证元数据。
 _NON_FACT_KEYS = frozenset(
     {
-        "snapshot",
         "freshness",
         "refresh_failure",
         "local_transit_refresh_failure",
@@ -471,8 +471,31 @@ _NON_FACT_KEYS = frozenset(
 _UNKNOWABLE_SENTINEL = "UNKNOWN"
 
 
+# 重载的键：多数域里 ``snapshot`` 装 ``{status, retrieved_at}`` 这样的采集
+# 元数据，铁路域里它装的是去返程车次本体。因此不能整棵剪——只剪它下面已知
+# 的元数据叶子，其余是事实。非事实性是叶子的属性，不是子树的属性。
+_NON_FACT_LEAVES_UNDER = MappingProxyType(
+    {"snapshot": frozenset({"status", "retrieved_at", "source", "provider"})}
+)
+
+
 def _is_non_fact_key(key: str) -> bool:
     return key in _NON_FACT_KEYS or key.endswith("_status")
+
+
+def _is_non_fact_path(path: str) -> bool:
+    """按整条点分路径判定，让子树里的元数据叶子单独出局。"""
+
+    steps = [step for step in path.replace("]", "").split(".") if step]
+    for index, step in enumerate(steps):
+        bare = step.split("[")[0]
+        if _is_non_fact_key(bare):
+            return True
+        allowed = _NON_FACT_LEAVES_UNDER.get(bare)
+        if allowed is not None and index + 1 < len(steps):
+            if steps[index + 1].split("[")[0] in allowed:
+                return True
+    return False
 
 
 def _flatten_leaves(
@@ -490,9 +513,10 @@ def _flatten_leaves(
         out: list[tuple[str, Any]] = []
         for key, child in value.items():
             name = str(key)
-            if _is_non_fact_key(name):
+            path = f"{prefix}.{name}" if prefix else name
+            if _is_non_fact_path(path):
                 continue
-            out.extend(_flatten_leaves(child, f"{prefix}.{name}" if prefix else name))
+            out.extend(_flatten_leaves(child, path))
         return out
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         out = []
