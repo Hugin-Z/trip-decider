@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 
 from trip_decider.evidence_core import is_confirmed_absent
+from trip_decider.evidence_projection import item_facts, usable_fact_values
 from trip_decider.itinerary_planner import (
     make_attraction_event,
     make_duration_event,
@@ -1202,8 +1203,8 @@ def _compiled_map_points(
     ]
     if not _is_usable(web_item):
         return values
-    web_value = web_item.get("value")
-    if not isinstance(web_value, Mapping):
+    web_value = usable_fact_values(item_facts(web_item))
+    if not web_value:
         return values
     raw_web_points = web_value.get("map_points")
     if isinstance(raw_web_points, list):
@@ -1276,8 +1277,7 @@ def _value_list(
 ) -> list[Mapping[str, object]]:
     if not _is_usable(evidence):
         return []
-    value = evidence.get("value")
-    raw = value.get(key) if isinstance(value, Mapping) else None
+    raw = usable_fact_values(item_facts(evidence)).get(key)
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, Mapping)]
@@ -1286,8 +1286,7 @@ def _value_list(
 def _hotel_area(evidence: Mapping[str, object] | None) -> str | None:
     if not _is_usable(evidence):
         return None
-    value = evidence.get("value")
-    hotel = value.get("hotel_area") if isinstance(value, Mapping) else None
+    hotel = usable_fact_values(item_facts(evidence)).get("hotel_area")
     name = hotel.get("name") if isinstance(hotel, Mapping) else None
     return name.strip() if isinstance(name, str) and name.strip() else None
 
@@ -1298,22 +1297,22 @@ def _destination_resolved(
 ) -> bool:
     """Return true only when sourced evidence identifies the destination."""
 
-    if _is_usable(map_item) and not is_confirmed_absent(map_item.get("value")):
-        value = map_item.get("value")
-        destination = value.get("destination") if isinstance(value, Mapping) else None
+    map_facts = item_facts(map_item)
+    if _is_usable(map_item) and not any(
+        is_confirmed_absent(fact.get("value")) for fact in map_facts
+    ):
+        destination = usable_fact_values(map_facts).get("destination")
         if isinstance(destination, Mapping) and any(
             isinstance(destination.get(field), str)
             and bool(str(destination[field]).strip())
             for field in ("name", "adcode", "provider_record_id")
         ):
             return True
-    if _is_usable(web_item) and not is_confirmed_absent(web_item.get("value")):
-        value = web_item.get("value")
-        name = (
-            value.get("destination_official_name")
-            if isinstance(value, Mapping)
-            else None
-        )
+    web_facts = item_facts(web_item)
+    if _is_usable(web_item) and not any(
+        is_confirmed_absent(fact.get("value")) for fact in web_facts
+    ):
+        name = usable_fact_values(web_facts).get("destination_official_name")
         if isinstance(name, str) and name.strip():
             return True
     return False
