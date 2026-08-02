@@ -610,7 +610,7 @@ function showMapRouteStatus(route) {
     );
     return;
   }
-  if (route.evidence_status === "STALE") {
+  if (isStaleToken(route.token)) {
     setStatus(
       status,
       `${route.from} → ${route.to}：${mode}较早数据，采集于 ${
@@ -788,7 +788,7 @@ function syncMapOverlays(payload, AMap) {
       strokeWeight: 6,
       strokeOpacity: route.route_kind === "railway_schematic" ? 0.6 : 0.92,
       strokeStyle: (
-        route.evidence_status === "STALE"
+        isStaleToken(route.token)
         || route.route_kind === "railway_schematic"
       ) ? "dashed" : "solid",
       lineJoin: "round",
@@ -909,7 +909,7 @@ async function renderMapPanel(payload) {
       );
     } else {
       const staleRoutes = (payload.route_polylines || []).filter(
-        (route) => route.evidence_status === "STALE",
+        (route) => isStaleToken(route.token),
       ).length;
       setStatus(
         status,
@@ -1098,19 +1098,52 @@ function renderEvidenceStatuses(target, presentation) {
   const list = document.createElement("ul");
   (presentation.evidence_statuses || []).forEach((item) => {
     const row = document.createElement("li");
-    const status = {
-      LIVE: "本次查询",
-      STALE: "较早数据",
-      MISSING: "尚未取得",
-    }[item.status] || "待核验";
     const collected = item.retrieved_at
       ? ` · 采集于 ${formatDateTime(item.retrieved_at)}`
       : "";
-    row.textContent = `${item.label}：${status}（${item.count || 0}）${collected}`;
+    const headline = document.createElement("span");
+    headline.className = "evidence-headline";
+    headline.textContent =
+      `${item.label}：${tokenLabel(item.token)}（${item.count || 0}）${collected}`;
+    row.append(headline);
+    // next_action 只在 token !== "verified" 时存在（evidence-axes.md §5.1），
+    // 因此它的有无就是渲染分支本身。detail 必须出现在事实卡片内，不能挪到
+    // 全局提示区——它说的是这一条事实缺什么。
+    const action = item.next_action;
+    if (action && action.detail) {
+      const note = document.createElement("p");
+      note.className = action.blocking
+        ? "evidence-next-action blocking"
+        : "evidence-next-action";
+      note.textContent = action.detail;
+      row.append(note);
+    }
     list.append(row);
   });
   section.append(list);
   target.append(section);
+}
+
+// docs/contracts/evidence-axes.md §4.1 的 8 个 token。这里只做「token -> 中文
+// 标签」与「token -> 样式」的查表；由两轴推导 token 的逻辑只存在于
+// evidence_core（invariants.md I6）。
+const TOKEN_LABELS = {
+  verified: "已核实",
+  sourced_stale: "较早数据",
+  sourced_undated: "来源未记录采集时间",
+  estimated: "推算值",
+  estimated_stale: "较早推算值",
+  estimated_undated: "推算值，未记录采集时间",
+  conflicting: "来源不一致",
+  unknown: "尚未取得",
+};
+
+function tokenLabel(token) {
+  return TOKEN_LABELS[token] || "待核验";
+}
+
+function isStaleToken(token) {
+  return token === "sourced_stale" || token === "estimated_stale";
 }
 
 function renderTimeline(target, plan) {

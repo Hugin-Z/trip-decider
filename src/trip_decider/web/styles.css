@@ -972,3 +972,21 @@ h1 {
     grid-template-columns: 1fr;
   }
 }
+
+/* 证据事实卡片：next_action.detail 必须落在事实卡片内部，不能挪到全局提示区
+   （docs/contracts/invariants.md I3b）。blocking 与非 blocking 视觉上要能区分
+   ——前者是「不能支撑判定」，后者是「能支撑但有条件」。 */
+.evidence-next-action {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: #5a5a5a;
+}
+
+.evidence-next-action.blocking {
+  color: #8a3a1a;
+  font-weight: 600;
+}
+
+.evidence-headline {
+  display: block;
+}

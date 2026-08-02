@@ -264,21 +264,23 @@ class EvidenceBrokerTests(unittest.TestCase):
                 railway_collector=live,
                 run_id="guided-one",
                 evidence_broker=broker,
+            clock=lambda: self.now,
             )
             second = build_guided_comparison(
                 intent,
                 railway_collector=failed,
                 run_id="guided-two",
                 evidence_broker=broker,
+            clock=lambda: self.now,
             )
         self.assertEqual(calls, ["live", "failed"])
         self.assertEqual(
-            first["options"][0]["roundtrip_transport"]["status"],
-            "LIVE",
+            first["options"][0]["roundtrip_transport"]["token"],
+            "verified",
         )
         self.assertEqual(
-            second["options"][0]["roundtrip_transport"]["status"],
-            "STALE",
+            second["options"][0]["roundtrip_transport"]["token"],
+            "sourced_stale",
         )
         self.assertTrue(
             second["options"][0]["roundtrip_transport"]["from_cache"]

@@ -7,8 +7,9 @@ run and never creates an alternative runtime.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 
 from trip_decider.trip_application import (
@@ -29,6 +30,9 @@ from trip_decider.travel_agent import (
 )
 
 
+Clock = Callable[[], datetime]
+
+
 class TripQueryError(ValueError):
     """The requested user-level read model is not available."""
 
@@ -43,6 +47,7 @@ class TripQueryService:
         application_service: TripApplicationService = (
             DEFAULT_TRIP_APPLICATION_SERVICE
         ),
+        clock: Clock | None = None,
     ) -> None:
         if application_service.store is not store:
             raise ValueError(
@@ -50,6 +55,15 @@ class TripQueryService:
             )
         self.store = store
         self.application_service = application_service
+        # Same injection shape as EvidenceBroker (evidence_broker.py:131-134).
+        # Read time drives the freshness axis, so it has to be substitutable
+        # for a test to observe two different instants (invariants.md I5).
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def now(self) -> datetime:
+        """Return the instant this read is evaluated against."""
+
+        return self._clock()
 
     def trip(self, run_id: str) -> dict[str, object]:
         """Return the canonical user-level run read model."""
@@ -80,11 +94,13 @@ class TripQueryService:
         ):
             read_run_value["result"] = None
 
+        read_at = self.now()
         evidence = self.application_service.current_run_evidence(run_id)
         presentation = _presentation_contract(
             read_run_value,
             events,
             evidence=evidence,
+            now=read_at,
         )
         presentation["plan_version"] = plan_version
         if not isinstance(installed, Mapping):
@@ -95,6 +111,7 @@ class TripQueryService:
         presentation["map_payload"] = _map_payload_contract(
             read_run_value,
             plan_version=plan_version,
+            now=read_at,
         )
         response: dict[str, object] = {
             "session": session.to_dict(),

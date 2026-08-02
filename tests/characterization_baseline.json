@@ -1,0 +1,552 @@
+{
+  "all_estimated": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [
+        "往返交通时长为推算值，实际耗时可能不同"
+      ],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "estimated"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "railway",
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "estimated"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING"
+      ],
+      "destination_resolved": true,
+      "displayable": true,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [],
+      "planning_state": "PLAN_READY",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "all_sourced": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING"
+      ],
+      "destination_resolved": true,
+      "displayable": true,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [],
+      "planning_state": "PLAN_READY",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "all_unknown": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "UNKNOWN",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 4,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "unknown"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "UNKNOWN",
+      "has_next_action": [
+        "railway",
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": null,
+      "roundtrip_transport_status": "unknown"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 0,
+      "blocker_fact_refs": [
+        "railway-missing"
+      ],
+      "blockers": [
+        "ATTRACTION_EVIDENCE_MISSING",
+        "HOTEL_SELECTION_MISSING",
+        "LOCAL_TRANSIT_EVIDENCE_MISSING",
+        "MAP_MISSING",
+        "RAILWAY_EVIDENCE_MISSING",
+        "RAILWAY_MISSING",
+        "WEB_MISSING"
+      ],
+      "destination_resolved": false,
+      "displayable": false,
+      "local_transit_event_count": 0,
+      "map_point_count": 0,
+      "missing_requirements": [
+        "accommodation_base",
+        "attraction",
+        "attraction_transit_coverage",
+        "destination_resolved",
+        "local_transit",
+        "outbound_transport",
+        "return_transport"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 0,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "map_conflicting": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
+        "HOTEL_DETAIL_PENDING",
+        "LOCAL_TRANSIT_EVIDENCE_MISSING",
+        "MAP_CONFLICTING"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 0,
+      "map_point_count": 1,
+      "missing_requirements": [
+        "attraction_transit_coverage",
+        "local_transit"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "map_estimated": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING"
+      ],
+      "destination_resolved": true,
+      "displayable": true,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [],
+      "planning_state": "PLAN_READY",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "map_unknown": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "ATTRACTION_TRANSIT_MISSING",
+        "HOTEL_DETAIL_PENDING",
+        "LOCAL_TRANSIT_EVIDENCE_MISSING",
+        "MAP_MISSING"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 0,
+      "map_point_count": 1,
+      "missing_requirements": [
+        "attraction_transit_coverage",
+        "local_transit"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "railway_confirmed_absent": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "INFEASIBLE_NO_TRANSPORT",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 4,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "INFEASIBLE_NO_TRANSPORT",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": null,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [
+        "railway-absent"
+      ],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_NO_DIRECT_TRAIN"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [
+        "outbound_transport",
+        "return_transport"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 0,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "railway_conflicting": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "UNKNOWN",
+      "conditions": [],
+      "conflict_details_visible": true,
+      "evidence_missing_count": 4,
+      "evidence_statuses": [
+        {
+          "conflict_details": [
+            "来源A与来源B不一致"
+          ],
+          "domain": "railway",
+          "token": "conflicting"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "UNKNOWN",
+      "has_next_action": [
+        "railway",
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "conflicting"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [
+        "railway-conflicting"
+      ],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_CONFLICTING",
+        "RAILWAY_EVIDENCE_MISSING"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [
+        "outbound_transport",
+        "return_transport"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 0,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "railway_estimated": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [
+        "往返交通时长为推算值，实际耗时可能不同"
+      ],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "estimated"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "railway",
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "estimated"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING"
+      ],
+      "destination_resolved": true,
+      "displayable": true,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [],
+      "planning_state": "PLAN_READY",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "railway_unknown": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "UNKNOWN",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 4,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "unknown"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "UNKNOWN",
+      "has_next_action": [
+        "railway",
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": null,
+      "roundtrip_transport_status": "unknown"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 3,
+      "blocker_fact_refs": [
+        "railway-missing"
+      ],
+      "blockers": [
+        "HOTEL_DETAIL_PENDING",
+        "RAILWAY_EVIDENCE_MISSING",
+        "RAILWAY_MISSING"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 3,
+      "map_point_count": 4,
+      "missing_requirements": [
+        "outbound_transport",
+        "return_transport"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 0,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  },
+  "web_unknown": {
+    "decision_point_1_guided": {
+      "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
+      "conditions": [],
+      "conflict_details_visible": false,
+      "evidence_missing_count": 3,
+      "evidence_statuses": [
+        {
+          "domain": "railway",
+          "token": "verified"
+        },
+        {
+          "domain": "map",
+          "token": "unknown"
+        },
+        {
+          "domain": "web",
+          "token": "unknown"
+        }
+      ],
+      "feasibility_status": "CONDITIONALLY_FEASIBLE",
+      "has_next_action": [
+        "map",
+        "web"
+      ],
+      "playable_time_seconds": 273600.0,
+      "roundtrip_transport_status": "verified"
+    },
+    "decision_point_2_3_planning": {
+      "attraction_event_count": 0,
+      "blocker_fact_refs": [],
+      "blockers": [
+        "ATTRACTION_EVIDENCE_MISSING",
+        "HOTEL_SELECTION_MISSING",
+        "WEB_MISSING"
+      ],
+      "destination_resolved": true,
+      "displayable": false,
+      "local_transit_event_count": 3,
+      "map_point_count": 3,
+      "missing_requirements": [
+        "accommodation_base",
+        "attraction",
+        "attraction_transit_coverage"
+      ],
+      "planning_state": "COLLECTING_EVIDENCE",
+      "rail_event_count": 2,
+      "status": "PARTIAL_PLAN_WITH_BLOCKERS"
+    }
+  }
+}

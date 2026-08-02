@@ -15,6 +15,8 @@ import time
 from typing import Protocol
 from uuid import uuid4
 
+from trip_decider.evidence_core import is_confirmed_absent
+from trip_decider.evidence_projection import project_domain
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
 from trip_decider.evidence_broker import (
     DEFAULT_EVIDENCE_BROKER,
@@ -53,10 +55,13 @@ _DEFAULT_TIMEOUTS = {
 @dataclass(frozen=True)
 class _EvidenceCheck:
     evidence: EvidenceItem
+    # 展示 token（evidence-axes.md §4.1 的 8 值），由内核算出。字段名保留
+    # display_status 以免波及未改造的调用方，取值域已换。
     display_status: str
     collected_at: str | None
     from_cache: bool
     timed_out: bool = False
+    next_action: Mapping[str, object] | None = None
 
 
 def guided_region_seeds(
@@ -112,8 +117,10 @@ def build_guided_comparison(
     | None = None,
     progress: ProgressCallback | None = None,
     should_cancel: CancelCheck | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Check regional options concurrently and stream each completed card."""
+    read_at = (clock or (lambda: datetime.now(timezone.utc)))()
 
     active_run_id = run_id or f"ephemeral-guided-{uuid4()}"
     seeds = guided_region_seeds(intent, limit=3)
@@ -196,7 +203,7 @@ def build_guided_comparison(
             if (
                 isinstance(supplied, EvidenceItem)
                 and supplied.domain == domain
-                and supplied.status is EvidenceStatus.SOURCED
+                and supplied.status.is_usable
             ):
                 check = replace(
                     _check_from_evidence(supplied),
@@ -220,6 +227,7 @@ def build_guided_comparison(
                 checks[seed_id][domain] = _missing_check(
                     domain,
                     "collector_not_configured",
+                    now=read_at,
                 )
                 continue
             if progress is not None:
@@ -274,6 +282,7 @@ def build_guided_comparison(
                     checks[seed_id][domain] = _missing_check(
                         domain,
                         "cancelled_by_user",
+                        now=read_at,
                     )
                     future.cancel()
                     del pending[future]
@@ -311,7 +320,7 @@ def build_guided_comparison(
                         candidate_intent,
                         domain,
                     )
-                    if evidence.status is EvidenceStatus.SOURCED:
+                    if evidence.status.is_usable:
                         collected_at = evidence_collected_at(evidence)
                         if collected_at is not None:
                             try:
@@ -339,7 +348,7 @@ def build_guided_comparison(
                         )
                         if stale is not None:
                             evidence = stale
-                    check = _check_from_evidence(evidence)
+                    check = _check_from_evidence(evidence, now=read_at)
                     checks[seed_id][domain] = replace(
                         check,
                         from_cache=(
@@ -356,6 +365,7 @@ def build_guided_comparison(
                     failure = _missing_check(
                         domain,
                         "collector_error:" + type(error).__name__,
+                        now=read_at,
                     )
                     candidate_intent = replace(
                         intent,
@@ -377,7 +387,7 @@ def build_guided_comparison(
                     )
                     checks[seed_id][domain] = (
                         replace(
-                            _check_from_evidence(stale),
+                            _check_from_evidence(stale, now=read_at),
                             from_cache=True,
                         )
                         if stale is not None
@@ -408,6 +418,7 @@ def build_guided_comparison(
                     domain,
                     "collector_timeout",
                     timed_out=True,
+                    now=read_at,
                 )
                 candidate_intent = replace(
                     intent,
@@ -429,7 +440,7 @@ def build_guided_comparison(
                 )
                 if stale is not None:
                     checks[seed_id][domain] = replace(
-                        _check_from_evidence(stale),
+                        _check_from_evidence(stale, now=read_at),
                         from_cache=True,
                         timed_out=True,
                     )
@@ -517,23 +528,37 @@ def _coarse_option(
         and intent.total_budget_cny is not None
         else None
     )
-    rail_sourced = (
-        evidence.status is EvidenceStatus.SOURCED
+    # 判定点 1（p3b-gate-inventory.md §3.3，丙型）。四分支：
+    #   confirmed_absent -> 已核实没有直达车，是一个确定的可行性结论
+    #   sourced/estimated -> 可参与判定；estimated 必须携带 conditional（裁决 5）
+    #   unknown/conflicting -> 结论未知，原因必须可见（I7）
+    rail_absent = is_confirmed_absent(evidence.value)
+    rail_usable = (
+        evidence.status.is_usable
+        and not rail_absent
         and duration is not None
         and known_cost is not None
     )
+    rail_sourced = rail_usable
     conditionally_feasible = (
-        rail_sourced
+        rail_usable
         and playable is not None
         and playable > 0
         and budget_margin is not None
         and budget_margin >= 0
     )
-    feasibility_status = (
-        "CONDITIONALLY_FEASIBLE"
-        if conditionally_feasible
-        else "UNKNOWN"
-    )
+    if rail_absent:
+        feasibility_status = "INFEASIBLE_NO_TRANSPORT"
+    elif conditionally_feasible:
+        feasibility_status = "CONDITIONALLY_FEASIBLE"
+    else:
+        feasibility_status = "UNKNOWN"
+    # 裁决 5：estimated 可以参与判定，但结论必须携带一个 conditional。
+    rail_conditions: list[str] = []
+    if conditionally_feasible and evidence.status is EvidenceStatus.ESTIMATED:
+        rail_conditions.append(
+            "往返交通时长为推算值，实际耗时可能不同"
+        )
     missing = [
         "当地交通难度",
         "住宿价格与可用性",
@@ -554,7 +579,7 @@ def _coarse_option(
         "feasibility_status": feasibility_status,
         "coarse_plan_status": feasibility_status,
         "roundtrip_transport": {
-            "status": rail_check.display_status,
+            "token": rail_check.display_status,
             "duration_seconds": duration,
             "known_cost_cny": known_cost,
             "outbound": _train_summary(rail.get("outbound")),
@@ -575,14 +600,31 @@ def _coarse_option(
         "evidence_statuses": [
             {
                 "domain": domain,
-                "status": checks[domain].display_status,
+                "token": checks[domain].display_status,
                 "collected_at": checks[domain].collected_at,
                 "from_cache": checks[domain].from_cache,
                 "timed_out": checks[domain].timed_out,
+                # conflict_details 此前被整条丢弃（基线报告 M1）。分歧的具体
+                # 内容是用户裁决的唯一依据，必须原样透出。
+                **(
+                    {
+                        "conflict_details": list(
+                            checks[domain].evidence.conflict_details
+                        )
+                    }
+                    if checks[domain].evidence.conflict_details
+                    else {}
+                ),
+                **(
+                    {"next_action": dict(checks[domain].next_action)}
+                    if checks[domain].next_action is not None
+                    else {}
+                ),
             }
             for domain in ("railway", "map", "web")
         ],
         "evidence_missing": missing,
+        "conditions": rail_conditions,
         "candidate_source_notice": (
             "候选来自本次高德POI实时检索；可行性只使用"
             "本次铁路、地图和补充事实证据。"
@@ -590,43 +632,33 @@ def _coarse_option(
     }
 
 
-def _check_from_evidence(evidence: EvidenceItem) -> _EvidenceCheck:
-    collected_at = _evidence_collected_at(evidence)
-    display_status = (
-        "LIVE"
-        if evidence.status is EvidenceStatus.SOURCED
-        else "MISSING"
+def _check_from_evidence(
+    evidence: EvidenceItem,
+    *,
+    now: datetime | None = None,
+) -> _EvidenceCheck:
+    """把一条证据定级为候选卡上的展示 token。
+
+    定级全部委托给 ``evidence_core``（经 ``evidence_projection``）——本函数
+    自己不再产出任何展示态字面量。旧实现把 ``CONFLICTING`` 折叠进 ``MISSING``
+    并丢弃 ``conflict_details``（基线报告 M1，I7 第 3 条），现在四态原样保留。
+    """
+
+    verdict = project_domain(
+        {evidence.domain: evidence.to_dict()},
+        evidence.domain,
+        now=now if now is not None else datetime.now(timezone.utc),
     )
-    value = evidence.value
-    snapshot = (
-        value.get("snapshot")
-        if isinstance(value, Mapping)
-        else None
-    )
-    freshness = (
-        value.get("freshness")
-        if isinstance(value, Mapping)
-        else None
-    )
-    if (
-        display_status == "LIVE"
-        and (
-            (
-                isinstance(snapshot, Mapping)
-                and snapshot.get("status") == "STALE"
-            )
-            or (
-                isinstance(freshness, Mapping)
-                and freshness.get("status") == "STALE"
-            )
-        )
-    ):
-        display_status = "STALE"
     return _EvidenceCheck(
         evidence=evidence,
-        display_status=display_status,
-        collected_at=collected_at,
+        display_status=verdict.token,
+        collected_at=_evidence_collected_at(evidence),
         from_cache=False,
+        next_action=(
+            dict(verdict.next_action)
+            if verdict.next_action is not None
+            else None
+        ),
     )
 
 
@@ -635,20 +667,17 @@ def _missing_check(
     reason: str,
     *,
     timed_out: bool = False,
+    now: datetime | None = None,
 ) -> _EvidenceCheck:
-    return _EvidenceCheck(
-        evidence=EvidenceItem(
-            evidence_id=f"guided-{domain}-missing",
-            domain=domain,
-            status=EvidenceStatus.MISSING,
-            value=None,
-            missing_reason=reason,
-        ),
-        display_status="MISSING",
-        collected_at=None,
-        from_cache=False,
-        timed_out=timed_out,
+    item = EvidenceItem(
+        evidence_id=f"guided-{domain}-missing",
+        domain=domain,
+        status=EvidenceStatus.MISSING,
+        value=None,
+        missing_reason=reason,
     )
+    check = _check_from_evidence(item, now=now)
+    return replace(check, timed_out=timed_out)
 
 
 def _evidence_collected_at(evidence: EvidenceItem) -> str:

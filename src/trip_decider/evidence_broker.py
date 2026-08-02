@@ -151,7 +151,7 @@ class EvidenceBroker:
         policy = FRESHNESS_POLICIES[query.data_type]
         if not policy.stale_allowed:
             return
-        if evidence.status is not EvidenceStatus.SOURCED:
+        if not evidence.status.is_usable:
             return
         collected = _parse_datetime(collected_at, "collected_at")
         if collected > self._clock() + timedelta(minutes=5):
@@ -340,7 +340,7 @@ def _is_usable_live(
     query: EvidenceQuery,
     evidence: EvidenceItem,
 ) -> bool:
-    if evidence.status is not EvidenceStatus.SOURCED:
+    if not evidence.status.is_usable:
         return False
     value = evidence.value
     if not isinstance(value, Mapping):
@@ -437,7 +437,10 @@ def _stale_projection(
     return EvidenceItem(
         evidence_id=record.evidence.evidence_id,
         domain=record.evidence.domain,
-        status=EvidenceStatus.SOURCED,
+        # support 保留缓存记录的原值，不得提升。缓存是原样重放，不是重新采集
+        # ——一个 estimated 值经过一次降级就变成 sourced，会直接违反 I2。
+        # 裁决 8.1 的硬性前提（p3b-gate-inventory.md）。
+        status=record.evidence.status,
         value=normalized,
         sources=record.evidence.sources,
     )

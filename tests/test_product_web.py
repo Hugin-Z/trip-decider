@@ -600,7 +600,7 @@ class ProductWebContractTests(unittest.TestCase):
                 for item in option["evidence_statuses"]
                 if item["domain"] == "railway"
             )
-            self.assertEqual(rail["status"], "MISSING")
+            self.assertEqual(rail["token"], "unknown")
             self.assertTrue(rail["timed_out"])
 
     def test_guided_broker_queries_live_before_exact_stale_fallback(self) -> None:
@@ -682,8 +682,8 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertEqual(calls, 4)
         for option in reused["options"]:
             self.assertEqual(
-                option["roundtrip_transport"]["status"],
-                "STALE",
+                option["roundtrip_transport"]["token"],
+                "sourced_stale",
             )
             self.assertTrue(
                 option["roundtrip_transport"]["from_cache"]
@@ -1028,6 +1028,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "evidence": [
                         {
                             "domain": "railway",
+                            "status": "sourced",
                             "value": {
                                 "snapshot": {
                                     "status": "STALE",
@@ -1038,6 +1039,7 @@ class ProductWebContractTests(unittest.TestCase):
                         },
                         {
                             "domain": "web",
+                            "status": "sourced",
                             "value": {
                                 "retrieved_at": "2026-07-30T12:01:00+08:00",
                                 "hotel_area": {
@@ -1050,6 +1052,7 @@ class ProductWebContractTests(unittest.TestCase):
                         },
                         {
                             "domain": "map",
+                            "status": "sourced",
                             "value": {
                                 "snapshot_status": "STALE",
                                 "retrieved_at": "2026-07-30T12:02:00+08:00",
@@ -1120,7 +1123,11 @@ class ProductWebContractTests(unittest.TestCase):
                 },
             }
         }
-        payload = _map_payload_contract(run, plan_version=3)
+        payload = _map_payload_contract(
+            run,
+            plan_version=3,
+            now=datetime(2026, 7, 30, 13, 0, tzinfo=timezone.utc),
+        )
         self.assertEqual(payload["plan_version"], 3)
         self.assertEqual(
             set(payload),
@@ -1135,8 +1142,8 @@ class ProductWebContractTests(unittest.TestCase):
             "EXISTING_POLYLINE",
         )
         self.assertEqual(
-            payload["route_polylines"][0]["evidence_status"],
-            "STALE",
+            payload["route_polylines"][0]["token"],
+            "sourced_stale",
         )
         self.assertEqual(
             len(payload["route_polylines"][0]["polyline"]),
@@ -1444,8 +1451,17 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertIn("继续完善行程", script)
         self.assertIn("/execute", script)
         self.assertIn("renderTimeline", script)
-        for evidence_status in ("LIVE", "STALE", "MISSING"):
-            self.assertIn(evidence_status, script)
+        # 旧断言要求前端认识 LIVE / STALE / MISSING 三态。P3a 起对外返回的是
+        # docs/contracts/evidence-axes.md §4.1 的 8 个 token，前端只做查表。
+        for token in (
+            "verified",
+            "sourced_stale",
+            "estimated",
+            "conflicting",
+            "unknown",
+        ):
+            self.assertIn(token, script)
+        self.assertIn("next_action", script)
 
     def test_presentation_requires_three_attractions_and_route_chain(
         self,
@@ -1476,6 +1492,35 @@ class ProductWebContractTests(unittest.TestCase):
                 for index in range(3)
             ],
         ]
+        read_at = datetime(2026, 7, 30, 13, 0, tzinfo=timezone.utc)
+        context_evidence = [
+            {
+                "domain": "railway",
+                "status": "sourced",
+                "value": {
+                    "snapshot": {
+                        "status": "STALE",
+                        "retrieved_at": "2026-07-30T12:00:00+08:00",
+                    }
+                },
+                "sources": [],
+            },
+            {
+                "domain": "web",
+                "status": "sourced",
+                "value": {"retrieved_at": "2026-07-30T12:01:00+08:00"},
+                "sources": [],
+            },
+            {
+                "domain": "map",
+                "status": "sourced",
+                "value": {
+                    "retrieved_at": "2026-07-30T12:02:00+08:00",
+                    "local_transit": [{"route_id": "map-local-1"}],
+                },
+                "sources": [],
+            },
+        ]
         presentation = _presentation_contract(
             {
                 "result": {
@@ -1487,9 +1532,11 @@ class ProductWebContractTests(unittest.TestCase):
                         "conditional_blockers": [
                             {"blocker_id": "HOTEL_DETAIL_PENDING"}
                         ],
-                    }
+                    },
+                    "context": {"evidence": context_evidence},
                 }
-            }
+            },
+            now=read_at,
         )
         self.assertEqual(presentation["day_count"], 1)
         self.assertEqual(presentation["event_count"], 8)
@@ -1497,13 +1544,17 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertEqual(presentation["local_transit_count"], 3)
         self.assertTrue(presentation["detailed_itinerary_ready"])
         statuses = {
-            item["domain"]: item["status"]
+            item["domain"]: item["token"]
             for item in presentation["evidence_statuses"]
         }
-        self.assertEqual(statuses["railway"], "STALE")
-        self.assertEqual(statuses["attraction"], "LIVE")
-        self.assertEqual(statuses["local_transit"], "LIVE")
-        self.assertEqual(statuses["accommodation"], "LIVE")
+        # 四个域的定级现在一律走内核：token 由 (support, freshness) 合取算出，
+        # 不再读计划事件里落盘的 snapshot_status / schedule_status。
+        # 采集于 2026-07-30T12:00+08:00（= 04:00 UTC），读取于 13:00 UTC：
+        # 铁路与路线时长的容忍窗是 6 小时（已超），画像是 24 小时（未超）。
+        self.assertEqual(statuses["railway"], "sourced_stale")
+        self.assertEqual(statuses["attraction"], "verified")
+        self.assertEqual(statuses["local_transit"], "sourced_stale")
+        self.assertEqual(statuses["accommodation"], "verified")
 
         events.pop()
         presentation = _presentation_contract(
@@ -1514,9 +1565,11 @@ class ProductWebContractTests(unittest.TestCase):
                         "display_requirements": {
                             "accommodation_base": True,
                         },
-                    }
+                    },
+                    "context": {"evidence": context_evidence},
                 }
-            }
+            },
+            now=read_at,
         )
         self.assertFalse(presentation["detailed_itinerary_ready"])
 

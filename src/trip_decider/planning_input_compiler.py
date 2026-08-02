@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, time, timedelta
 
+from trip_decider.evidence_core import is_confirmed_absent
 from trip_decider.itinerary_planner import (
     make_attraction_event,
     make_duration_event,
@@ -266,11 +267,41 @@ def _compile_railway(
     dependencies: dict[str, list[str]],
     blockers: list[dict[str, object]],
 ) -> None:
-    if evidence is None or evidence.get("status") != "sourced":
+    # 判定点 3（p3b-gate-inventory.md §2.1，丙型）。旧实现在此静默 return，
+    # 连 blocker 都不产——unknown/conflicting 的铁路证据会让整段编译悄悄跳过，
+    # 计划照常生成而用户看不到任何提示（I7 第 2 条）。
+    if not _is_usable(evidence):
+        blockers.append(
+            _blocker(
+                "RAILWAY_EVIDENCE_MISSING",
+                "railway",
+                reason=(
+                    evidence.get("missing_reason")
+                    if evidence is not None
+                    else None
+                ),
+                fact_id=(
+                    str(evidence.get("evidence_id"))
+                    if evidence is not None
+                    else None
+                ),
+            )
+        )
         return
     value = evidence.get("value")
     if not isinstance(value, Mapping):
         blockers.append(_blocker("RAILWAY_EVIDENCE_MISSING", "railway"))
+        return
+    if is_confirmed_absent(value):
+        # 已核实该时间窗内没有直达车。这是一个确定的结论，不是「没查到」。
+        blockers.append(
+            _blocker(
+                "RAILWAY_NO_DIRECT_TRAIN",
+                "railway",
+                reason=value.get("scope"),
+                fact_id=str(evidence.get("evidence_id")),
+            )
+        )
         return
     snapshot = value.get("snapshot")
     if not isinstance(snapshot, Mapping):
@@ -426,7 +457,7 @@ def _compile_attractions(
     candidates: list[tuple[Mapping[str, object], str]] = []
     seen: set[str] = set()
     for evidence in (map_item, web_item):
-        if evidence is None or evidence.get("status") != "sourced":
+        if not _is_usable(evidence):
             continue
         evidence_id = str(evidence.get("evidence_id"))
         for value in _value_list(evidence, "attractions"):
@@ -1157,7 +1188,7 @@ def _compiled_map_points(
         deepcopy(dict(item))
         for item in _value_list(map_item, "map_points")
     ]
-    if web_item is None or web_item.get("status") != "sourced":
+    if not _is_usable(web_item):
         return values
     web_value = web_item.get("value")
     if not isinstance(web_value, Mapping):
@@ -1231,7 +1262,7 @@ def _value_list(
     evidence: Mapping[str, object] | None,
     key: str,
 ) -> list[Mapping[str, object]]:
-    if evidence is None or evidence.get("status") != "sourced":
+    if not _is_usable(evidence):
         return []
     value = evidence.get("value")
     raw = value.get(key) if isinstance(value, Mapping) else None
@@ -1241,7 +1272,7 @@ def _value_list(
 
 
 def _hotel_area(evidence: Mapping[str, object] | None) -> str | None:
-    if evidence is None or evidence.get("status") != "sourced":
+    if not _is_usable(evidence):
         return None
     value = evidence.get("value")
     hotel = value.get("hotel_area") if isinstance(value, Mapping) else None
@@ -1255,7 +1286,7 @@ def _destination_resolved(
 ) -> bool:
     """Return true only when sourced evidence identifies the destination."""
 
-    if map_item is not None and map_item.get("status") == "sourced":
+    if _is_usable(map_item) and not is_confirmed_absent(map_item.get("value")):
         value = map_item.get("value")
         destination = value.get("destination") if isinstance(value, Mapping) else None
         if isinstance(destination, Mapping) and any(
@@ -1264,7 +1295,7 @@ def _destination_resolved(
             for field in ("name", "adcode", "provider_record_id")
         ):
             return True
-    if web_item is not None and web_item.get("status") == "sourced":
+    if _is_usable(web_item) and not is_confirmed_absent(web_item.get("value")):
         value = web_item.get("value")
         name = (
             value.get("destination_official_name")
@@ -1352,12 +1383,30 @@ def _mapping(value: object, field: str) -> Mapping[str, object]:
     return value
 
 
+
+_USABLE_STATUSES = frozenset({"sourced", "estimated"})
+
+
+def _is_usable(evidence: Mapping[str, object] | None) -> bool:
+    """该证据是否携带单一可用值（evidence-axes.md §1）。
+
+    ``sourced`` 与 ``estimated`` 都携带；``missing`` 没有值；``conflicting``
+    有多个互斥的值，取任何一个都是替用户做裁决。P3b 之前这七处直接与
+    ``"sourced"`` 比较，那是三态时期「有值」的唯一说法。
+    """
+
+    return (
+        evidence is not None
+        and str(evidence.get("status")) in _USABLE_STATUSES
+    )
+
 def _blocker(
     blocker_id: str,
     domain: str,
     *,
     reason: object = None,
     severity: str = "conditional",
+    fact_id: str | None = None,
 ) -> dict[str, object]:
     suggested_actions = {
         "railway": ["重新查询铁路", "手动填写车次"],
@@ -1368,6 +1417,9 @@ def _blocker(
         "blocker_id": blocker_id,
         "domain": domain,
         "severity": severity,
+        # 裁决 8.2 / evidence-axes.md §5.5：结论层不复述证据状态，改为引用。
+        # 消费方顺着 fact_id 读该事实的 token，得知是「没结论」还是「打架」。
+        **({"fact_id": fact_id} if fact_id else {}),
         "reason": reason,
         "suggested_actions": suggested_actions.get(
             domain,

@@ -1,0 +1,73 @@
+{
+  "schema_version": "1",
+  "established_at": "2026-08-02",
+  "purpose": "P1-P5 期间不变式测试套件长期为红。本文件登记当前允许失败的测试；tests/test_invariant_ledger.py 断言实际失败集合与本登记逐条相等。多出失败是回归，少了失败是悄悄转绿未记录，两者都失败。",
+  "maintenance": "每个阶段闸门都要求同步本文件：转绿的条目删除，新增的不变式测试补登记。登记只接受断言失败——无法构造场景的阻塞项必须用 assertXxx 表达阻塞原因，不得让异常逃逸。",
+  "entries": [
+    {
+      "test_id": "tests.test_invariant_i1_no_persisted_display_status.PersistedDisplayStatusCase.test_i1_fresh_run_output_has_no_display_status_fields",
+      "invariant": "I1",
+      "expected_green_at": "P4",
+      "failing_assertion": "assertEqual([], 命中列表)：一次全新离线 run 的落盘产物中出现 464 处禁用展示状态字段（去重后），分布在 action-loop.json / run.json / plan-version.json / plans/plan-0001.json",
+      "blocked_on": null
+    },
+    {
+      "test_id": "tests.test_invariant_i4_non_stale_types_blocked.NonStaleTypesBlockedCase.test_i4_non_stale_type_reaches_feasibility_as_unknown",
+      "invariant": "I4",
+      "expected_green_at": "P5",
+      "failing_assertion": "assertEqual([], ['hotel_price'])：唯一的 stale_allowed=False 类型在 src/ 中没有生产者，无法构造端到端场景",
+      "blocked_on": "P5：hotel_price 的 status 为 planned（planned_for=P5，freshness-policy.md §2.2 注 2）。生产者落地前只能核对缓存层（第 1 条），第 2、3 条无法执行。"
+    },
+    {
+      "test_id": "tests.test_invariant_i9_no_city_specific_logic.NoCitySpecificLogicCase.test_i9_src_contains_no_place_name_literals",
+      "invariant": "I9",
+      "expected_green_at": "P5",
+      "failing_assertion": "assertEqual([], report)：src/trip_decider/destination_catalog.json 命中 8 个地名（三清山/上饶/九江/婺源/庐山/景德镇/杭州/黄山），src/trip_decider/web/index.html 命中「武汉」",
+      "blocked_on": null
+    }
+  ],
+  "current_phase": "P3b",
+  "phase_order": [
+    "P0",
+    "P1",
+    "P2",
+    "P3a",
+    "P3b",
+    "P4",
+    "P5"
+  ],
+  "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
+  "exemptions": [
+    {
+      "invariant": "I6",
+      "scope": "7 个写入侧模块仍在产出展示态字面量：agent_actions(10) / dynamic_discovery(1) / evidence_broker(6) / guided_discovery(5) / intercity_rail(9) / itinerary_planner(10) / planning_input_compiler(7)。P3b 后 guided_discovery 由 12 降至 5。",
+      "reason": "这些字面量不是读取层的并行 token 实现，而是被烘进落盘内容的持久化展示态。删除它们会改变 run.json / plan-version.json / evidence-cache 的字节内容，违反 P3a「不碰持久化」的硬边界。清理属于 P4（I1 的范围）。读取层没有豁免——trip_read_model 的 36 处已在本阶段清零。",
+      "expires_at_phase": "P4",
+      "tracked_in": "docs/contracts/invariants.md",
+      "paths": [
+        "src/trip_decider/agent_actions.py",
+        "src/trip_decider/dynamic_discovery.py",
+        "src/trip_decider/evidence_broker.py",
+        "src/trip_decider/guided_discovery.py",
+        "src/trip_decider/intercity_rail.py",
+        "src/trip_decider/itinerary_planner.py",
+        "src/trip_decider/planning_input_compiler.py"
+      ]
+    }
+  ],
+  "still_red_invariants": [
+    "I1",
+    "I4",
+    "I9"
+  ],
+  "green_invariants": [
+    "I2",
+    "I3a",
+    "I3b",
+    "I5",
+    "I6",
+    "I7",
+    "I8"
+  ],
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a 转绿；I3a 与 I7 于 P3b 全部转绿。I2 的 estimated 豁免已随枚举扩展清零。I6 的写入侧豁免保留至 P4（I1 的范围）。"
+}

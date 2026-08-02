@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 
+from trip_decider.evidence_core import TOKEN_UNKNOWN, FactVerdict
+from trip_decider.evidence_projection import (
+    is_supported,
+    project_domain,
+    verdict_payload,
+)
 from trip_decider.travel_agent import RunStatus, TaskMode
 
 def _planning_draft_read_model(
@@ -163,12 +169,19 @@ def _map_payload_contract(
     run: Mapping[str, object],
     *,
     plan_version: int | None,
+    now: datetime | None = None,
 ) -> dict[str, object]:
     """Project the current plan into a map-only, read-only contract.
 
     The projection never geocodes a name and never requests or reconstructs a
     route. Missing coordinates and geometry remain explicit.
+
+    ``now`` drives the freshness axis; it is injected so two reads at two
+    instants can disagree about freshness while agreeing about structure
+    (``invariants.md`` I5).
     """
+
+    read_at = now if now is not None else datetime.now(timezone.utc)
 
     result = run.get("result")
     plan = (
@@ -220,22 +233,20 @@ def _map_payload_contract(
         ]
         return max(values) if values else None
 
-    def snapshot_status(domain: str) -> str:
-        value = evidence_value(domain)
-        snapshot = value.get("snapshot")
-        status = (
-            snapshot.get("status")
-            if isinstance(snapshot, Mapping)
-            else value.get("snapshot_status")
-        )
-        return (
-            str(status).upper()
-            if isinstance(status, str)
-            and str(status).upper() in {"LIVE", "STALE"}
-            else "LIVE"
-            if domain in evidence
-            else "MISSING"
-        )
+    verdicts: dict[str, FactVerdict] = {}
+
+    def domain_verdict(domain: str) -> FactVerdict:
+        """Grade one evidence domain through the kernel.
+
+        This replaces the old ``snapshot_status`` which read a persisted
+        ``snapshot.status`` and fell back to ``LIVE`` whenever the domain key
+        merely existed — that fallback rendered failed collection as available
+        (baseline B2). Grading now depends only on the axes.
+        """
+
+        if domain not in verdicts:
+            verdicts[domain] = project_domain(evidence, domain, now=read_at)
+        return verdicts[domain]
 
     map_value = evidence_value("map")
     web_value = evidence_value("web")
@@ -338,7 +349,7 @@ def _map_payload_contract(
         event_id: object = None,
         day: int | None = None,
         position: object = None,
-        status: str = "MISSING",
+        verdict: FactVerdict | None = None,
         collected_at: str | None = None,
     ) -> None:
         if not isinstance(name, str) or not name.strip():
@@ -355,8 +366,12 @@ def _map_payload_contract(
                 "event_ids": [],
                 "days": [],
                 "position": point_by_name.get(normalized_name),
-                "evidence_status": status,
                 "retrieved_at": collected_at,
+                **(
+                    verdict_payload(verdict)
+                    if verdict is not None
+                    else {"token": TOKEN_UNKNOWN}
+                ),
             },
         )
         kind_priority = {
@@ -377,13 +392,19 @@ def _map_payload_contract(
             marker["event_ids"].append(event_id)
         if isinstance(day, int) and day not in marker["days"]:
             marker["days"].append(day)
-        if marker.get("evidence_status") == "MISSING" and status != "MISSING":
-            marker["evidence_status"] = status
+        # 一个地点可能被多条线索命中；已有支撑的不被无支撑的覆盖。
+        if (
+            marker.get("token") == TOKEN_UNKNOWN
+            and verdict is not None
+            and verdict.token != TOKEN_UNKNOWN
+        ):
+            marker.pop("next_action", None)
+            marker.update(verdict_payload(verdict))
             marker["retrieved_at"] = collected_at
 
-    railway_status = snapshot_status("railway")
-    map_status = snapshot_status("map")
-    web_status = snapshot_status("web")
+    railway_verdict = domain_verdict("railway")
+    map_verdict = domain_verdict("map")
+    web_verdict = domain_verdict("web")
     rail_origin_name: str | None = None
     rail_destination_name: str | None = None
     if isinstance(raw_places, list):
@@ -396,7 +417,6 @@ def _map_payload_contract(
                 if isinstance(item.get("event_ids"), list)
                 else []
             )
-            status = str(item.get("evidence_status") or map_status).upper()
             collected_at = (
                 str(item.get("retrieved_at"))
                 if isinstance(item.get("retrieved_at"), str)
@@ -418,7 +438,7 @@ def _map_payload_contract(
                         else None
                     ),
                     position=item,
-                    status=status,
+                    verdict=map_verdict,
                     collected_at=collected_at,
                 )
             if item.get("rail_role") == "origin" and isinstance(name, str):
@@ -450,7 +470,7 @@ def _map_payload_contract(
                     event.get("from_location")
                     or point_by_event_id.get(str(event_id))
                 ),
-                status=railway_status,
+                verdict=railway_verdict,
                 collected_at=retrieved_at("railway"),
             )
             add_marker(
@@ -468,7 +488,7 @@ def _map_payload_contract(
                     event.get("to_location")
                     or point_by_event_id.get(str(event_id))
                 ),
-                status=railway_status,
+                verdict=railway_verdict,
                 collected_at=retrieved_at("railway"),
             )
         elif event.get("type") == "attraction":
@@ -482,7 +502,7 @@ def _map_payload_contract(
                     event.get("location")
                     or point_by_event_id.get(str(event_id))
                 ),
-                status=web_status,
+                verdict=web_verdict,
                 collected_at=retrieved_at("web"),
             )
         elif event.get("type") in {"hotel", "rest"}:
@@ -495,7 +515,7 @@ def _map_payload_contract(
                     event.get("location")
                     or point_by_event_id.get(str(event_id))
                 ),
-                status=web_status,
+                verdict=web_verdict,
                 collected_at=retrieved_at("web"),
             )
     if hotel_area:
@@ -503,7 +523,7 @@ def _map_payload_contract(
             hotel_area.get("name"),
             kind="accommodation",
             position=hotel_area,
-            status=web_status,
+            verdict=web_verdict,
             collected_at=retrieved_at("web"),
         )
 
@@ -546,21 +566,15 @@ def _map_payload_contract(
             route_day = attraction_day_by_name.get(
                 destination_name.removesuffix("景区"),
             )
-        status = (
-            "STALE"
-            if route.get("schedule_status") == "STALE"
-            or map_status == "STALE"
-            else "LIVE"
-            if map_status != "MISSING"
-            else "MISSING"
-        )
+        # 路线段的定级跟随 map 域：段上原本携带的 schedule_status 是落盘的
+        # 展示态（I1 的清理对象），读取层不再消费它。
         add_marker(
             origin_name,
             kind="transit_stop",
             event_id=route_id,
             day=route_day,
             position=route.get("from_location"),
-            status=status,
+            verdict=map_verdict,
             collected_at=retrieved_at("map"),
         )
         add_marker(
@@ -569,7 +583,7 @@ def _map_payload_contract(
             event_id=route_id,
             day=route_day,
             position=route.get("to_location"),
-            status=status,
+            verdict=map_verdict,
             collected_at=retrieved_at("map"),
         )
         geometry = _map_polyline(
@@ -611,7 +625,7 @@ def _map_payload_contract(
                     or source_route.get("mode")
                     or "unknown"
                 ),
-                "evidence_status": status,
+                **verdict_payload(map_verdict),
                 "retrieved_at": retrieved_at("map"),
                 "geometry_status": (
                     "EXISTING_POLYLINE"
@@ -650,7 +664,7 @@ def _map_payload_contract(
                         "from": rail_origin_name,
                         "to": rail_destination_name,
                         "transport_mode": "railway",
-                        "evidence_status": railway_status,
+                        **verdict_payload(railway_verdict),
                         "retrieved_at": retrieved_at("railway"),
                         "geometry_status": "SCHEMATIC",
                         "polyline": [origin_position, destination_position],
@@ -684,9 +698,15 @@ def _presentation_contract(
     event_values: list[Mapping[str, object]] | None = None,
     *,
     evidence: Mapping[str, Mapping[str, object]] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, object]:
-    """Project runtime facts into the canonical user presentation contract."""
+    """Project runtime facts into the canonical user presentation contract.
 
+    ``now`` drives the freshness axis (``invariants.md`` I5); it is injected
+    rather than read so the projection stays a pure function of its inputs.
+    """
+
+    read_at = now if now is not None else datetime.now(timezone.utc)
     intent_value = run.get("intent")
     guided_confirmation: dict[str, object] = {
         "show_guided_action": False,
@@ -719,19 +739,21 @@ def _presentation_contract(
         and isinstance(item.get("domain"), str)
     }
 
-    def context_snapshot_status(domain: str) -> str | None:
-        item = evidence_by_domain.get(domain)
-        value = item.get("value") if isinstance(item, Mapping) else None
-        if not isinstance(value, Mapping):
-            return None
-        snapshot = value.get("snapshot")
-        if isinstance(snapshot, Mapping) and isinstance(
-            snapshot.get("status"),
-            str,
-        ):
-            return str(snapshot["status"])
-        status = value.get("snapshot_status")
-        return str(status) if isinstance(status, str) else None
+    context_verdicts: dict[str, FactVerdict] = {}
+
+    def context_verdict(domain: str) -> FactVerdict:
+        if domain not in context_verdicts:
+            context_verdicts[domain] = project_domain(
+                evidence_by_domain,
+                domain,
+                now=read_at,
+            )
+        return context_verdicts[domain]
+
+    def absent_verdict(domain: str, reason: str) -> FactVerdict:
+        """A domain with no planned events is unknown, not merely missing."""
+
+        return project_domain({}, domain, now=read_at, absent_reason=reason)
 
     def context_retrieved_at(domain: str) -> str | None:
         item = evidence_by_domain.get(domain)
@@ -806,50 +828,35 @@ def _presentation_contract(
         and isinstance(plan.get("display_requirements"), Mapping)
         else {}
     )
-    railway_status = "MISSING"
-    if rail_events:
-        railway_status = (
-            "STALE"
-            if any(
-                event.get("snapshot_status") == "STALE"
-                or event.get("schedule_status") == "STALE"
-                for event in rail_events
-            )
-            else "LIVE"
-        )
-    attraction_status = (
-        "STALE"
-        if attraction_events
-        and context_snapshot_status("web") == "STALE"
-        else "LIVE"
-        if attraction_events
-        else "MISSING"
+    # 四个展示域各自映射到一个证据域。有计划事件时定级跟随该证据域；没有事件
+    # 时该域根本没有结论，判 unknown——旧代码在这里让「没有事件」与「采集失败」
+    # 共用同一个词，两者无法区分。
+    railway_verdict = (
+        context_verdict("railway")
+        if rail_events
+        else absent_verdict("railway", "no_source_found")
     )
-    local_transit_status = (
-        "STALE"
-        if local_transit_events
-        and any(
-            event.get("schedule_status") == "STALE"
-            for event in local_transit_events
-        )
-        else "LIVE"
-        if local_transit_events
-        else "MISSING"
+    attraction_verdict = (
+        context_verdict("web")
+        if attraction_events
+        else absent_verdict("web", "no_source_found")
     )
-    accommodation_status = (
-        "STALE"
+    local_transit_verdict = (
+        context_verdict("map")
+        if local_transit_events
+        else absent_verdict("map", "no_source_found")
+    )
+    accommodation_verdict = (
+        context_verdict("web")
         if requirements.get("accommodation_base") is True
-        and context_snapshot_status("web") == "STALE"
-        else "LIVE"
-        if requirements.get("accommodation_base") is True
-        else "MISSING"
+        else absent_verdict("web", "no_source_found")
     )
     detailed_ready = (
         len(safe_days) > 0
         and len(attraction_events) >= 3
         and len(local_transit_events) >= len(attraction_events)
-        and railway_status in {"LIVE", "STALE"}
-        and accommodation_status in {"LIVE", "STALE"}
+        and is_supported(railway_verdict)
+        and is_supported(accommodation_verdict)
     )
     blockers = (
         plan.get("conditional_blockers")
@@ -890,34 +897,30 @@ def _presentation_contract(
             {
                 "domain": "railway",
                 "label": "跨城铁路",
-                "status": railway_status,
                 "count": len(rail_events),
                 "retrieved_at": context_retrieved_at("railway"),
+                **verdict_payload(railway_verdict),
             },
             {
                 "domain": "attraction",
                 "label": "景点",
-                "status": attraction_status,
                 "count": len(attraction_events),
                 "retrieved_at": context_retrieved_at("web"),
+                **verdict_payload(attraction_verdict),
             },
             {
                 "domain": "local_transit",
                 "label": "当地交通",
-                "status": local_transit_status,
                 "count": len(local_transit_events),
                 "retrieved_at": context_retrieved_at("map"),
+                **verdict_payload(local_transit_verdict),
             },
             {
                 "domain": "accommodation",
                 "label": "住宿基地",
-                "status": accommodation_status,
-                "count": (
-                    1
-                    if accommodation_status in {"LIVE", "STALE"}
-                    else 0
-                ),
+                "count": 1 if is_supported(accommodation_verdict) else 0,
                 "retrieved_at": context_retrieved_at("web"),
+                **verdict_payload(accommodation_verdict),
             },
         ],
         "blockers": [dict(item) for item in blockers if isinstance(item, Mapping)],
@@ -929,6 +932,7 @@ def _presentation_contract(
         "planning_handoff": _planning_handoff_contract(
             run,
             evidence=evidence,
+            now=read_at,
         ),
         "budget_summary": _budget_summary(
             budget_events,
@@ -974,7 +978,9 @@ def _planning_handoff_contract(
     run: Mapping[str, object],
     *,
     evidence: Mapping[str, Mapping[str, object]] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, object] | None:
+    read_at = now if now is not None else datetime.now(timezone.utc)
     intent = run.get("intent")
     result = run.get("result")
     if (
@@ -1095,10 +1101,14 @@ def _planning_handoff_contract(
             )
         ],
         "railway": {
-            "status": (
-                railway_value.get("snapshot", {}).get("status")
-                if isinstance(railway_value.get("snapshot"), Mapping)
-                else "MISSING"
+            # 旧实现直接透传落盘的 snapshot.status。那是持久化的展示态，
+            # 读取层不再消费它——定级一律走内核。
+            **verdict_payload(
+                project_domain(
+                    {"railway": railway} if isinstance(railway, Mapping) else {},
+                    "railway",
+                    now=read_at,
+                )
             ),
             "retrieved_at": (
                 railway_value.get("snapshot", {}).get("retrieved_at")

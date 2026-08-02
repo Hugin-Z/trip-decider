@@ -61,6 +61,14 @@
     .revision select, .revision textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); padding: 8px; }
     .revision textarea { resize: vertical; min-height: 64px; }
     .notice { border-radius: 10px; background: var(--surface-soft); padding: 10px 12px; color: var(--muted); }
+    /* 证据事实卡片：next_action.detail 落在卡片内部，不进全局提示区
+       （docs/contracts/invariants.md I3b）。blocking 与非 blocking 要能一眼分开。 */
+    .evidence-fact { border-top: 1px solid var(--border); padding: 8px 0; display: grid; gap: 4px; }
+    .evidence-fact:first-of-type { border-top: 0; }
+    .evidence-facts { display: grid; gap: 2px; margin-top: 8px; }
+    .next-action { margin: 0; font-size: 0.85rem; color: var(--muted); }
+    .next-action.blocking { color: #8a3a1a; font-weight: 600; }
+    .next-action-options { margin: 2px 0 0 1rem; font-size: 0.85rem; color: var(--muted); }
     .notice.error { color: var(--warning); }
     .diff-list { font-size: .86rem; }
     .hidden { display: none !important; }
@@ -81,6 +89,7 @@
       const app = document.getElementById("app");
       let busy = false;
       let rpcId = 0;
+      let hostContext = null;
       const pending = new Map();
 
       const element = (tag, className, text) => {
@@ -118,18 +127,58 @@
         window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
       });
       const notify = (method, params) => {
-        window.parent.postMessage({jsonrpc: "2.0", method, params}, "*");
+        const message = {jsonrpc: "2.0", method};
+        if (params !== undefined) message.params = params;
+        window.parent.postMessage(message, "*");
+      };
+      const handleBridgeMessage = (event) => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.id !== undefined && pending.has(message.id)) {
+          const item = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) item.reject(message.error);
+          else item.resolve(message.result);
+          return;
+        }
+        if (message.method === "ui/notifications/tool-result") {
+          renderPayload(message.params?.structuredContent);
+        }
+      };
+
+      // The transport listener must exist before ui/initialize is sent. Claude
+      // Desktop can answer the handshake before the rest of this script runs.
+      window.addEventListener("message", handleBridgeMessage, {passive: true});
+
+      const startSizeNotifications = () => {
+        let scheduled = false;
+        const report = () => {
+          if (scheduled) return;
+          scheduled = true;
+          requestAnimationFrame(() => {
+            scheduled = false;
+            notify("ui/notifications/size-changed", {
+              width: Math.ceil(window.innerWidth),
+              height: Math.ceil(document.documentElement.scrollHeight),
+            });
+          });
+        };
+        report();
+        new ResizeObserver(report).observe(document.documentElement);
       };
       const initialize = async () => {
-        await request("ui/initialize", {
+        const result = await request("ui/initialize", {
           appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
-          appCapabilities: {},
+          appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]},
           protocolVersion: "2026-01-26",
         });
-        notify("ui/notifications/initialized", {});
-        return true;
+        hostContext = result?.hostContext || null;
+        notify("ui/notifications/initialized");
+        startSizeNotifications();
+        return result;
       };
-      const bridgeReady = initialize().catch(() => false);
+      const bridgeReady = initialize().catch(() => null);
 
       const structured = (response) => response?.structuredContent || response?.structured_content || null;
       const callTool = async (name, args) => {
@@ -144,11 +193,13 @@
         const copy = element("div");
         copy.append(element("h2", "title", title), element("p", "subtitle", subtitle));
         bar.append(copy);
-        if (window.openai?.requestDisplayMode) {
+        const bridgeFullscreen = hostContext?.availableDisplayModes?.includes("fullscreen");
+        if (bridgeFullscreen || window.openai?.requestDisplayMode) {
           const expand = element("button", "button", "全屏查看");
           expand.type = "button";
           expand.addEventListener("click", async () => {
-            await window.openai.requestDisplayMode({mode: "fullscreen"});
+            if (bridgeFullscreen) await request("ui/request-display-mode", {mode: "fullscreen"});
+            else await window.openai.requestDisplayMode({mode: "fullscreen"});
             app.classList.add("full");
           });
           bar.append(expand);
@@ -162,6 +213,60 @@
           list.append(element("dt", "", name), element("dd", "", value));
         });
         return list;
+      };
+
+      // docs/contracts/evidence-axes.md §4.1 的 8 个 token。这里只做「token ->
+      // 中文标签」的查表；由两轴推导 token 的逻辑只存在于 evidence_core
+      // （invariants.md I6），前端不得自行推导。
+      const tokenLabels = {
+        verified: "已核实",
+        sourced_stale: "较早数据",
+        sourced_undated: "来源未记录采集时间",
+        estimated: "推算值",
+        estimated_stale: "较早推算值",
+        estimated_undated: "推算值，未记录采集时间",
+        conflicting: "来源不一致",
+        unknown: "尚未取得",
+      };
+
+      // 每条事实一张卡片。next_action 只在 token !== "verified" 时存在
+      // （§5.1 双向约束），因此它的有无就是渲染分支；detail 必须落在这张卡片
+      // 内部，不能挪到全局提示区——它说的是这一条事实缺什么。
+      const evidenceCard = (item) => {
+        const card = element("article", "evidence-fact");
+        card.append(element("strong", "", item.label || item.domain || "事实"));
+        const token = item.token || "unknown";
+        card.append(element("span", "status", tokenLabels[token] || "待核验"));
+        if (finite(item.count)) card.append(element("span", "muted", `${item.count} 项`));
+        const action = item.next_action;
+        if (action && action.detail) {
+          const note = element(
+            "p",
+            action.blocking ? "next-action blocking" : "next-action",
+            action.detail,
+          );
+          card.append(note);
+          if (Array.isArray(action.options) && action.options.length) {
+            const choices = element("ul", "next-action-options");
+            action.options.forEach((choice) => {
+              choices.append(element("li", "", choice.label || choice.option_id));
+            });
+            card.append(choices);
+          }
+        }
+        return card;
+      };
+
+      const evidencePanel = (statuses) => {
+        const panel = element("section", "panel");
+        panel.append(element("h3", "", "证据状态"));
+        const rows = Array.isArray(statuses) ? statuses : [];
+        if (!rows.length) {
+          panel.append(element("p", "muted", "本次运行还没有可展示的证据。"));
+          return panel;
+        }
+        rows.forEach((item) => panel.append(evidenceCard(item)));
+        return panel;
       };
 
       const renderCandidates = (payload) => {
@@ -188,6 +293,11 @@
               ["预算余量", money(option.budget_headroom_after_known_transport_cny)],
             ])
           );
+          if (Array.isArray(option.evidence_statuses) && option.evidence_statuses.length) {
+            const facts = element("div", "evidence-facts");
+            option.evidence_statuses.forEach((item) => facts.append(evidenceCard(item)));
+            card.append(facts);
+          }
           if (Array.isArray(option.evidence_missing) && option.evidence_missing.length) {
             card.append(element("strong", "", "仍缺证据"));
             const missing = element("ul");
@@ -296,6 +406,7 @@
           missingPanel.append(element("p", "muted", "没有未处理的硬缺失项。"));
         }
         sidebar.append(missingPanel);
+        sidebar.append(evidencePanel(presentation.evidence_statuses));
 
         const routesPanel = element("section", "panel");
         routesPanel.append(element("h3", "", "路线摘要"));
@@ -382,22 +493,6 @@
         if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
         else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
       };
-
-      window.addEventListener("message", (event) => {
-        if (event.source !== window.parent) return;
-        const message = event.data;
-        if (!message || message.jsonrpc !== "2.0") return;
-        if (message.id !== undefined && pending.has(message.id)) {
-          const item = pending.get(message.id);
-          pending.delete(message.id);
-          if (message.error) item.reject(message.error);
-          else item.resolve(message.result);
-          return;
-        }
-        if (message.method === "ui/notifications/tool-result") {
-          renderPayload(message.params?.structuredContent);
-        }
-      }, {passive: true});
 
       if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);
     })();

@@ -126,9 +126,28 @@ class RunStatus(str, Enum):
 
 
 class EvidenceStatus(str, Enum):
+    """证据的 support 轴（``docs/contracts/evidence-axes.md`` §1）。
+
+    ``ESTIMATED`` 于 2026-08-02（P3b）加入。此前只有三态，于是「有可用值」
+    这件事只能用 ``SOURCED`` 表达——``p3b-gate-inventory.md`` §4.1 记录的
+    29 处二值闸门全部源于此。判断「能不能用」请用 :attr:`is_usable`，不要
+    直接与 ``SOURCED`` 比较。
+    """
+
     SOURCED = "sourced"
+    ESTIMATED = "estimated"
     MISSING = "missing"
     CONFLICTING = "conflicting"
+
+    @property
+    def is_usable(self) -> bool:
+        """是否携带单一可用值。
+
+        ``sourced`` 与 ``estimated`` 都携带；``missing`` 没有值；
+        ``conflicting`` 有多个互斥的值，取任何一个都是替用户做裁决。
+        """
+
+        return self in {EvidenceStatus.SOURCED, EvidenceStatus.ESTIMATED}
 
 
 @dataclass(frozen=True)
@@ -490,8 +509,10 @@ class EvidenceItem:
             value.get("conflict_details", ()),
             "conflict_details",
         )
-        if status is EvidenceStatus.SOURCED and not raw_sources:
-            raise TravelAgentError("sourced evidence requires a source")
+        if status.is_usable and not raw_sources:
+            raise TravelAgentError(
+                "evidence carrying a value requires a source"
+            )
         if status is EvidenceStatus.MISSING and missing_reason is None:
             raise TravelAgentError(
                 "missing evidence requires missing_reason"
@@ -1256,14 +1277,79 @@ def _read_json_lines(path: Path) -> list[dict[str, object]]:
     return values
 
 
-def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
+# P3b：EvidenceStatus 加入 estimated 后，落盘的 status 取值域从 3 值变 4 值。
+# 按 PLAN.md v4 §7 约束 3，落盘契约变更必须携带版本标记——基线报告 H1 记录过
+# 一次无版本变更的后果（此前全部 run 的已安装计划变为不可读）。
+#
+# 本次是**最小打标**：只加版本号，不改落盘结构。完整的落盘契约改造属 P4。
+RUNTIME_SCHEMA_VERSION = 2
+
+# 需要打标的文件——它们承载 EvidenceItem.status，正是取值域变化的载体。
+# 裁决点名的三个文件里有两个已改用新布局（evidence/current.json 与
+# evidence/guided-comparison.json），旧名保留是因为读取端仍有回退分支
+# （agent_actions.py:2042、trip_application.py:861）。
+_VERSIONED_RUNTIME_FILES = frozenset(
+    {
+        "run.json",
+        "current.json",
+        "guided-comparison.json",
+        "evidence.json",
+        "guided-evidence.json",
+    }
+)
+
+
+def runtime_schema_version(document: Mapping[str, object]) -> int:
+    """读取落盘文件的 schema 版本。无该字段的文件按 1 处理。
+
+    1 = P3b 之前，``status`` 取值域是 sourced/missing/conflicting 三值。
+    2 = P3b 起，加入 estimated。
+    """
+
+    raw = document.get("schema_version")
+    return int(raw) if isinstance(raw, int) and raw > 0 else 1
+
+
+def stamp_schema_version(
+    path: Path,
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """给需要打标的落盘文件补上 schema_version。
+
+    落盘写入分散在三个模块各自的原子写函数里（``travel_agent._atomic_json``、
+    ``agent_actions._atomic_runtime_json``、``trip_application._atomic_json``），
+    三者都必须走这一处打标，否则同一批文件会出现版本不一致。
+    """
+
+    payload = dict(value)
+    if path.name in _VERSIONED_RUNTIME_FILES:
+        payload.setdefault("schema_version", RUNTIME_SCHEMA_VERSION)
+    return payload
+
+
+def atomic_runtime_json(path: Path, value: Mapping[str, object]) -> None:
+    """写一个 runtime JSON 文件：建目录、打版本标、原子替换。
+
+    **这是全仓唯一的 runtime JSON 写实现。** v1 时期有三份独立实现
+    （本函数、``agent_actions._atomic_runtime_json``、
+    ``trip_application._atomic_json``），格式还不一致，导致 P3b 的
+    schema_version 打标第一次只覆盖了其中一份。任何落盘契约变更要改三处、
+    而漏改不会立刻报错——这正是 persistence-v2.md §12.1 记录的问题。
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload_value = stamp_schema_version(path, value)
     payload = json.dumps(
-        value,
+        payload_value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     _atomic_bytes(path, payload + b"\n")
+
+
+# 模块内旧名，保留以免一次改动横跨太多调用点。外部一律用 atomic_runtime_json。
+_atomic_json = atomic_runtime_json
 
 
 def _atomic_json_lines(

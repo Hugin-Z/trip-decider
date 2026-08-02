@@ -379,6 +379,20 @@ class TripMCPAdapterTests(unittest.TestCase):
                             "innerHTML",
                         ):
                             self.assertNotIn(forbidden, app_html)
+                        self.assertLess(
+                            app_html.index(
+                                'window.addEventListener("message"'
+                            ),
+                            app_html.index('request("ui/initialize"'),
+                        )
+                        self.assertIn(
+                            '"ui/notifications/size-changed"',
+                            app_html,
+                        )
+                        self.assertIn(
+                            'availableDisplayModes: ["inline", "fullscreen"]',
+                            app_html,
+                        )
                         created = await _call(
                             session,
                             "create_trip_task",

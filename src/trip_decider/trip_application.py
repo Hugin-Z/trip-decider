@@ -51,6 +51,7 @@ from trip_decider.travel_agent import (
     confirm_intent,
     continue_run_with_intent,
     create_run,
+    atomic_runtime_json as _atomic_json,
     revise_run,
 )
 
@@ -1051,16 +1052,6 @@ def _required_text(value: object, field_name: str) -> str:
     return value.strip()
 
 
-def _atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
-    temporary.write_text(payload, encoding="utf-8", newline="\n")
-    temporary.replace(path)
 
 
 DEFAULT_TRIP_APPLICATION_SERVICE = TripApplicationService()

@@ -35,6 +35,7 @@ from trip_decider.itinerary_planner import (
     plan_destination_context,
     validate_destination_plan,
 )
+from trip_decider.evidence_core import aggregate_support
 from trip_decider.intercity_rail import rail_snapshot_metadata
 from trip_decider.planning_input_compiler import PlanningInputCompiler
 from trip_decider.simple_live import (
@@ -50,6 +51,7 @@ from trip_decider.travel_agent import (
     RunStatus,
     TravelAgentError,
     TravelIntent,
+    atomic_runtime_json as _atomic_runtime_json,
     build_destination_context,
 )
 
@@ -125,7 +127,7 @@ def start_action_loop(
                     "initial evidence domain does not match its key"
                 )
             state.evidence[domain] = item
-            if item.status is EvidenceStatus.SOURCED:
+            if item.status.is_usable:
                 state.last_sourced_evidence[domain] = item
                 state.action_status[domain] = "completed"
                 reused.append(domain)
@@ -468,8 +470,7 @@ def get_next_actions(
             "web" in state.evidence
             or (
                 "map" in state.evidence
-                and state.evidence["map"].status
-                is not EvidenceStatus.SOURCED
+                and not state.evidence["map"].status.is_usable
             )
         )
     ):
@@ -708,7 +709,7 @@ def submit_evidence(
             message="Codex开始执行网页事实核验。",
             details={"tool": "web"},
         )
-    if item.status is EvidenceStatus.SOURCED:
+    if item.status.is_usable:
         previous = state.last_sourced_evidence.get(item.domain)
         merged = (
             _merge_sourced_evidence(previous, item)
@@ -826,14 +827,14 @@ def _map_handler(
         existing_map
         if (
             existing_map is not None
-            and existing_map.status is EvidenceStatus.SOURCED
+            and existing_map.status.is_usable
         )
         else collect_map_evidence(
             replace(intent, destination_anchor=selected_name)
         )
     )
     if (
-        district_evidence.status is EvidenceStatus.SOURCED
+        district_evidence.status.is_usable
         and isinstance(district_evidence.value, Mapping)
         and isinstance(
             district_evidence.value.get("local_transit"),
@@ -843,7 +844,7 @@ def _map_handler(
     ):
         return district_evidence
     if (
-        district_evidence.status is not EvidenceStatus.SOURCED
+        not district_evidence.status.is_usable
         or not _web_route_inputs(state.evidence.get("web"))
     ):
         return district_evidence
@@ -909,7 +910,9 @@ def _map_handler(
         return EvidenceItem(
             evidence_id=district_evidence.evidence_id,
             domain="map",
-            status=EvidenceStatus.SOURCED,
+            # 高德路径规划返回的行程时长是服务端推算量，不是直接读出
+            # （evidence-axes.md §2.2）。support-reclassification.md §1 的 R2。
+            status=EvidenceStatus.ESTIMATED,
             value=enriched,
             sources=district_evidence.sources,
         )
@@ -951,7 +954,9 @@ def _map_handler(
     return EvidenceItem(
         evidence_id=district_evidence.evidence_id,
         domain="map",
-        status=EvidenceStatus.SOURCED,
+        # 同 R2：value 里的 local_transit[].duration_seconds 全部来自高德
+        # 路径规划。support-reclassification.md §1 的 R1。
+        status=EvidenceStatus.ESTIMATED,
         value=enriched,
         sources=tuple(sources),
     )
@@ -1148,7 +1153,7 @@ def _stale_railway_evidence(
     failed_refresh: EvidenceItem,
 ) -> EvidenceItem:
     if (
-        previous.status is not EvidenceStatus.SOURCED
+        not previous.status.is_usable
         or not isinstance(previous.value, Mapping)
     ):
         raise TravelAgentError(
@@ -1201,7 +1206,7 @@ def _stale_generic_evidence(
     failed_refresh: EvidenceItem,
 ) -> EvidenceItem:
     if (
-        previous.status is not EvidenceStatus.SOURCED
+        not previous.status.is_usable
         or not isinstance(previous.value, Mapping)
     ):
         raise TravelAgentError(
@@ -1256,13 +1261,27 @@ def _stale_generic_evidence(
     )
 
 
+
+def _merged_support(*statuses: EvidenceStatus) -> EvidenceStatus:
+    """合并两条可用证据时的 support 聚合（evidence-axes.md §2.4）。
+
+    调用方已保证输入都是 ``is_usable``，因此这里只需要处理 sourced 与
+    estimated 两支：任一 estimated 则结果 estimated。
+    """
+
+    aggregate = aggregate_support(
+        [status.value for status in statuses],
+        derivation_occurred=False,
+    )
+    return EvidenceStatus(aggregate.support)
+
 def _merge_sourced_evidence(
     previous: EvidenceItem,
     current: EvidenceItem,
 ) -> EvidenceItem:
     if (
-        previous.status is not EvidenceStatus.SOURCED
-        or current.status is not EvidenceStatus.SOURCED
+        not previous.status.is_usable
+        or not current.status.is_usable
         or previous.domain != current.domain
     ):
         raise TravelAgentError("only sourced evidence in one domain can merge")
@@ -1305,7 +1324,10 @@ def _merge_sourced_evidence(
     return EvidenceItem(
         evidence_id=current.evidence_id,
         domain=current.domain,
-        status=EvidenceStatus.SOURCED,
+        # 合并结果的 support 按 evidence-axes.md §2.4 聚合：任一输入为
+        # estimated 则结果 estimated。这是 29 处闸门里唯一引入聚合规则的点
+        # （p3b-gate-inventory.md §1.9）。
+        status=_merged_support(previous.status, current.status),
         value=merged_value,
         sources=tuple(sources),
     )
@@ -1427,7 +1449,7 @@ def _is_usable_action_evidence(
     data_type: str,
     evidence: EvidenceItem,
 ) -> bool:
-    if evidence.status is not EvidenceStatus.SOURCED:
+    if not evidence.status.is_usable:
         return False
     if action_id != "map" or data_type != "route_duration":
         return True
@@ -1446,7 +1468,7 @@ def _web_route_inputs(
 ) -> tuple[str, list[str]] | None:
     if (
         evidence is None
-        or evidence.status is not EvidenceStatus.SOURCED
+        or not evidence.status.is_usable
         or not isinstance(evidence.value, Mapping)
     ):
         return None
@@ -1500,7 +1522,7 @@ def _web_route_points(
 ) -> dict[str, Mapping[str, object]] | None:
     if (
         evidence is None
-        or evidence.status is not EvidenceStatus.SOURCED
+        or not evidence.status.is_usable
         or not isinstance(evidence.value, Mapping)
     ):
         return None
@@ -1533,7 +1555,7 @@ def _web_route_segments(
 ) -> list[tuple[str, str]]:
     if (
         evidence is not None
-        and evidence.status is EvidenceStatus.SOURCED
+        and evidence.status.is_usable
         and isinstance(evidence.value, Mapping)
     ):
         raw_segments = evidence.value.get("route_segments")
@@ -1657,7 +1679,7 @@ def _needs_local_transit(state: _LoopState) -> bool:
     evidence = state.evidence.get("map")
     if (
         evidence is None
-        or evidence.status is not EvidenceStatus.SOURCED
+        or not evidence.status.is_usable
         or not isinstance(evidence.value, Mapping)
     ):
         return True
@@ -1692,7 +1714,7 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
     map_item = state.evidence.get("map")
     if (
         map_item is None
-        or map_item.status is not EvidenceStatus.SOURCED
+        or not map_item.status.is_usable
         or not isinstance(map_item.value, Mapping)
     ):
         return False
@@ -2116,32 +2138,6 @@ def _runtime_json_object(path: Path) -> dict[str, object]:
             f"persisted action file is not an object: {path.name}"
         )
     return value
-
-
-def _atomic_runtime_json(
-    path: Path,
-    value: Mapping[str, object],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode("utf-8")
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 __all__ = [
