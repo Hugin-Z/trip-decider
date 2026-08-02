@@ -474,8 +474,8 @@ class ProductWebContractTests(unittest.TestCase):
                 "CONDITIONALLY_FEASIBLE",
             )
             self.assertEqual(
-                option["local_transport_difficulty"]["status"],
-                "MISSING",
+                option["local_transport_difficulty"]["support"],
+                "unknown",
             )
             self.assertGreater(
                 option["playable_time_seconds"],

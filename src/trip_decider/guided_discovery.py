@@ -17,8 +17,10 @@ from uuid import uuid4
 
 from trip_decider.evidence_core import (
     FRESHNESS_STALE,
+    SUPPORT_UNKNOWN,
     is_confirmed_absent,
     normalized_retrieved_at,
+    recovery_safe,
     token_freshness,
 )
 from trip_decider.evidence_projection import project_domain, usable_fact_values
@@ -274,7 +276,9 @@ def build_guided_comparison(
                         "feasibility_status": option[
                             "feasibility_status"
                         ],
-                        "option": option,
+                        # 事件记录发生了什么，不记录当时算出的展示结论：
+                        # token 是 now 的函数，写进事件流就冻死了（I1/I5）。
+                        "option": recovery_safe(option),
                     },
                 )
 
@@ -584,8 +588,10 @@ def _coarse_option(
             "timed_out": rail_check.timed_out,
         },
         "playable_time_seconds": playable,
+        # support 轴取值，不是展示态字面量。旧的 "MISSING" 是 B 套词表的
+        # 又一处残留——它说的就是「没有支撑」，轴上叫 unknown。
         "local_transport_difficulty": {
-            "status": "MISSING",
+            "support": SUPPORT_UNKNOWN,
             "value": None,
         },
         "themes": list(seed.get("themes", [])),

@@ -72,6 +72,7 @@ __all__ = [
     "is_confirmed_absent",
     "normalized_retrieved_at",
     "parse_timestamp",
+    "recovery_safe",
     "resolve_blocking",
     "resolve_freshness",
     "split_fact_id",
@@ -103,6 +104,32 @@ SUPPORT_VALUES = frozenset(
 _LEGACY_SUPPORT_NAMES: Mapping[str, str] = MappingProxyType(
     {"missing": SUPPORT_UNKNOWN}
 )
+
+
+# 读取层投影的键。它们由 now 与内核算出，写回盘就等于把一次读取的结论冻成
+# 数据——I5 禁止的正是这件事，I1 数的正是它的落盘痕迹。
+_PROJECTION_KEYS = frozenset(
+    {"token", "next_action", "display_status", "displayable", "planning_state"}
+)
+
+
+def recovery_safe(value: object) -> object:
+    """剥掉读取层投影，只留事实、结构与引用（persistence-v2.md §1.1）。
+
+    恢复数据的职责是让运行能接着走，不是让上一次的判定原样复活。判定由
+    读取层按当时的 now 重算——这是 PlanVersion 的同一个哲学：盘上存引用，
+    读时算结论。
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            key: recovery_safe(item)
+            for key, item in value.items()
+            if key not in _PROJECTION_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [recovery_safe(item) for item in value]
+    return value
 
 
 def support_from_legacy_name(name: object) -> str:

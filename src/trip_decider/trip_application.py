@@ -718,6 +718,11 @@ class TripApplicationService:
                         else "destination_context"
                     ),
                     "destination_label": destination,
+                    # TODO(P4-c): 事件流在兼任候选卡视图的数据源
+                    # （trip_query.candidates 在 run.result 非比较阶段时从
+                    # 事件流重建），因此这里剥掉 token / next_action 会断掉
+                    # 那条读取路径。要断这条通道，得先让 candidates() 按
+                    # 引用重算——那是安装语义重建的同一件事。
                     **dict(details or {}),
                 },
             )

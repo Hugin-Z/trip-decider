@@ -75,11 +75,10 @@ def railway_value(*, retrieved_at: str = DEFAULT_RETRIEVED_AT) -> dict[str, Any]
             "second_class_availability": "available",
         },
         "snapshot": {
-            "status": "LIVE",
+            "acquisition": "live_fetch",
             "retrieved_at": retrieved_at,
             "attempted_at": retrieved_at,
             "availability_semantics": "current_at_retrieval_only",
-            "display": f"LIVE · 采集于 {retrieved_at}",
         },
         "roundtrip_fare_cny": 800.0,
         "roundtrip_duration_seconds": 21600,

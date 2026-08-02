@@ -22,43 +22,43 @@ _TIMEOUT_SECONDS = 15
 _TRANSPORT_RETRIES = 1
 _RETRY_WAIT_SECONDS = 1
 _MAX_RESPONSE_BYTES = 4_000_000
-_RAIL_SNAPSHOT_STATUSES = {"LIVE", "STALE", "UNKNOWN"}
+# 采集语义词，不带轴词表影子（§1.4.1 在取值域上的延伸）。
+_RAIL_ACQUISITIONS = {"live_fetch", "cache_fallback", "not_acquired"}
 
 
 def rail_snapshot_metadata(
-    status: str,
+    acquisition: str,
     *,
     retrieved_at: str | None = None,
     attempted_at: str | None = None,
 ) -> dict[str, object]:
-    """Build explicit snapshot semantics without inferring freshness."""
+    """采集元数据：这次取到的是实时数据还是回退数据。
 
-    if status not in _RAIL_SNAPSHOT_STATUSES:
-        raise ValueError("invalid rail snapshot status")
-    if status in {"LIVE", "STALE"} and not retrieved_at:
-        raise ValueError(f"{status} rail snapshot requires retrieved_at")
-    if status == "UNKNOWN" and retrieved_at is not None:
-        raise ValueError("UNKNOWN rail snapshot cannot claim retrieved_at")
-    display = {
-        "LIVE": f"LIVE · 采集于 {retrieved_at}",
-        "STALE": (
-            f"STALE · 采集于 {retrieved_at} · "
-            "仅作历史参考，不代表当前余票或票价"
-        ),
-        "UNKNOWN": "UNKNOWN · 未取得可用铁路快照",
-    }[status]
+    `acquisition` 记录采集过程发生了什么，**不是新鲜度判断**。名与值都不带
+    轴词表的影子（persistence-v2.md §1.4.1）——旧的 `status: LIVE/STALE` 两
+    头都撞脸 freshness 轴，读代码的人会把它读成"现在新不新鲜"，而那是读取
+    时刻的函数，任何落盘的答案都是错的。
+
+    预渲染的 `display` 字符串一并删除：把展示逻辑烘进盘，且实测无人消费。
+    """
+
+    if acquisition not in _RAIL_ACQUISITIONS:
+        raise ValueError("invalid rail snapshot acquisition")
+    if acquisition in {"live_fetch", "cache_fallback"} and not retrieved_at:
+        raise ValueError(f"{acquisition} rail snapshot requires retrieved_at")
+    if acquisition == "not_acquired" and retrieved_at is not None:
+        raise ValueError("not_acquired rail snapshot cannot claim retrieved_at")
     return {
-        "status": status,
+        "acquisition": acquisition,
         "retrieved_at": retrieved_at,
         "attempted_at": attempted_at,
         "availability_semantics": (
             "current_at_retrieval_only"
-            if status == "LIVE"
+            if acquisition == "live_fetch"
             else "not_current_availability"
-            if status == "STALE"
+            if acquisition == "cache_fallback"
             else "availability_unknown"
         ),
-        "display": display,
     }
 
 
@@ -608,7 +608,7 @@ def query_intercity_rail(
             else None
         ),
         "snapshot": rail_snapshot_metadata(
-            "LIVE",
+            "live_fetch",
             retrieved_at=retrieved_at,
             attempted_at=attempted_at,
         ),

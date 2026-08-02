@@ -50,14 +50,14 @@ def _intent(destination: str) -> TravelIntent:
 READ_AT = datetime(2026, 7, 30, 3, 44, tzinfo=timezone.utc)  # = 11:44+08:00
 
 
-def _railway(status: str = "LIVE") -> EvidenceItem:
+def _railway(acquisition: str = "live_fetch") -> EvidenceItem:
     retrieved_at = "2026-07-30T10:44:00+08:00"
     return EvidenceItem(
         evidence_id="railway-live-query",
         domain="railway",
         status=EvidenceStatus.SOURCED,
         value={
-            "evidence_status": "sourced",
+            "support": "sourced",
             "domain": "railway",
             "origin": "甲站",
             "destination": "乙站",
@@ -82,15 +82,14 @@ def _railway(status: str = "LIVE") -> EvidenceItem:
                 "second_class_availability": "available",
             },
             "snapshot": {
-                "status": status,
+                "acquisition": acquisition,
                 "retrieved_at": retrieved_at,
                 "attempted_at": retrieved_at,
                 "availability_semantics": (
                     "current_at_retrieval_only"
-                    if status == "LIVE"
+                    if acquisition == "live_fetch"
                     else "not_current_availability"
                 ),
-                "display": status,
             },
             "roundtrip_fare_cny": 800.0,
         },
@@ -232,7 +231,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
                     value=intent.to_dict(),
                     sources=({"source_type": "user_supplied"},),
                 ),
-                _railway("STALE"),
+                _railway("cache_fallback"),
                 EvidenceItem(
                     evidence_id="map-missing",
                     domain="map",
@@ -323,7 +322,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             for item in ready["result"]["context"]["evidence"]
             if item["domain"] == "railway"
         )
-        self.assertEqual(railway["value"]["snapshot"]["status"], "STALE")
+        self.assertEqual(railway["value"]["snapshot"]["acquisition"], "cache_fallback")
         self.assertEqual(
             railway["value"]["outbound"][
                 "second_class_availability"
@@ -696,8 +695,8 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 if item["domain"] == "railway"
             )
             self.assertEqual(
-                railway["value"]["snapshot"]["status"],
-                "STALE",
+                railway["value"]["snapshot"]["acquisition"],
+                "cache_fallback",
             )
             self.assertEqual(
                 railway["value"]["outbound"][
@@ -715,9 +714,9 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             self.assertEqual(
                 restored_state.evidence["railway"].value["snapshot"][
-                    "status"
+                    "acquisition"
                 ],
-                "STALE",
+                "cache_fallback",
             )
 
     def test_completed_run_refreshes_in_place_and_keeps_stale_plan(
@@ -783,8 +782,8 @@ class PlanningInputCompilerTests(unittest.TestCase):
             if item["domain"] == "railway"
         )
         self.assertEqual(
-            railway["value"]["snapshot"]["status"],
-            "STALE",
+            railway["value"]["snapshot"]["acquisition"],
+            "cache_fallback",
         )
         self.assertEqual(
             railway["value"]["outbound"][

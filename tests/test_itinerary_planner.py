@@ -184,14 +184,19 @@ class ItineraryPlannerTests(unittest.TestCase):
 
     def test_stale_snapshot_requires_collection_time(self) -> None:
         stale = rail_snapshot_metadata(
-            "STALE",
+            "cache_fallback",
             retrieved_at="2026-07-29T10:00:00+08:00",
         )
-        self.assertEqual(stale["status"], "STALE")
-        self.assertIn("2026-07-29T10:00:00+08:00", stale["display"])
-        self.assertIn("不代表当前余票", stale["display"])
+        # 采集语义词，名与值都脱轴：它记录"这次取到的是回退数据"，
+        # 不记录"现在新不新鲜"——后者是读取时刻的函数。
+        self.assertEqual(stale["acquisition"], "cache_fallback")
+        self.assertNotIn("display", stale, "预渲染字符串不该落盘")
+        self.assertEqual(
+            "not_current_availability",
+            stale["availability_semantics"],
+        )
         with self.assertRaises(ValueError):
-            rail_snapshot_metadata("STALE")
+            rail_snapshot_metadata("cache_fallback")
 
     def test_stale_rail_event_never_claims_current_availability(self) -> None:
         event = make_rail_event(

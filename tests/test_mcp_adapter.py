@@ -83,11 +83,10 @@ def _railway() -> EvidenceItem:
                 "second_class_availability": "available",
             },
             "snapshot": {
-                "status": "LIVE",
+                "acquisition": "live_fetch",
                 "retrieved_at": retrieved_at,
                 "attempted_at": retrieved_at,
                 "availability_semantics": "current_at_retrieval_only",
-                "display": "LIVE",
             },
             "roundtrip_fare_cny": 800.0,
         },

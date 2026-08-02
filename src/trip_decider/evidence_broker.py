@@ -356,16 +356,11 @@ def _stale_projection(
     if not isinstance(value, Mapping):
         raise TravelAgentError("cached evidence value must be an object")
     normalized = deepcopy(dict(value))
-    expires_at = (
-        _parse_datetime(record.collected_at, "stored collected_at")
-        + timedelta(seconds=record.stale_ttl_seconds)
-    ).isoformat(timespec="seconds")
-    normalized["freshness"] = {
-        "status": "STALE",
-        "retrieved_at": record.collected_at,
-        "expires_at": expires_at,
-        "data_type": record.query.data_type,
-    }
+    # 只留采集时刻与 data_type。旧代码还写 status="STALE" 与 expires_at——
+    # 那是把新鲜度判定连同它的有效期一起冻进盘里，而两者都是读取时刻的函数：
+    # 读取层拿 retrieved_at + 策略表就能算出来，算出来的才会随 now 变。
+    normalized["retrieved_at"] = record.collected_at
+    normalized["data_type"] = record.query.data_type
     normalized["refresh_failure"] = {
         "missing_reason": live_failure.missing_reason,
     }
@@ -376,7 +371,7 @@ def _stale_projection(
             attempted_at = live_failure.value.get("attempted_at")
         normalized["snapshot"] = {
             **(dict(snapshot) if isinstance(snapshot, Mapping) else {}),
-            "status": "STALE",
+            "acquisition": "cache_fallback",
             "retrieved_at": record.collected_at,
             "attempted_at": attempted_at,
         }

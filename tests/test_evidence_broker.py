@@ -64,7 +64,7 @@ class EvidenceBrokerTests(unittest.TestCase):
         )
         self.assertIsNotNone(reused)
         assert reused is not None
-        self.assertEqual(reused.value["snapshot"]["status"], "STALE")
+        self.assertEqual(reused.value["snapshot"]["acquisition"], "cache_fallback")
         self.assertEqual(
             reused.value["outbound"]["second_class_availability"],
             "UNKNOWN",
@@ -197,7 +197,7 @@ class EvidenceBrokerTests(unittest.TestCase):
                 live_run = self._execute_railway(store, broker, intent)
                 live_value = self._current_rail(store, live_run)
                 self.assertEqual(live_value["marker"], "fresh-value")
-                self.assertEqual(live_value["snapshot"]["status"], "LIVE")
+                self.assertEqual(live_value["snapshot"]["acquisition"], "live_fetch")
 
                 agent_actions._TOOL_REGISTRY["railway"]["handler"] = (
                     lambda _intent, _state: self._missing()
@@ -380,7 +380,7 @@ class EvidenceBrokerTests(unittest.TestCase):
             value={
                 "marker": marker,
                 "snapshot": {
-                    "status": "LIVE",
+                    "acquisition": "live_fetch",
                     "retrieved_at": collected,
                 },
                 "outbound": {
