@@ -1707,7 +1707,9 @@ def _needs_local_transit(state: _LoopState) -> bool:
         or not isinstance(evidence.value, Mapping)
     ):
         return True
-    routes = evidence.value.get("local_transit")
+    # 路线走 facts：support 不可用的路线不算已采到，否则一条全 unknown 的
+    # 路线会让本域被判为「不需要再采」。
+    routes = usable_fact_values(evidence.facts).get("local_transit")
     route_inputs = _web_route_inputs(state.evidence.get("web"))
     if route_inputs is not None:
         base, attractions = route_inputs
@@ -1759,7 +1761,7 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
         and not stale
     ):
         return False
-    destination = map_item.value.get("destination")
+    destination = usable_fact_values(map_item.facts).get("destination")
     adcode = (
         destination.get("adcode")
         if isinstance(destination, Mapping)
