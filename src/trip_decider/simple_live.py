@@ -28,7 +28,7 @@ from datetime import date, datetime, time as wall_time, timedelta
 from pathlib import Path
 
 from trip_decider.adapters.contracts import stable_identifier
-from trip_decider.live_place_resolution import (
+from trip_decider.amap_parsers import (
     AmapCandidateProjection,
     AmapObservationMode,
     ParsedAmapDistrictResponse,

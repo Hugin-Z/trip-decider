@@ -11,12 +11,61 @@ import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Generic, Mapping, Sequence, TypeVar
 
-from trip_decider.schema_validation import (
-    ValidationProblem,
-    canonical_payload_sha256,
-)
+
+
+
+# ---------------------------------------------------------------------------
+# 自 schema_validation 迁入（persistence-v2.md 裁决 13.5）
+# ---------------------------------------------------------------------------
+#
+# schema_validation 随离线 artifact 管线删除，但这三个符号与 schema 无关——
+# 它们是通用的问题记录、结果包装与载荷摘要，存活模块（amap_parsers 与本模块）
+# 仍在用。原实现逐字符搬入。
+
+T = TypeVar("T")
+
+
+class ValidatorInternalError(RuntimeError):
+    """载荷无法被规范化序列化。"""
+
+
+@dataclass(frozen=True)
+class ValidationProblem:
+    """Stable, secret-safe machine problem."""
+
+    error_code: str
+    artifact_path: str
+    json_pointer: str
+    schema_rule: str
+    expected: str
+    actual_type: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ValidationResult(Generic[T]):
+    """A validation value or an ordered tuple of problems."""
+
+    value: T | None
+    problems: tuple[ValidationProblem, ...]
+
+
+def canonical_payload_sha256(payload: object) -> str:
+    """Return the frozen canonical-json-v1 payload digest."""
+
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValidatorInternalError("canonical payload serialization failed") from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 INGESTION_PROBLEM_CODES = frozenset(
