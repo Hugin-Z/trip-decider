@@ -19,6 +19,15 @@ from typing import Any
 
 from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
 
+_ATTRACTION_NAMES = ("景点甲", "景点乙", "景点丙", "景点丁")
+
+
+def _attraction_names(count: int) -> tuple[str, ...]:
+    """景点名。规划器按名字把路线段接到景点上，命名必须与路线段一致。"""
+
+    return _ATTRACTION_NAMES[:count]
+
+
 DEFAULT_RETRIEVED_AT = "2026-08-02T18:00:00+08:00"
 
 # 生产端每条证据都带的键。EvidenceItem.to_dict()（travel_agent.py）恒写它们，
@@ -81,7 +90,7 @@ def railway_value(*, retrieved_at: str = DEFAULT_RETRIEVED_AT) -> dict[str, Any]
 def map_value(
     *,
     retrieved_at: str = DEFAULT_RETRIEVED_AT,
-    route_count: int = 3,
+    attraction_count: int = 1,
 ) -> dict[str, Any]:
     """高德行政区与路线证据的生产端形状。"""
 
@@ -89,23 +98,30 @@ def map_value(
         "destination": {"name": "乙地", "adcode": "999999"},
         "retrieved_at": retrieved_at,
         "local_transit": [
+            # 车站到住宿片区这一段是规划器接续跨城铁路与当地行程的必需输入。
             {
-                "route_id": f"route-{index}",
-                "from": "住宿片区",
-                "to": f"景点{index}",
-                "duration_seconds": 1200,
-                "distance_meters": 6000,
+                "route_id": "route-station-base",
+                "from": "乙站",
+                "to": "住宿片区",
+                "duration_seconds": 1800,
+                "distance_meters": 12000,
                 "fare": {"status": "unknown", "amount_cny": None},
-            }
-            for index in range(1, route_count + 1)
+            },
+            *[
+                {
+                    "route_id": f"route-base-{name}",
+                    "from": "住宿片区",
+                    "to": name,
+                    "duration_seconds": 1200,
+                    "distance_meters": 6000,
+                    "fare": {"status": "unknown", "amount_cny": None},
+                }
+                for name in _attraction_names(attraction_count)
+            ],
         ],
         "map_points": [
-            {
-                "name": f"景点{index}",
-                "longitude": 117.8 + index / 100,
-                "latitude": 29.2,
-            }
-            for index in range(1, route_count + 1)
+            {"name": name, "longitude": 117.8 + i / 100, "latitude": 29.2}
+            for i, name in enumerate(_attraction_names(attraction_count), start=1)
         ],
     }
 
@@ -120,24 +136,27 @@ def web_value(
     return {
         "destination_official_name": "乙地",
         "retrieved_at": retrieved_at,
+        "verified_facts": [
+            {"field": "official_administrative_name", "value": "乙地"},
+        ],
         "attractions": [
             {
                 "attraction_id": f"spot-{index}",
-                "name": f"景点{index}",
+                "name": name,
                 "visit_minutes": 90,
                 "opening_hours": {"status": "unknown"},
                 "ticket": {"status": "unknown"},
             }
-            for index in range(1, attraction_count + 1)
+            for index, name in enumerate(_attraction_names(attraction_count), start=1)
         ],
         "hotel_area": {
             "name": "住宿片区",
             "longitude": 117.86,
             "latitude": 29.25,
         },
-        "route_sequence": ["住宿片区", *[f"景点{i}" for i in range(1, attraction_count + 1)]],
+        "route_sequence": ["住宿片区", *_attraction_names(attraction_count)],
         "route_segments": [
-            ["住宿片区", f"景点{index}"] for index in range(1, attraction_count + 1)
+            ["住宿片区", name] for name in _attraction_names(attraction_count)
         ],
     }
 
