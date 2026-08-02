@@ -454,6 +454,10 @@ _NON_FACT_KEYS = frozenset(
         "freshness",
         "refresh_failure",
         "local_transit_refresh_failure",
+        # 采集结果（AVAILABLE / PARTIAL / FAILED），与 refresh_failure 同族：
+        # 是取证元数据，可以持久化，但不是关于世界的事实。按名字列在这里，
+        # 不靠 _status 后缀——后缀是按拼写认的，这个字段正是被它误伤过。
+        "local_transit_outcome",
         "source",
         "sources",
         "retrieved_at",

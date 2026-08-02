@@ -163,7 +163,7 @@
 房价字段的 support 是 `unknown` 时，它根本走不到 freshness 那一步——token 是给
 "有值、需评估新鲜度"的字段用的。support 轴够用时不要拉 freshness 入伙。
 
-## 5.3 需要裁决：`local_transit_result_status` 可能不是展示态
+## 5.3 已裁决并落地：`local_transit_outcome` 是采集元数据，退出翻面范围
 
 涉及 `agent_actions:1338` / `:1479` / `:1720` 与 `evidence_broker:343`，共 4 处。
 
@@ -179,7 +179,14 @@
 3. 更好的做法是改名去掉 `_status` 后缀（例如 `local_transit_collection_outcome`），
    让机械规则不必开特例——**后缀规则开特例是 M1 的复发路径**。
 
-**这一组在裁决前不动，也不计入 §1 的预期增量。** 若裁决为采集元数据，翻面时它零变化。
+**裁决结果：判为采集元数据，采用上面第 3 条（改名）。** 已落地：
+
+* 字段更名 `local_transit_result_status` → `local_transit_outcome`，不再带任何轴词表的影子；
+* 按**名字**列入 `_NON_FACT_KEYS`（与 `refresh_failure` 并列），不再靠 `_status` 后缀被误伤——
+  后缀是按拼写认的，语义分类必须按名字认；
+* 四处消费点继续读 `.value`，这是**永久白名单**而非延期债：读采集元数据本来就该走那里。
+
+**这一组零变化，退出翻面范围。**
 
 ## 5.4 高危复核项
 
@@ -197,7 +204,7 @@ C 组改动落在 `_needs_local_transit` / `_can_collect_local_transit`——它
 | B | 1 | 事件少一字段，表征零变化 |
 | C | 2 | 见 §5.4，`network_calls` 须不变 |
 | D | 1 | 值域不变，产出条件换源 |
-| §5.3 | 4 | **待裁决**，暂定零变化 |
+| §5.3 | 4 | **已退出翻面范围**（分类修正为采集元数据） |
 
 ---
 

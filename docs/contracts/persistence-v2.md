@@ -111,6 +111,23 @@
 | v1 的四种形状 | `value.refresh_failure`（两种）、`value.local_transit_refresh_failure`、事件 detail 里的字符串——全部归一到上面一种 |
 | I1 白名单 | 保留（采集元数据，非展示态） |
 
+#### 1.4.1 采集元数据清单
+
+`refresh_failure` 不是唯一一个。同族字段一并登记——它们**可以持久化**，不受 I1 约束，
+也不进 facts（不是关于世界的事实，是关于采集过程的记录）：
+
+| 字段 | 取值域 | 说明 |
+|---|---|---|
+| `refresh_failure` | `{missing_reason, attempted_at}` | 刷新失败，封顶 freshness 为 stale（§3.4） |
+| `local_transit_outcome` | `AVAILABLE` / `PARTIAL` / `FAILED` | 本地交通采集结果 |
+
+`local_transit_outcome` 原名 `local_transit_result_status`。P4-b2 改名，因为
+`_status` 后缀让 `_is_non_fact_key` 按**拼写**把它当展示态剪掉了——它的三个取值不属于
+任何一个轴，是采集过程的记录。
+
+**规则：采集元数据按名字登记在本表，不靠后缀匹配识别。** 后缀是拼写，分类是语义；
+让机械规则去猜语义，猜错时的修法只有开特例，而特例是 M1「四套词表」的复发路径。
+
 ---
 
 ## 2. 逐文件 v2 规格

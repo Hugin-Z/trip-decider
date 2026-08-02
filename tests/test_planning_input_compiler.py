@@ -856,7 +856,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             value={
                 "destination": {"adcode": "000000"},
                 "local_transit_input_signature": ["基地", "景点甲"],
-                "local_transit_result_status": "FAILED",
+                "local_transit_outcome": "FAILED",
                 "local_transit_refresh_failure": {"stage": "poi_transport"},
                 "local_transit": [
                     {
@@ -881,7 +881,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
                     "景点乙",
                     "景点丙",
                 ],
-                "local_transit_result_status": "AVAILABLE",
+                "local_transit_outcome": "AVAILABLE",
                 "local_transit": [
                     {
                         "route_id": f"route-{index}",
@@ -901,7 +901,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
         )
         self.assertEqual(len(merged.value["local_transit"]), 3)
         self.assertEqual(
-            merged.value["local_transit_result_status"],
+            merged.value["local_transit_outcome"],
             "AVAILABLE",
         )
         self.assertNotIn("local_transit_refresh_failure", merged.value)

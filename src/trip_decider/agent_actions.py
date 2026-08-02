@@ -918,7 +918,7 @@ def _map_handler(
         )
     except _LiveFailure as error:
         enriched = deepcopy(dict(value))
-        enriched["local_transit_result_status"] = "FAILED"
+        enriched["local_transit_outcome"] = "FAILED"
         enriched["local_transit_input_signature"] = route_signature
         enriched["local_transit_refresh_failure"] = {
             "stage": error.stage,
@@ -950,7 +950,7 @@ def _map_handler(
         route["evidence_status"] = "LIVE"
     enriched = deepcopy(dict(value))
     enriched["local_transit"] = local_transit
-    enriched["local_transit_result_status"] = route_result.get("status")
+    enriched["local_transit_outcome"] = route_result.get("status")
     enriched["local_transit_input_signature"] = route_signature
     enriched["local_transit_place_resolutions"] = deepcopy(
         route_result.get("place_resolutions", {})
@@ -1328,14 +1328,14 @@ def _merge_sourced_evidence(
         for field_name in (
             "local_transit",
             "local_transit_input_signature",
-            "local_transit_result_status",
+            "local_transit_outcome",
         ):
             if field_name in current.value:
                 merged_map[field_name] = deepcopy(
                     current.value[field_name]
                 )
         if (
-            current.value.get("local_transit_result_status")
+            current.value.get("local_transit_outcome")
             in {"AVAILABLE", "PARTIAL"}
             and "local_transit_refresh_failure" not in current.value
         ):
@@ -1476,7 +1476,7 @@ def _is_usable_action_evidence(
     value = evidence.value
     return (
         isinstance(value, Mapping)
-        and value.get("local_transit_result_status")
+        and value.get("local_transit_outcome")
         in {"AVAILABLE", "PARTIAL"}
         and isinstance(value.get("local_transit"), list)
         and bool(value["local_transit"])
@@ -1717,7 +1717,7 @@ def _needs_local_transit(state: _LoopState) -> bool:
             or set(observed_signature) != set(expected_signature)
         ):
             return True
-        if evidence.value.get("local_transit_result_status") == "FAILED":
+        if evidence.value.get("local_transit_outcome") == "FAILED":
             # The exact route request already consumed its automatic retry.
             # Keep the failure explicit and let Planner return a partial plan;
             # only an explicit user re-query may run the same parameters again.
@@ -1749,7 +1749,7 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
         and freshness.get("status") == "STALE"
     )
     if (
-        "local_transit_result_status" in map_item.value
+        "local_transit_outcome" in map_item.value
         and map_item.value.get("local_transit_input_signature")
         == expected_signature
         and not stale

@@ -340,7 +340,7 @@ def _is_usable_live(
     if query.data_type == "route_duration":
         routes = value.get("local_transit")
         return (
-            value.get("local_transit_result_status")
+            value.get("local_transit_outcome")
             in {"AVAILABLE", "PARTIAL"}
             and isinstance(routes, list)
             and bool(routes)
