@@ -17,7 +17,10 @@ import json
 import os
 from pathlib import Path
 
-from trip_decider.evidence_core import derive_facts
+from trip_decider.evidence_core import (
+    derive_facts,
+    support_from_legacy_name,
+)
 from threading import Condition, RLock
 from typing import Any
 from uuid import uuid4
@@ -154,11 +157,11 @@ class EvidenceStatus(str, Enum):
     def support(self) -> str:
         """support 轴取值（evidence-axes.md §6.3 的映射）。
 
-        枚举值与 support 轴只差一个名字：``missing`` 对应轴上的 ``unknown``。
-        v1 时期这两个词混用过，映射写在这里免得每个消费点各自拼一次。
+        映射本身住在内核，全仓只此一份——词表映射和 token 一样，实现数
+        必须是 1（基线报告 M1「四套词表」）。
         """
 
-        return "unknown" if self is EvidenceStatus.MISSING else self.value
+        return support_from_legacy_name(self.value)
 
     @property
     def is_usable(self) -> bool:

@@ -31,6 +31,7 @@ from trip_decider.evidence_core import (
     derive_facts,
     evaluate_fact,
     normalized_retrieved_at,
+    support_from_legacy_name,
     token_support,
 )
 
@@ -449,9 +450,11 @@ def item_facts(item: Any) -> tuple[Mapping[str, Any], ...]:
             fact for fact in value["facts"] if isinstance(fact, Mapping)
         )
     status = item.get("status")
-    support = str(status) if isinstance(status, str) else SUPPORT_SOURCED
-    if support == "missing":  # 枚举名与 support 轴只差这一个名字
-        support = "unknown"
+    support = (
+        support_from_legacy_name(status)
+        if isinstance(status, str)
+        else SUPPORT_SOURCED
+    )
     domain = str(item.get("domain") or "")
     conflict_details = item.get("conflict_details")
     return derive_facts(

@@ -97,6 +97,24 @@ SUPPORT_VALUES = frozenset(
     {SUPPORT_SOURCED, SUPPORT_ESTIMATED, SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}
 )
 
+# v1 的枚举名与 support 轴只差一个词。映射只许有一份——词表映射和 token
+# 一样，实现数必须是 1（基线报告 M1「四套词表」）。枚举本身是否退役是另一
+# 个问题，退役前它存在期间也只许这一份。
+_LEGACY_SUPPORT_NAMES: Mapping[str, str] = MappingProxyType(
+    {"missing": SUPPORT_UNKNOWN}
+)
+
+
+def support_from_legacy_name(name: object) -> str:
+    """旧状态名 → support 轴取值。认不出的原样返回，由校验去拒。
+
+    只吃字符串：内核不认识产品的枚举类型，调用方传 ``status.value``。
+    """
+
+    if not isinstance(name, str):
+        return SUPPORT_UNKNOWN
+    return _LEGACY_SUPPORT_NAMES.get(name, name)
+
 FRESHNESS_FRESH = "fresh"
 FRESHNESS_STALE = "stale"
 FRESHNESS_UNDATED = "undated"
