@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from trip_decider.evidence_core import is_confirmed_absent
 from trip_decider.itinerary_planner import (
@@ -28,7 +28,17 @@ class PlanningInputCompiler:
     def compile(
         self,
         context: DestinationContext | Mapping[str, object],
+        *,
+        now: datetime | None = None,
     ) -> dict[str, object]:
+        """``now`` 是读取时刻，判定 freshness 用。
+
+        本次只接线不使用：铁路段仍读落盘的 ``snapshot.status``。换成读取时
+        token 需要连带翻整份表征基线（见 p4b-baseline-flip-preview.md），
+        安排在 agent_actions 四子批之后，好让基线在那批期间保持可用。
+        """
+
+        read_at = now if now is not None else datetime.now(timezone.utc)
         payload = (
             context.to_dict()
             if isinstance(context, DestinationContext)
@@ -80,6 +90,7 @@ class PlanningInputCompiler:
         railway = evidence.get("railway")
         _compile_railway(
             railway,
+            now=read_at,
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -262,6 +273,7 @@ class PlanningInputCompiler:
 def _compile_railway(
     evidence: Mapping[str, object] | None,
     *,
+    now: datetime,
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],

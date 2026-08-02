@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -998,7 +999,10 @@ def _planner_handler(
         intent,
         (user, *(state.evidence[domain] for domain in _DOMAINS)),
     )
-    compiled = PlanningInputCompiler().compile(context)
+    compiled = PlanningInputCompiler().compile(
+        context,
+        now=datetime.now(timezone.utc),
+    )
     planning_draft = plan_destination_context(context.to_dict())
     planning_draft = {
         **planning_draft,
