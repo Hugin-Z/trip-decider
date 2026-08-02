@@ -143,7 +143,19 @@ def check() -> list[str]:
     return mismatches
 
 
+FLIPPED_AT = "7f4aeeb"
+
+
 def main(argv: list[str]) -> int:
+    print(
+        f"⚠ 翻面已于 {FLIPPED_AT} 执行完毕，本模块已用尽。
+"
+        "  基线现在**包含**那些新增 blocker，因此 diff 为空，"
+        "「预期未在 diff 中出现」必然全部触发。
+"
+        "  下面的 14 条是这个终态的表现，不是失配。判决记录见该 commit。
+"
+    )
     mismatches = check()
     print(f"preview 冻结版：{PREVIEW_BASELINE}")
     if mismatches:
