@@ -1913,7 +1913,7 @@ def collect_destination_evidence(
                 domain,
                 "completed",
                 f"{domain}数据源未配置，结果保持missing。",
-                {"evidence_status": "missing"},
+                {"support": "unknown"},
             )
             continue
         emit(domain, "started", f"开始收集{domain}证据。", None)

@@ -200,7 +200,7 @@ def start_action_loop(
             message=f"{_action_title(domain)}沿用区域比较阶段证据。",
             details={
                 "tool": domain,
-                "evidence_status": "sourced",
+                "support": "sourced",
             },
         )
     return get_next_actions(run_id, store=store)
@@ -776,7 +776,7 @@ def submit_evidence(
             message=f"{_action_title(action_id)}取得有效证据。",
             details={
                 "tool": action_id,
-                "evidence_status": "sourced",
+                "support": "sourced",
             },
         )
         return get_next_actions(run_id, store=store)
@@ -803,7 +803,7 @@ def submit_evidence(
             ),
             details={
                 "tool": action_id,
-                "evidence_status": "sourced",
+                "support": "sourced",
                 "snapshot_status": "STALE",
                 "availability": (
                     "UNKNOWN" if action_id == "railway" else None
@@ -822,7 +822,7 @@ def submit_evidence(
         message=f"{_action_title(action_id)}未取得有效证据。",
         details={
             "tool": action_id,
-            "evidence_status": item.status.value,
+            "support": item.status.support,
         },
     )
     state.action_status[action_id] = "failed"

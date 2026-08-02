@@ -73,7 +73,7 @@ def collect_railway_evidence(intent: TravelIntent) -> EvidenceItem:
         (time.monotonic() - started) * 1000,
         3,
     )
-    if result.get("evidence_status") != "sourced":
+    if result.get("support") != "sourced":
         return EvidenceItem(
             evidence_id="railway-live-query",
             domain="railway",
@@ -117,7 +117,7 @@ def collect_map_evidence(intent: TravelIntent) -> EvidenceItem:
             },
             missing_reason=error.stage,
         )
-    status = result.get("evidence_status")
+    status = result.get("support")
     if status == "missing":
         return EvidenceItem(
             evidence_id="map-live-query",

@@ -458,6 +458,9 @@ _NON_FACT_KEYS = frozenset(
         # 是取证元数据，可以持久化，但不是关于世界的事实。按名字列在这里，
         # 不靠 _status 后缀——后缀是按拼写认的，这个字段正是被它误伤过。
         "local_transit_outcome",
+        # 采集器写在 value 顶层的 item 级 support（P4-b3 甲类改名后的形态）。
+        # 它是关于这条证据的元数据，不是关于世界的事实。
+        "support",
         "source",
         "sources",
         "retrieved_at",

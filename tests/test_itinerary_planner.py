@@ -344,7 +344,7 @@ class ItineraryPlannerTests(unittest.TestCase):
                 travelers=2,
                 budget_cny=1000,
             )
-        self.assertEqual(result["evidence_status"], "sourced")
+        self.assertEqual(result["support"], "sourced")
         self.assertEqual(result["outbound"]["train_code"], "OUTBOUND")
         self.assertEqual(result["return"]["train_code"], "RETURN")
         self.assertEqual(result["roundtrip_fare_cny"], 400.0)

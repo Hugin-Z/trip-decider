@@ -199,7 +199,7 @@ class DerivationDetailCase(unittest.TestCase):
                 "train_code": "G100",
                 "snapshot": {"status": "STALE", "retrieved_at": STAMP},
                 "schedule_status": "STALE",
-                "evidence_status": "sourced",
+                "support": "sourced",  # item 级元数据，不该成为 fact
                 "refresh_failure": {"missing_reason": "rail_http"},
                 "network_attempts": 3,
                 "source": {"provider": "p"},

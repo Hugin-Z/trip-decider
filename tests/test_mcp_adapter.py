@@ -58,7 +58,7 @@ def _railway() -> EvidenceItem:
         domain="railway",
         status=EvidenceStatus.SOURCED,
         value={
-            "evidence_status": "sourced",
+            "support": "sourced",
             "domain": "railway",
             "origin": "甲站",
             "destination": "乙站",

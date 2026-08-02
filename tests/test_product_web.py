@@ -1248,7 +1248,7 @@ class ProductWebContractTests(unittest.TestCase):
         with patch(
             "trip_decider.destination_runtime.query_destination_district",
             return_value={
-                "evidence_status": "sourced",
+                "support": "sourced",
                 "domain": "map",
                 "destination": {
                     "name": "乙地",

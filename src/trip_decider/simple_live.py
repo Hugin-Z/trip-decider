@@ -331,7 +331,7 @@ def query_destination_district(
     credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
     if not isinstance(credential, str) or not credential:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "domain": "map",
             "missing_reason": "amap_web_service_key_not_configured",
             "network_attempts": 0,
@@ -382,7 +382,7 @@ def query_destination_district(
     )
     if not matches:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "domain": "map",
             "missing_reason": "exact_destination_district_not_found",
             "network_attempts": response.attempts,
@@ -390,7 +390,7 @@ def query_destination_district(
         }
     if len(matches) > 1:
         return {
-            "evidence_status": "conflicting",
+            "support": "conflicting",
             "domain": "map",
             "conflict_details": [
                 "multiple_exact_destination_districts"
@@ -413,7 +413,7 @@ def query_destination_district(
         }
     match = matches[0]
     return {
-        "evidence_status": "sourced",
+        "support": "sourced",
         "domain": "map",
         "destination": {
             "name": match.name,
@@ -436,7 +436,7 @@ def list_live_top_level_regions() -> dict[str, object]:
     credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
     if not isinstance(credential, str) or not credential:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "domain": "map_region_index",
             "missing_reason": "amap_web_service_key_not_configured",
             "network_attempts": 0,
@@ -488,7 +488,7 @@ def list_live_top_level_regions() -> dict[str, object]:
         timespec="seconds"
     )
     return {
-        "evidence_status": "sourced",
+        "support": "sourced",
         "domain": "map_region_index",
         "regions": regions,
         "retrieved_at": retrieved_at,
@@ -647,7 +647,7 @@ def search_live_places(
     credential = os.environ.get("AMAP_WEB_SERVICE_KEY")
     if not isinstance(credential, str) or not credential:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "missing_reason": "amap_web_service_key_not_configured",
             "network_attempts": 0,
             "places": [],
@@ -701,7 +701,7 @@ def search_live_places(
             }
         )
     return {
-        "evidence_status": "sourced",
+        "support": "sourced",
         "keyword": normalized_keyword,
         "region": normalized_region,
         "city_limit": city_limit,

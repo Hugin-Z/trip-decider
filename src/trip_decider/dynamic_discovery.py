@@ -85,7 +85,7 @@ def dynamic_destination_seeds(
     sourced = [
         response
         for response in responses
-        if response.get("evidence_status") == "sourced"
+        if response.get("support") == "sourced"
     ]
     if not sourced:
         raise TravelAgentError("live destination search returned no evidence")
@@ -193,7 +193,7 @@ def _open_destination_seeds(
         ) from error
     raw_regions = region_response.get("regions")
     if (
-        region_response.get("evidence_status") != "sourced"
+        region_response.get("support") != "sourced"
         or not isinstance(raw_regions, list)
     ):
         raise TravelAgentError(
@@ -231,7 +231,7 @@ def _open_destination_seeds(
         values = [
             value for value in places if isinstance(value, Mapping)
         ] if isinstance(places, list) else []
-        if response.get("evidence_status") != "sourced":
+        if response.get("support") != "sourced":
             continue
         for value in values:
             label = str(value.get("city") or "").strip()
@@ -334,7 +334,7 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
     sourced = [
         (kind, response)
         for kind, response in results
-        if response.get("evidence_status") == "sourced"
+        if response.get("support") == "sourced"
     ]
     if not sourced:
         return EvidenceItem(
@@ -466,7 +466,7 @@ def _safe_live_search(
         )
     except Exception as error:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "missing_reason": "live_search_failed",
             "failure_type": type(error).__name__,
             "network_attempts": 0,

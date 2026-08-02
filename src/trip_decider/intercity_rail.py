@@ -413,7 +413,7 @@ def search_live_station_names(
         names, _codes = client.station_codes()
     except _RailFailure as error:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "domain": "railway_station_index",
             "missing_reason": error.stage,
             "network_attempts": client.network_attempts,
@@ -421,7 +421,7 @@ def search_live_station_names(
         }
     matches = [name for name in names if token in name][:limit]
     return {
-        "evidence_status": "sourced",
+        "support": "sourced",
         "domain": "railway_station_index",
         "query": token,
         "station_names": matches,
@@ -495,7 +495,7 @@ def query_intercity_rail(
         ]
         if missing_stations:
             return {
-                "evidence_status": "missing",
+                "support": "unknown",
                 "domain": "railway",
                 "missing_reason": "exact_station_identity_not_found",
                 "missing_station_count": len(missing_stations),
@@ -534,7 +534,7 @@ def query_intercity_rail(
         ]
         if missing_legs:
             return {
-                "evidence_status": "missing",
+                "support": "unknown",
                 "domain": "railway",
                 "missing_reason": "direct_train_not_found_in_window",
                 "missing_legs": missing_legs,
@@ -567,7 +567,7 @@ def query_intercity_rail(
         )
     except _RailFailure as error:
         return {
-            "evidence_status": "missing",
+            "support": "unknown",
             "domain": "railway",
             "missing_reason": error.stage,
             "failure": {
@@ -585,7 +585,7 @@ def query_intercity_rail(
     )
     total = (outbound_price + inbound_price) * travelers
     return {
-        "evidence_status": "sourced",
+        "support": "sourced",
         "domain": "railway",
         "origin": origin_name,
         "destination": destination_name,
