@@ -26,6 +26,7 @@ from trip_decider.destination_runtime import (
     collect_railway_evidence,
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
+from trip_decider.evidence_projection import usable_fact_values
 from trip_decider.evidence_broker import (
     default_evidence_broker,
     EvidenceBroker,
@@ -1473,14 +1474,17 @@ def _is_usable_action_evidence(
         return False
     if action_id != "map" or data_type != "route_duration":
         return True
+    # 采集结果走 .value：它是采集元数据，本来就不在 facts 里
+    # （persistence-v2.md §1.4.1）。
     value = evidence.value
-    return (
-        isinstance(value, Mapping)
-        and value.get("local_transit_outcome")
-        in {"AVAILABLE", "PARTIAL"}
-        and isinstance(value.get("local_transit"), list)
-        and bool(value["local_transit"])
-    )
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("local_transit_outcome") not in {"AVAILABLE", "PARTIAL"}:
+        return False
+    # 路线本身走 facts：字段级 support 不可用的路线不算采到了。旧代码只数
+    # 列表长度，一条 support 全 unknown 的路线也会让本域被判为可用。
+    routes = usable_fact_values(evidence.facts).get("local_transit")
+    return isinstance(routes, list) and bool(routes)
 
 
 def _web_route_inputs(
