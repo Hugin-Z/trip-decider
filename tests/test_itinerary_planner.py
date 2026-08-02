@@ -77,7 +77,6 @@ class ItineraryPlannerTests(unittest.TestCase):
                 start_at=start,
                 minutes=30,
                 why="test",
-                timing_status="estimated",
                 value_origin="api_estimate",
             ),
             make_attraction_event(
@@ -160,7 +159,6 @@ class ItineraryPlannerTests(unittest.TestCase):
                             name="Return",
                             start_at=start,
                             why="unknown",
-                            timing_status="unknown",
                             value_origin="unknown",
                             branch="night",
                             extra={"transport_mode": "ride_hailing"},
@@ -207,15 +205,18 @@ class ItineraryPlannerTests(unittest.TestCase):
                 "second_class_fare_cny_per_person": 100.0,
             },
             name_prefix="A→B",
-            snapshot=rail_snapshot_metadata(
-                "STALE",
-                retrieved_at="2026-07-29T10:00:00+08:00",
-            ),
+            fact_refs=("railway-1#snapshot.outbound.train_code",),
         )
-        self.assertEqual(event["snapshot_status"], "STALE")
+        # 断言换语义：事件不再自带时刻可靠性标签（timing_status /
+        # snapshot_status / availability_semantics 三者同属已退役的第四套
+        # 词表），改为只声明自己出自哪些 fact。可靠性由读取层拿 fact_refs
+        # 按读取时刻算——冻在盘上的标签说不出"今天新鲜、明天过期"。
+        self.assertNotIn("timing_status", event)
+        self.assertNotIn("snapshot_status", event)
+        self.assertNotIn("availability_semantics", event)
         self.assertEqual(
-            event["availability_semantics"],
-            "not_current_availability",
+            ["railway-1#snapshot.outbound.train_code"],
+            event["fact_refs"],
         )
 
     def test_generic_context_keeps_missing_and_never_uses_catalog(self) -> None:

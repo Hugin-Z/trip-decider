@@ -252,7 +252,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             event
             for day in compiled["days"]
             for event in day["events"]
-            if event.get("snapshot_status") == "STALE"
+            if event.get("event_id") in {"rail-outbound", "rail-return"}
         ]
         self.assertEqual(len(rail_events), 2)
         self.assertTrue(compiled["conditional_blockers"])
@@ -344,16 +344,19 @@ class PlanningInputCompilerTests(unittest.TestCase):
             "具体酒店未选择",
             ready["result"]["plan"]["accommodation_notice"],
         )
-        stale_events = [
+        rail_events = [
             event
             for day in ready["result"]["plan"]["days"]
             for event in day["events"]
-            if event.get("snapshot_status") == "STALE"
+            if event.get("event_id") in {"rail-outbound", "rail-return"}
         ]
-        self.assertEqual(
-            {event["fare"]["status"] for event in stale_events},
-            {"stale"},
-        )
+        # 断言换语义：票价不再自带 status。旧代码在陈旧快照上把 fare.status
+        # 盖成 "stale"，那是把 freshness 冻进计划里；现在票价只是一个数，
+        # 它的可靠性由 fact_refs 指向的 fact 在读取时决定。
+        self.assertTrue(rail_events)
+        for event in rail_events:
+            self.assertNotIn("status", event["fare"])
+            self.assertTrue(event["fact_refs"])
         self.assertTrue(ready["result"]["plan"]["days"])
 
     def test_meal_and_rest_shell_is_not_a_displayable_itinerary(self) -> None:

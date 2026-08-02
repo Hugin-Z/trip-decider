@@ -349,19 +349,19 @@ def _compile_railway(
             event_id=f"rail-{direction}",
             train=train,
             name_prefix=prefix,
-            snapshot=snapshot,
+            fact_refs=[
+                str(fact["fact_id"])
+                for fact in item_facts(evidence)
+                if str(fact.get("field", "")).startswith(
+                    (f"snapshot.{direction}.", f"{direction}.")
+                )
+            ],
         )
         event["second_class_availability"] = (
             "UNKNOWN"
             if snapshot_status in {"STALE", "UNKNOWN"}
             else train.get("second_class_availability", "UNKNOWN")
         )
-        event["schedule_status"] = snapshot_status
-        if snapshot_status == "STALE":
-            event["fare"] = {
-                **deepcopy(dict(event["fare"])),
-                "status": "stale",
-            }
         event["evidence_dependencies"] = [evidence_id]
         event["location"] = {
             "from": train.get("origin_station"),
@@ -413,7 +413,6 @@ def _compile_local_transit(
             start_at=start_at,
             end_at=min(start_at + timedelta(seconds=duration), latest),
             why="使用地图工具返回的当地交通估计",
-            timing_status="estimated",
             value_origin="api_estimate",
             adjustable=("start_at", "transport_choice"),
             extra={
@@ -810,7 +809,6 @@ def _compile_defaults(
             start_at=wait_start,
             end_at=departure,
             why="使用可编辑的Planner高铁候车默认约束",
-            timing_status="estimated",
             value_origin="planner_default",
             adjustable=("duration_minutes",),
             extra={
@@ -873,7 +871,6 @@ def _compile_defaults(
             start_at=start_at,
             end_at=buffer_end,
             why="使用可编辑的Planner活动间缓冲默认约束",
-            timing_status="estimated",
             value_origin="planner_default",
             adjustable=("duration_minutes",),
             extra={
@@ -1022,7 +1019,6 @@ def _compile_defaults(
                     start_at=max(rest_start, earliest),
                     end_at=min(rest_end, latest),
                     why="使用可编辑的Planner休息默认约束",
-                    timing_status="estimated",
                     value_origin="planner_default",
                     adjustable=("start_at", "end_at"),
                     extra={
@@ -1178,7 +1174,6 @@ def _compile_free_time(
                     start_at=cursor,
                     end_at=start_at,
                     why="日程空档显式保留，可由用户调整",
-                    timing_status="estimated",
                     value_origin="rule_derived",
                     adjustable=("start_at", "end_at"),
                     extra={

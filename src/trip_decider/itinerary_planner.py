@@ -302,7 +302,6 @@ def make_event(
     end_at: datetime | None = None,
     minutes: int | None = None,
     why: str,
-    timing_status: str,
     value_origin: str,
     adjustable: Sequence[str] = (),
     branch: str | None = None,
@@ -330,7 +329,6 @@ def make_event(
             if end_at is not None
             else None
         ),
-        "timing_status": timing_status,
         "value_origin": value_origin,
         "why": why,
         "adjustable": list(adjustable),
@@ -366,7 +364,6 @@ def make_duration_event(
         start_at=start_at,
         minutes=minutes,
         why=why,
-        timing_status="estimated",
         value_origin="planner_default",
         adjustable=adjustable,
         branch=branch,
@@ -403,7 +400,6 @@ def make_transit_event(
     route: Mapping[str, object],
     policy: Mapping[str, object],
     start_at: datetime,
-    timing_status: str = "estimated",
     branch: str | None = None,
     condition: str | None = None,
     why: str = (
@@ -421,7 +417,6 @@ def make_transit_event(
             name=f"{origin}→{destination}",
             start_at=start_at,
             why="已先查询公共交通，但没有取得可排程结果",
-            timing_status="unknown",
             value_origin="unknown",
             adjustable=("start_at", "transport_choice"),
             branch=branch,
@@ -457,7 +452,6 @@ def make_transit_event(
         end_at=start_at
         + timedelta(seconds=int(primary["duration_seconds"])),
         why=why,
-        timing_status=timing_status,
         value_origin="api_estimate_and_sourced_service",
         adjustable=("start_at", "transport_choice"),
         branch=branch,
@@ -499,27 +493,12 @@ def make_rail_event(
     event_id: str,
     train: Mapping[str, object],
     name_prefix: str,
-    snapshot: Mapping[str, object],
+    fact_refs: Sequence[str] = (),
 ) -> dict[str, object]:
-    snapshot_status = str(snapshot.get("status", "UNKNOWN"))
-    retrieved_at = snapshot.get("retrieved_at")
-    if snapshot_status not in {"LIVE", "STALE", "UNKNOWN"}:
-        raise ValueError("invalid rail snapshot status")
-    if snapshot_status == "STALE" and not isinstance(retrieved_at, str):
-        raise ValueError("STALE rail snapshot requires retrieved_at")
-    timing_status = {
-        "LIVE": "sourced_live_snapshot",
-        "STALE": "sourced_stale_snapshot",
-        "UNKNOWN": "unknown",
-    }[snapshot_status]
-    why = {
-        "LIVE": "使用12306本次采集快照；余票和票价仍可能变化",
-        "STALE": (
-            f"使用12306过期快照（采集于{retrieved_at}）；"
-            "不代表当前余票或票价"
-        ),
-        "UNKNOWN": "铁路快照状态未知；不得解释为当前余票",
-    }[snapshot_status]
+    # 时刻可靠性不再写死在事件上。事件只说自己出自哪些 fact，读取层拿
+    # fact_refs 按读取时刻算 token——同一份计划，明天读和今天读该给出不同的
+    # 可靠性结论，冻在盘上的标签做不到这件事。
+    why = "行程时刻出自12306采集快照；可靠性由读取时按证据新鲜度判定"
     return make_event(
         event_id=event_id,
         event_type="transit",
@@ -527,35 +506,20 @@ def make_rail_event(
         start_at=datetime.fromisoformat(str(train["departure_at"])),
         end_at=datetime.fromisoformat(str(train["arrival_at"])),
         why=why,
-        timing_status=timing_status,
-        value_origin=(
-            "official_report" if snapshot_status != "UNKNOWN" else "unknown"
-        ),
+        # value_origin 走 derivation 轴（evidence-axes.md §2.1），与新鲜度
+        # 无关：12306 的时刻表无论采集于何时都是官方报数。旧代码把 UNKNOWN
+        # 快照降级成 value_origin="unknown"，那是拿 freshness 去改 support。
+        value_origin="official_report",
         adjustable=("train_choice",),
         extra={
             "from": train["origin_station"],
             "to": train["destination_station"],
             "transport_mode": "high_speed_rail",
             "fare": {
-                "status": (
-                    "sourced"
-                    if snapshot_status != "UNKNOWN"
-                    else "unknown"
-                ),
-                "amount_cny": (
-                    train["second_class_fare_cny_per_person"]
-                    if snapshot_status != "UNKNOWN"
-                    else None
-                ),
+                "amount_cny": train.get("second_class_fare_cny_per_person"),
             },
             "source": "中国铁路12306",
-            "snapshot_status": snapshot_status,
-            "snapshot_retrieved_at": retrieved_at,
-            "availability_semantics": (
-                "current_at_retrieval_only"
-                if snapshot_status == "LIVE"
-                else "not_current_availability"
-            ),
+            "fact_refs": list(fact_refs),
         },
     )
 
@@ -577,7 +541,6 @@ def make_attraction_event(
         start_at=start_at,
         end_at=end_at,
         why=why,
-        timing_status="estimated",
         value_origin="rule_derived",
         adjustable=("start_at", "duration_minutes"),
         branch=branch,
@@ -1522,7 +1485,6 @@ def replan_itinerary(
                                     "用户删除地点后释放时间；"
                                     "未自动填入其他景点。"
                                 ),
-                                timing_status="estimated",
                                 value_origin="rule_derived",
                                 adjustable=(
                                     "start_at",
