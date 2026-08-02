@@ -1,17 +1,19 @@
-"""Strict WU2 external-record normalization interfaces."""
+"""Shared contract helpers for evidence normalization.
+
+The WU2 open-data and route-evidence normalizers were removed with the
+offline artifact pipeline (persistence-v2.md ruling 13.5).  What remains is
+``contracts``, which the live modules still depend on for identifier and
+type helpers.
+"""
 
 from .contracts import (
     IngestionContext,
     RunSummary,
     stable_identifier,
 )
-from .open_data_poi import normalize_open_data_pois
-from .route_evidence import normalize_route_evidence
 
 __all__ = [
     "IngestionContext",
     "RunSummary",
-    "normalize_open_data_pois",
-    "normalize_route_evidence",
     "stable_identifier",
 ]

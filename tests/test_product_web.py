@@ -25,12 +25,6 @@ from trip_decider.product_web import (
     _sse_event,
     _trip_post,
 )
-from trip_decider.codex_host import (
-    confirm_trip_run,
-    create_trip_run,
-    execute_trip_run,
-    revise_trip_run,
-)
 from trip_decider.agent_actions import (
     execute_registered_action,
     get_next_actions,
@@ -301,7 +295,6 @@ class ProductWebContractTests(unittest.TestCase):
             "/api/agent/current",
         ):
             self.assertNotIn(legacy_path, source)
-        self.assertNotIn("trip_decider.destination_discovery", source)
 
     def test_agent_core_is_model_neutral(self) -> None:
         status = runtime_status()
@@ -1234,38 +1227,6 @@ class ProductWebContractTests(unittest.TestCase):
         ):
             confirm_intent(run.run_id, store=store)
 
-    def test_codex_host_tools_send_only_structured_contracts(self) -> None:
-        intent = {
-            "origin": "甲地",
-            "destination_anchor": "乙地",
-            "earliest_departure_at": "2026-08-04T12:00",
-            "latest_return_at": "2026-08-07T22:00",
-            "travelers": 2,
-            "total_budget_cny": 6000,
-            "pace": "relaxed",
-            "transport_preferences": ["high_speed_rail"],
-        }
-        with patch(
-            "trip_decider.codex_host._post_json",
-            return_value={"run": {"status": "created"}},
-        ) as request:
-            create_trip_run(intent)
-            confirm_trip_run("12345678-abcd")
-            execute_trip_run("12345678-abcd")
-            revise_trip_run(
-                "12345678-abcd",
-                {"pace": "standard"},
-            )
-        self.assertEqual(request.call_count, 4)
-        self.assertEqual(
-            request.call_args_list[0].args[2],
-            {"intent": intent},
-        )
-        self.assertEqual(
-            request.call_args_list[3].args[2],
-            {"revision": {"pace": "standard"}},
-        )
-
     def test_map_collector_reuses_generic_amap_district_boundary(self) -> None:
         intent = TravelIntent.from_mapping(
             {
@@ -1352,7 +1313,6 @@ class ProductWebContractTests(unittest.TestCase):
             "src/trip_decider/product_web.py",
             "src/trip_decider/itinerary_planner.py",
             "src/trip_decider/destination_runtime.py",
-            "src/trip_decider/codex_host.py",
             "src/trip_decider/agent_actions.py",
             "src/trip_decider/planning_input_compiler.py",
             "src/trip_decider/guided_discovery.py",
@@ -1572,25 +1532,6 @@ class ProductWebContractTests(unittest.TestCase):
             now=read_at,
         )
         self.assertFalse(presentation["detailed_itinerary_ready"])
-
-    def test_codex_cli_exposes_all_four_run_actions(self) -> None:
-        source = (ROOT / "scripts/trip_agent.py").read_text(encoding="utf-8")
-        for action in (
-            "create_trip_run",
-            "confirm_trip_run",
-            "execute_trip_run",
-            "revise_trip_run",
-        ):
-            self.assertIn(action, source)
-        for command in ("create", "confirm", "execute", "revise"):
-            self.assertIn(f'"{command}"', source)
-        for action_command in (
-            "next",
-            "run-action",
-            "run-until-blocked",
-            "submit",
-        ):
-            self.assertIn(f'"{action_command}"', source)
 
     def test_action_loop_requires_sourced_evidence_before_planner(
         self,
