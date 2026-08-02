@@ -1032,17 +1032,13 @@ class InMemoryAgentStore:
         plan = result.get("plan")
         if not isinstance(plan, Mapping):
             raise TravelAgentError("planner result omitted plan")
-        planning_state = result.get("planning_state")
-        if not isinstance(planning_state, str):
-            planning_state = plan.get("planning_state")
-        if planning_state not in {"PARTIAL_READY", "PLAN_READY"}:
-            raise TravelAgentError(
-                "planner result is not eligible for plan installation"
-            )
+        # 写入侧只验结构完整（persistence-v2.md §6.2）。「够不够格显示」
+        # 是读取时的问题：它会随 now 变，写进盘就冻死了。
+        days = plan.get("days")
         if (
             plan.get("artifact_kind") != "PlanVersion"
-            or plan.get("displayable") is not True
-            or plan.get("planning_state") != planning_state
+            or not isinstance(days, list)
+            or not days
         ):
             raise TravelAgentError(
                 "planner result omitted the PlanVersion installation contract"
@@ -1053,7 +1049,6 @@ class InMemoryAgentStore:
         payload = {
             "run_id": run_id,
             "plan_version": version,
-            "planning_state": planning_state,
             "plan": deepcopy(dict(plan)),
         }
         context = result.get("context")

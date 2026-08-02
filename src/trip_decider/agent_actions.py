@@ -1030,7 +1030,6 @@ def _planner_handler(
     planning_draft = {
         **planning_draft,
         "artifact_kind": "PlanningDraft",
-        "planning_state": compiled["planning_state"],
         "status": compiled["status"],
         "days": compiled["days"],
         "planning_input": {
@@ -1052,8 +1051,6 @@ def _planner_handler(
         "conditional_blockers": deepcopy(
             compiled["conditional_blockers"]
         ),
-        "displayable": compiled["displayable"],
-        "display_status": compiled["display_status"],
         "display_requirements": deepcopy(
             compiled["display_requirements"]
         ),
@@ -1086,7 +1083,6 @@ def _planner_handler(
         "action_loop_status": (
             "READY" if installable else compiled["planning_state"]
         ),
-        "planning_state": compiled["planning_state"],
         "task_mode": intent.task_mode.value,
         "context": context.to_dict(),
         "planning_draft": deepcopy(dict(planning_draft)),
@@ -1825,19 +1821,43 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
     )
 
 
+def recomputed_planning_state(
+    result: Mapping[str, object] | None,
+) -> str | None:
+    """按**读取时刻**重算 planning_state，不读盘上的副本。
+
+    它会随 now 变——P4-b2 翻面证过：同一份 PlanVersion，新鲜时 PLAN_READY，
+    过了容差窗就变 PARTIAL_READY 带 3 条 conditional。会随 now 变的值写在盘
+    上就是 I5 的定义式违反，因此写入侧已停止落盘它。
+
+    判定本身不是新建的——读取层一直有这个能力（`p4b-plan-readiness-sample.json`
+    就是它的产物），这里只是把已存在的判定接上。
+    """
+
+    if not isinstance(result, Mapping):
+        return None
+    context = result.get("context")
+    if not isinstance(context, Mapping):
+        return None
+    try:
+        compiled = PlanningInputCompiler().compile(context, now=_READ_CLOCK())
+    except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
+        return None
+    return str(compiled.get("planning_state") or "") or None
+
+
 def _result_is_displayable(
     result: Mapping[str, object] | None,
 ) -> bool:
+    """写入侧只验结构完整，「够不够格显示」是读取时的问题
+    （persistence-v2.md §6.2）。"""
+
     if not isinstance(result, Mapping):
         return False
     plan = result.get("plan")
-    return (
-        result.get("planning_state") in {"PARTIAL_READY", "PLAN_READY"}
-        and isinstance(plan, Mapping)
-        and plan.get("artifact_kind") == "PlanVersion"
-        and plan.get("planning_state") == result.get("planning_state")
-        and plan.get("displayable") is True
-    )
+    if not (isinstance(plan, Mapping) and plan.get("artifact_kind") == "PlanVersion"):
+        return False
+    return recomputed_planning_state(result) in {"PARTIAL_READY", "PLAN_READY"}
 
 
 def _result_planning_state(

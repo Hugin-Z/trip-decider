@@ -346,8 +346,12 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ready["result"]["plan"]["status"],
             "PARTIAL_PLAN_WITH_BLOCKERS",
         )
-        self.assertEqual(ready["result"]["planning_state"], "PARTIAL_READY")
-        self.assertTrue(ready["result"]["plan"]["displayable"])
+        # planning_state / displayable 不再落盘（会随 now 变，写进盘就是 I5
+        # 违反）。判定改由读取时重算——同一个判定，换了产出时机。
+        self.assertEqual(
+            agent_actions.recomputed_planning_state(ready["result"]),
+            "PARTIAL_READY",
+        )
         self.assertIn(
             "具体酒店未选择",
             ready["result"]["plan"]["accommodation_notice"],
@@ -487,7 +491,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "NEED_USER_INPUT")
             self.assertEqual(
-                result["result"]["planning_state"],
+                agent_actions.recomputed_planning_state(result["result"]),
                 "COLLECTING_EVIDENCE",
             )
             self.assertNotIn("plan", result["result"])
@@ -592,7 +596,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             self.assertEqual(ready["status"], "READY")
             self.assertEqual(
-                ready["result"]["planning_state"],
+                agent_actions.recomputed_planning_state(ready["result"]),
                 "PLAN_READY",
             )
             self.assertEqual(
@@ -619,7 +623,13 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ):
                 installed = product_web._current_plan_response(run.run_id)
                 response = product_web._run_response(run.run_id)
-            self.assertEqual(installed["planning_state"], "PLAN_READY")
+            # plan-version.json 不再落 planning_state——它是读取时刻的函数。
+            # 落盘只保证结构完整（persistence-v2 §6.2）。
+            self.assertNotIn("planning_state", installed)
+            self.assertEqual(
+                installed["plan"]["artifact_kind"],
+                "PlanVersion",
+            )
             self.assertGreater(response["presentation"]["day_count"], 0)
             self.assertIsNotNone(
                 response["presentation"]["budget_summary"]
@@ -813,7 +823,10 @@ class PlanningInputCompilerTests(unittest.TestCase):
             ready = run_until_blocked(run.run_id, store=store)
         self.assertEqual(ready["status"], "READY")
         self.assertEqual(ready["run_id"], run.run_id)
-        self.assertTrue(ready["result"]["plan"]["displayable"])
+        self.assertIn(
+            agent_actions.recomputed_planning_state(ready["result"]),
+            {"PARTIAL_READY", "PLAN_READY"},
+        )
 
     def test_new_attractions_require_same_run_local_route_refresh(
         self,

@@ -327,13 +327,15 @@ class TripQueryService:
         if not isinstance(value, Mapping):
             return None
         plan = value.get("plan")
-        planning_state = value.get("planning_state")
+        # 只验结构：planning_state / displayable 已不再落盘（会随 now 变，
+        # 写进盘就是 I5 违反）。「这份计划当前够不够格呈现」的准入语义重建
+        # 属 P4-c——它要把「已写入」与「当前可用」拆成两个词，本阶段不动。
+        days = plan.get("days") if isinstance(plan, Mapping) else None
         if (
-            planning_state not in {"PARTIAL_READY", "PLAN_READY"}
-            or not isinstance(plan, Mapping)
+            not isinstance(plan, Mapping)
             or plan.get("artifact_kind") != "PlanVersion"
-            or plan.get("planning_state") != planning_state
-            or plan.get("displayable") is not True
+            or not isinstance(days, list)
+            or not days
         ):
             return None
         return deepcopy(dict(value))
