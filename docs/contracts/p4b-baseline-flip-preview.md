@@ -74,9 +74,13 @@
 
 ### 1.1 同时预期的字段变化（场景 1-7）
 
-* 每个 rail event 的 `schedule_status` 键**消失**（盖写取消）。
-* 每个 rail event 的 `fare.status` 变为 `"stale"`。
-* 每个 rail event 新增 `fact_refs`。
+* ~~每个 rail event 的 `schedule_status` 键消失（盖写取消）。~~
+* ~~每个 rail event 的 `fare.status` 变为 `"stale"`。~~
+* ~~每个 rail event 新增 `fact_refs`。~~
+
+上面三条**已在 `1eda5ea` 提前完成**（`timing_status` 退役连带删掉了盖写与
+`fare.status`，并挂上了 `fact_refs`），翻面时不应再出现。留删除线而非直接抹去：
+核对时若这三项又冒出来，说明退役被回滚了。
 * `second_class_availability` 仍为 `"UNKNOWN"`——该值现在由字段级 support 兜底产生，
   不再由 `snapshot_status` 分支产生。**值不变，来源变了**，这一条在表征上看不出差别，
   必须靠显式测试守（见 §3）。
