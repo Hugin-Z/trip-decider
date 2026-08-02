@@ -16,6 +16,8 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+
+from trip_decider.evidence_core import derive_facts
 from threading import Condition, RLock
 from typing import Any
 from uuid import uuid4
@@ -125,6 +127,15 @@ class RunStatus(str, Enum):
     FAILED = "FAILED"
 
 
+# domain -> data_type。与 evidence_projection.DOMAIN_DATA_TYPES 同源；写在这里
+# 是为了让 EvidenceItem.facts 不必反向依赖读取层。
+_DOMAIN_DATA_TYPES = {
+    "railway": "railway_schedule_fare",
+    "web": "destination_profile",
+    "map": "poi_coordinate",
+}
+
+
 class EvidenceStatus(str, Enum):
     """证据的 support 轴（``docs/contracts/evidence-axes.md`` §1）。
 
@@ -138,6 +149,16 @@ class EvidenceStatus(str, Enum):
     ESTIMATED = "estimated"
     MISSING = "missing"
     CONFLICTING = "conflicting"
+
+    @property
+    def support(self) -> str:
+        """support 轴取值（evidence-axes.md §6.3 的映射）。
+
+        枚举值与 support 轴只差一个名字：``missing`` 对应轴上的 ``unknown``。
+        v1 时期这两个词混用过，映射写在这里免得每个消费点各自拼一次。
+        """
+
+        return "unknown" if self is EvidenceStatus.MISSING else self.value
 
     @property
     def is_usable(self) -> bool:
@@ -529,6 +550,42 @@ class EvidenceItem:
             sources=tuple(deepcopy(dict(item)) for item in raw_sources),
             missing_reason=missing_reason,
             conflict_details=conflicts,
+        )
+
+    @property
+    def facts(self) -> tuple[Mapping[str, object], ...]:
+        """字段级 facts（persistence-v2.md §1.3）。
+
+        **双读**：落盘已带 ``facts`` 键时直读；否则从 v1 的裸 ``value`` 推导。
+        推导期内写入端仍落 v1 形状，因此这条属性对行为零影响——它只是让消费端
+        可以提前切到字段级视角。
+
+        support 只下调不上调：``value`` 里为 ``None`` 或字面量 ``"UNKNOWN"``
+        的字段降为 ``unknown``，其余继承 item 级。
+        """
+
+        if isinstance(self.value, Mapping) and isinstance(
+            self.value.get("facts"), (list, tuple)
+        ):
+            return tuple(
+                item for item in self.value["facts"] if isinstance(item, Mapping)
+            )
+        return derive_facts(
+            self.value,
+            self.evidence_id,
+            self.domain,
+            item_support=self.status.support,
+            data_type=_DOMAIN_DATA_TYPES.get(self.domain, ""),
+            retrieved_at=next(
+                (
+                    source["retrieved_at"]
+                    for source in self.sources
+                    if isinstance(source.get("retrieved_at"), str)
+                ),
+                None,
+            ),
+            reason=self.missing_reason,
+            conflict_details=self.conflict_details,
         )
 
     def to_dict(self) -> dict[str, object]:

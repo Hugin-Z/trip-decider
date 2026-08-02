@@ -66,9 +66,11 @@ __all__ = [
     "classify_support",
     "compute_freshness",
     "confirmed_absent",
+    "derive_facts",
     "evaluate_fact",
     "fact_id",
     "is_confirmed_absent",
+    "normalized_retrieved_at",
     "parse_timestamp",
     "resolve_blocking",
     "resolve_freshness",
@@ -414,6 +416,151 @@ def split_fact_id(value: str) -> tuple[str, str]:
         raise EvidenceCoreError(f"not a fact_id: {value!r}")
     left, _, right = text.partition("#")
     return left, right
+
+
+
+# ---------------------------------------------------------------------------
+# v1 -> facts 推导（persistence-v2.md §1.3 的双读机制）
+# ---------------------------------------------------------------------------
+#
+# v2 把 support 从 item 级改为字段级。切换分两步：先让读取端能从 v1 的裸
+# mapping **推导**出 facts（本节），再把写入端改成直接落 facts。推导期内落盘
+# 形状不变，因此行为零变更。
+
+# 这些键是取证元数据或展示态，不是事实本身，不产出 fact。
+# ``snapshot`` / ``freshness`` / ``refresh_failure`` 记录「怎么取到的」；
+# ``*_status`` / ``display`` 是展示态（P4-b3 的删除对象）。
+_NON_FACT_KEYS = frozenset(
+    {
+        "snapshot",
+        "freshness",
+        "refresh_failure",
+        "local_transit_refresh_failure",
+        "source",
+        "sources",
+        "retrieved_at",
+        "domain",
+        "network_attempts",
+        "conditions",
+        "display",
+        "availability_semantics",
+    }
+)
+
+# 写入端用这个字面量表示「该字段本身不可知」——``_stale_projection`` 把余票
+# 抹成它（persistence-v2.md §3.1 的唯一有损项）。推导成 support=unknown 正是
+# 字段级 support 存在的理由：item 级表达不了「时刻可靠、余票未知」。
+_UNKNOWABLE_SENTINEL = "UNKNOWN"
+
+
+def _is_non_fact_key(key: str) -> bool:
+    return key in _NON_FACT_KEYS or key.endswith("_status")
+
+
+def _flatten_leaves(
+    value: Any,
+    prefix: str = "",
+) -> list[tuple[str, Any]]:
+    """把嵌套 mapping 压平成 ``(点分路径, 叶子值)``。
+
+    列表按下标展开，因为 ``local_transit[0].duration_seconds`` 与
+    ``local_transit[1].duration_seconds`` 是两个独立的事实，可以有不同的
+    support。
+    """
+
+    if isinstance(value, Mapping):
+        out: list[tuple[str, Any]] = []
+        for key, child in value.items():
+            name = str(key)
+            if _is_non_fact_key(name):
+                continue
+            out.extend(_flatten_leaves(child, f"{prefix}.{name}" if prefix else name))
+        return out
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        out = []
+        for index, child in enumerate(value):
+            out.extend(_flatten_leaves(child, f"{prefix}[{index}]"))
+        return out
+    return [(prefix, value)] if prefix else []
+
+
+def normalized_retrieved_at(value: Any, fallback: Any = None) -> str | None:
+    """按 §1.3.1 从 v1 的三种放法里解析采集时刻。
+
+    优先级 ``snapshot.retrieved_at`` > ``freshness.retrieved_at`` >
+    ``value.retrieved_at`` > 调用方给的 fallback（通常是 source 级）。v2 之后
+    这三种放法全部废除，本函数只在推导期存在。
+    """
+
+    mapping = value if isinstance(value, Mapping) else {}
+    for path in (("snapshot", "retrieved_at"), ("freshness", "retrieved_at")):
+        nested = mapping.get(path[0])
+        if isinstance(nested, Mapping) and isinstance(nested.get(path[1]), str):
+            return str(nested[path[1]])
+    if isinstance(mapping.get("retrieved_at"), str):
+        return str(mapping["retrieved_at"])
+    return str(fallback) if isinstance(fallback, str) else None
+
+
+def derive_facts(
+    value: Any,
+    evidence_id: str,
+    domain: str,
+    *,
+    item_support: str = SUPPORT_SOURCED,
+    data_type: str = "",
+    retrieved_at: Any = None,
+    reason: str | None = None,
+    conflict_details: Sequence[str] = (),
+) -> tuple[Mapping[str, Any], ...]:
+    """从 v1 的裸 mapping 推导字段级 facts。
+
+    ``item_support`` 是该证据的 item 级 support，作为每个 fact 的默认值；
+    个别字段按下列规则下调：
+
+    * 叶子为 ``None`` → ``unknown``（该字段没有结论）
+    * 叶子为字面量 ``"UNKNOWN"`` → ``unknown``，值丢弃（写入端用它表示
+      「本字段不可知」，见 ``_UNKNOWABLE_SENTINEL``）
+
+    **只下调不上调**：item 级为 ``unknown`` 时每个 fact 都是 ``unknown``，
+    不会因为某个叶子有值就升回去。
+    """
+
+    if item_support not in SUPPORT_VALUES:
+        raise EvidenceCoreError(f"unsupported support value: {item_support!r}")
+    stamp = normalized_retrieved_at(value, retrieved_at)
+
+    def build(field: str, leaf: Any, support: str) -> dict[str, Any]:
+        fact: dict[str, Any] = {
+            "fact_id": fact_id(evidence_id, field),
+            "field": field,
+            "value": leaf,
+            "support": support,
+            "data_type": data_type,
+            "retrieved_at": stamp,
+        }
+        if support == SUPPORT_UNKNOWN:
+            fact["reason"] = reason or "no_source_found"
+        if support == SUPPORT_CONFLICTING and conflict_details:
+            fact["conflict_details"] = list(conflict_details)
+        return fact
+
+    # 确认的否定是一条事实，不拆字段——「没有直达车」不是「车次为空」加
+    # 「票价为空」，它是一个整体结论（evidence-axes.md §2.2.1）。
+    if is_confirmed_absent(value):
+        return (build(domain, dict(value), item_support),)
+
+    if value is None:
+        return (build(domain, None, SUPPORT_UNKNOWN),)
+
+    facts: list[Mapping[str, Any]] = []
+    for field, leaf in _flatten_leaves(value):
+        support = item_support
+        if leaf is None or leaf == _UNKNOWABLE_SENTINEL:
+            support = SUPPORT_UNKNOWN
+            leaf = None
+        facts.append(build(field, leaf, support))
+    return tuple(facts)
 
 
 # ---------------------------------------------------------------------------
