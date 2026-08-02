@@ -974,8 +974,7 @@ def _map_handler(
                     destination_point.get("location")
                 )
         route["retrieved_at"] = retrieved_at
-        route["evidence_status"] = "LIVE"
-    enriched = deepcopy(dict(value))
+        enriched = deepcopy(dict(value))
     enriched["local_transit"] = local_transit
     enriched["local_transit_outcome"] = route_result.get("status")
     enriched["local_transit_input_signature"] = route_signature
@@ -1272,7 +1271,6 @@ def _stale_generic_evidence(
                 stale_routes.append(deepcopy(route))
                 continue
             normalized_route = deepcopy(dict(route))
-            normalized_route["evidence_status"] = "STALE"
             normalized_route["schedule_status"] = "STALE"
             if "fare" in normalized_route:
                 normalized_route["fare"] = {

@@ -443,7 +443,6 @@ def _compile_local_transit(
                 "to_location": deepcopy(route.get("to_location")),
                 "polyline": deepcopy(route.get("polyline")),
                 "retrieved_at": route.get("retrieved_at"),
-                "evidence_status": route.get("evidence_status"),
                 "fare": deepcopy(
                     route.get(
                         "fare",
@@ -1241,8 +1240,7 @@ def _compiled_map_points(
                     "kind": kind,
                     "location": deepcopy(position),
                     **deepcopy(dict(position)),
-                    "evidence_status": "LIVE",
-                    "retrieved_at": web_value.get("retrieved_at"),
+                                "retrieved_at": web_value.get("retrieved_at"),
                 }
             )
     base = web_value.get("hotel_area")
@@ -1258,8 +1256,7 @@ def _compiled_map_points(
                     "coordinate_system",
                     "GCJ-02",
                 ),
-                "evidence_status": "LIVE",
-                "retrieved_at": web_value.get("retrieved_at"),
+                        "retrieved_at": web_value.get("retrieved_at"),
             }
         )
     return values

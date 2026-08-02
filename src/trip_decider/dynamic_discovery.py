@@ -720,8 +720,7 @@ def _rail_map_points(
                 "longitude": location.get("longitude"),
                 "latitude": location.get("latitude"),
                 "coordinate_system": "GCJ-02",
-                "evidence_status": "LIVE",
-            }
+                    }
         )
     return result
 

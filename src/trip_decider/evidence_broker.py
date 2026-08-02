@@ -400,7 +400,6 @@ def _stale_projection(
                     stale_routes.append(deepcopy(route))
                     continue
                 stale_route = deepcopy(dict(route))
-                stale_route["evidence_status"] = "STALE"
                 stale_route["schedule_status"] = "STALE"
                 stale_route["retrieved_at"] = record.collected_at
                 if "fare" in stale_route:

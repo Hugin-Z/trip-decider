@@ -224,8 +224,7 @@ def build_guided_comparison(
                         {
                             "destination_id": seed_id,
                             "domain": domain,
-                            "evidence_status": check.display_status,
-                            "from_cache": True,
+                                            "from_cache": True,
                             "collected_at": check.collected_at,
                         },
                     )
@@ -400,8 +399,7 @@ def build_guided_comparison(
                         {
                             "destination_id": seed_id,
                             "domain": domain,
-                            "evidence_status": check.display_status,
-                            "from_cache": check.from_cache,
+                                            "from_cache": check.from_cache,
                             "collected_at": check.collected_at,
                         },
                     )
@@ -451,8 +449,7 @@ def build_guided_comparison(
                             "destination_id": seed_id,
                             "domain": domain,
                             "timeout_seconds": configured_timeouts[domain],
-                            "evidence_status": "MISSING",
-                        },
+                            },
                     )
             emit_ready_options()
     finally:

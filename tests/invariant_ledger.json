@@ -48,7 +48,6 @@
       "tracked_in": "docs/contracts/invariants.md",
       "paths": [
         "src/trip_decider/agent_actions.py",
-        "src/trip_decider/dynamic_discovery.py",
         "src/trip_decider/evidence_broker.py",
         "src/trip_decider/guided_discovery.py",
         "src/trip_decider/intercity_rail.py",
