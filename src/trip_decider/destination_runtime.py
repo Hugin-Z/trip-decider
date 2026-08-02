@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 import time
 from typing import Protocol
 
+from trip_decider.evidence_core import SUPPORT_UNKNOWN
 from trip_decider.intercity_rail import query_intercity_rail
 from trip_decider.itinerary_planner import (
     plan_destination_context,
@@ -118,7 +119,7 @@ def collect_map_evidence(intent: TravelIntent) -> EvidenceItem:
             missing_reason=error.stage,
         )
     status = result.get("support")
-    if status == "missing":
+    if status == SUPPORT_UNKNOWN:
         return EvidenceItem(
             evidence_id="map-live-query",
             domain="map",
