@@ -32,6 +32,7 @@ from trip_decider.destination_runtime import (
     revise_destination_result,
 )
 from trip_decider.dynamic_discovery import collect_live_destination_profile
+from trip_decider.evidence_core import recovery_safe
 from trip_decider.evidence_broker import (
     default_evidence_broker,
     EvidenceBroker,
@@ -721,7 +722,7 @@ class TripApplicationService:
                     # 事件流重建），因此这里剥掉 token / next_action 会断掉
                     # 那条读取路径。要断这条通道，得先让 candidates() 按
                     # 引用重算——那是安装语义重建的同一件事。
-                    **dict(details or {}),
+                    **dict(recovery_safe(details or {})),
                 },
             )
 

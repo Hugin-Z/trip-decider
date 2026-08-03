@@ -600,6 +600,7 @@ def _coarse_option(
         "evidence_statuses": [
             {
                 "domain": domain,
+                "evidence_id": checks[domain].evidence.evidence_id,
                 "token": checks[domain].display_status,
                 "collected_at": checks[domain].collected_at,
                 "from_cache": checks[domain].from_cache,

@@ -5,13 +5,6 @@
   "maintenance": "每个阶段闸门都要求同步本文件：转绿的条目删除，新增的不变式测试补登记。登记只接受断言失败——无法构造场景的阻塞项必须用 assertXxx 表达阻塞原因，不得让异常逃逸。",
   "entries": [
     {
-      "test_id": "tests.test_invariant_i1_no_persisted_display_status.PersistedDisplayStatusCase.test_i1_fresh_run_output_has_no_display_status_fields",
-      "invariant": "I1",
-      "expected_green_at": "P4c",
-      "failing_assertion": "assertEqual([], 命中列表)：一次全新离线 run 的落盘产物中剩 4 处禁用取值，全部是 events.jsonl/details/option/evidence_statuses[]/token。写入侧其余部分已于 P4-b3 清零（476 → 78 → 20 → 4）。",
-      "blocked_on": "P4-c：事件流兼任读模型数据源——trip_query.candidates() 在 run.result 不再是比较阶段时从事件流重建候选卡，剥掉事件里的 token 会断掉那条读取路径并让 I3a 转红。要断这条通道须先让 candidates() 按引用重算，那与 _current_plan_payload 准入重写共享同一套基建（fact_refs → evidence_projection → token），属候选卡引用化（persistence-v2 §5.2）。在位标注见 trip_application.py 的 TODO(P4-c)。"
-    },
-    {
       "test_id": "tests.test_invariant_i4_non_stale_types_blocked.NonStaleTypesBlockedCase.test_i4_non_stale_type_reaches_feasibility_as_unknown",
       "invariant": "I4",
       "expected_green_at": "P5",
@@ -55,7 +48,6 @@
     }
   ],
   "still_red_invariants": [
-    "I1",
     "I4",
     "I9"
   ],
@@ -67,7 +59,28 @@
     "I6",
     "I7",
     "I8",
-    "I11"
+    "I11",
+    "I1"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a。I10 已收录文档，测试随 P4-b 的 facts 形状落地。I6 的写入侧豁免仍在，到期 P4。"
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a。I10 已收录文档，测试随 P4-b 的 facts 形状落地。I6 的写入侧豁免仍在，到期 P4。",
+  "lifecycle": {
+    "I1": {
+      "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
+      "defined_at": "P0",
+      "red_since": "P1（测试先行，首次测量 476 处）",
+      "green_at": "P4-c 第 3 批",
+      "write_side_trace": [
+        476,
+        78,
+        20,
+        4,
+        0
+      ],
+      "historical_stock_trace": [
+        4314,
+        0
+      ],
+      "note": "两个维度各自归零才算转绿：写入侧靠逐阶段摘除展示态产出，历史存量靠 P4-c 第 2 批整目录删除。两者在 P4-b3 期间一度脱节——写入侧从 476 掉到 78 时存量纹丝不动，因为命中数数的是盘上存量、不是写入行为。最后 4 处压在候选卡引用化上：事件流兼任读模型数据源，剥掉事件里的 token 会让 I3a 转红，直到 candidates() 改为按 evidence_id 重算才解开。"
+    }
+  }
 }

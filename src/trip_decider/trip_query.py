@@ -21,6 +21,7 @@ from trip_decider.trip_read_model import (
     _planning_draft_read_model,
     _presentation_contract,
 )
+from trip_decider.evidence_projection import project_domain, verdict_payload
 from trip_decider.travel_agent import (
     default_agent_store,
     InMemoryAgentStore,
@@ -216,8 +217,77 @@ class TripQueryService:
             "stage": stage,
             "comparison_completed": comparison_completed,
             "selection_required": True,
-            "candidates": deepcopy(options),
+            "candidates": self._with_recomputed_tokens(run_id, options),
         }
+
+    def _comparison_evidence(self, run_id: str) -> Mapping[str, object]:
+        """比较阶段为每个候选落下的证据，按 destination_id / domain 索引。"""
+
+        run_directory = self.store.run_directory(run_id)
+        if run_directory is None:
+            return {}
+        path = run_directory / "evidence" / "guided-comparison.json"
+        if not path.is_file():
+            return {}
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        destinations = document.get("destinations")
+        return destinations if isinstance(destinations, Mapping) else {}
+
+    def _with_recomputed_tokens(
+        self,
+        run_id: str,
+        options: object,
+        *,
+        now: datetime | None = None,
+    ) -> list:
+        """按**读取时刻**重算候选卡上的 token。
+
+        事件流里只留 ``evidence_id`` 与结构——token 是 now 的函数，写进
+        append-only 的事件流就冻死了（I5），而本方法的调用方在 run.result 被
+        后续阶段覆盖后正是从那里重建候选卡。
+
+        两条分支共用它：直读分支拿的是比较阶段的内存产物，重建分支拿的是剥过
+        投影的事件副本，重算之后两者必须一致——那正是本改造的判据。
+        """
+
+        read_at = now if now is not None else datetime.now(timezone.utc)
+        by_destination = self._comparison_evidence(run_id)
+        enriched: list = []
+        for option in deepcopy(options if isinstance(options, list) else []):
+            if not isinstance(option, Mapping):
+                enriched.append(option)
+                continue
+            option = dict(option)
+            statuses = option.get("evidence_statuses")
+            if not isinstance(statuses, list):
+                enriched.append(option)
+                continue
+            domains = by_destination.get(str(option.get("destination_id")))
+            rebuilt: list = []
+            for entry in statuses:
+                if not isinstance(entry, Mapping):
+                    rebuilt.append(entry)
+                    continue
+                entry = dict(entry)
+                domain = str(entry.get("domain") or "")
+                item = (
+                    domains.get(domain)
+                    if isinstance(domains, Mapping)
+                    else None
+                )
+                if isinstance(item, Mapping):
+                    entry.update(
+                        verdict_payload(
+                            project_domain({domain: item}, domain, now=read_at)
+                        )
+                    )
+                rebuilt.append(entry)
+            option["evidence_statuses"] = rebuilt
+            enriched.append(option)
+        return enriched
 
     def current_plan(self, run_id: str) -> dict[str, object]:
         value = self._current_plan_payload(run_id)
