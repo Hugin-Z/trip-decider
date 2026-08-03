@@ -444,12 +444,44 @@ Refetcher = Any
 
 
 class ResolvedEvidence(NamedTuple):
-    """解析步的产出。``items`` 是**整份替换后**的证据表。"""
+    """解析步的产出。``items`` 是**整份替换后**的证据表。
+
+    ``pending_writes`` 是**待写回标记**：读取层拿到它但**不落盘**——写盘是
+    应用层的事（`freshness-policy.md` §5.2.2 裁决）。读取层写盘会破两条：
+    模块契约上它只读；I5 要求两次读取的结构逐字节稳定，而读取产生写入会让
+    第二次读取看到不同的事件与文件。
+
+    成功与失败**都要写回**：成功写新证据，失败写 ``refresh_failure``——
+    后者带 ``attempted_at``，节流的状态就存在它上面，不写回则节流永远空转。
+    """
 
     items: dict[str, Mapping[str, object]]
     refetched: tuple[str, ...]
     failed: tuple[str, ...]
     skipped_over_budget: tuple[str, ...]
+    pending_writes: tuple[tuple[str, Mapping[str, object]], ...] = ()
+
+
+def _with_refresh_failure(
+    item: Mapping[str, object],
+    *,
+    reason: str,
+    now: datetime,
+) -> dict[str, object]:
+    """给一条证据挂上刷新失败记录（`evidence-axes.md` §3.4）。
+
+    这条记录是**采集时刻的事实**，可持久化：「某时刻试过刷新、没成功」写入后
+    不再变化。它同时是 freshness 封顶规则的输入，和节流的唯一状态来源。
+    """
+
+    updated = dict(item)
+    value = dict(_mapping(item.get("value")))
+    value["refresh_failure"] = {
+        "missing_reason": reason,
+        "attempted_at": now.isoformat(),
+    }
+    updated["value"] = value
+    return updated
 
 
 def needs_refetch(
@@ -532,6 +564,7 @@ def resolve_stale_evidence(
     refetched: list[str] = []
     failed: list[str] = []
     over_budget: list[str] = []
+    pending: list[tuple[str, Mapping[str, object]]] = []
 
     for domain in sorted(resolved):
         item = resolved[domain]
@@ -540,26 +573,34 @@ def resolve_stale_evidence(
         if clock() >= deadline:
             over_budget.append(domain)
             continue
+        reason = "collector_error"
         try:
             fresh = refetcher(domain, item)
         except NON_BUSINESS_ERRORS:
             # 编程错误不穿业务外衣：重采路径里的 NameError 不是「数据源不可用」
             # （D12）。让它照常抛出去，别混进降级统计。
             raise
-        except Exception:  # noqa: BLE001 - 采集失败是业务结果，不是异常路径
-            failed.append(domain)
-            continue
+        except Exception as error:  # noqa: BLE001 - 采集失败是业务结果
+            fresh = None
+            reason = f"collector_error:{type(error).__name__}"
         if not isinstance(fresh, Mapping):
+            # 失败也要写回：``attempted_at`` 是节流的唯一状态来源，不落盘就
+            # 每次读取都重打一次数据源。
+            degraded = _with_refresh_failure(item, reason=reason, now=now)
+            resolved[domain] = degraded
             failed.append(domain)
+            pending.append((domain, degraded))
             continue
         resolved[domain] = fresh
         refetched.append(domain)
+        pending.append((domain, fresh))
 
     return ResolvedEvidence(
         resolved,
         tuple(refetched),
         tuple(failed),
         tuple(over_budget),
+        tuple(pending),
     )
 
 

@@ -8,7 +8,7 @@ No collector result is marked complete unless it is sourced evidence.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -2125,6 +2125,45 @@ def _mapping_list(value: Mapping[str, object], key: str) -> list[object]:
     return list(raw) if isinstance(raw, list) else []
 
 
+def record_refetched_evidence(
+    run_id: str,
+    items: Sequence[tuple[str, Mapping[str, object]]],
+    *,
+    store: InMemoryAgentStore | None = None,
+) -> tuple[str, ...]:
+    """把读时重采的产出写回**既有**证据通道（`freshness-policy.md` §5.2.2）。
+
+    这不是新开的写入通道：它走的就是动作循环一直在用的那条
+    ``state.evidence[domain]`` + ``_persist_loop_state``。读取层只负责给出
+    「重采到了什么、该写回哪些」，写盘由应用层协调——读取层写盘会破它自己的
+    只读契约，也会让两次读取产生不同的文件内容（I5）。
+
+    返回真正写回的域。运行不在可写状态时**静默跳过**：读取路径不该因为
+    「这个 run 已经结束了」而报错，那会把一次普通的页面刷新变成异常。
+    """
+
+    store = store if store is not None else default_agent_store()
+    if not items:
+        return ()
+    state = _load_loop_state(run_id, store)
+    if state is None:
+        return ()
+    written: list[str] = []
+    for domain, item in items:
+        if domain not in state.evidence:
+            continue
+        try:
+            state.evidence[domain] = EvidenceItem.from_mapping(dict(item))
+        except TravelAgentError:
+            # 重采回来的形状不合契约时不写回，也不让读取崩——本次读取照常
+            # 用内存里的那份，下次读取会重试。
+            continue
+        written.append(domain)
+    if written:
+        _persist_loop_state(run_id, state, store)
+    return tuple(written)
+
+
 def _persist_loop_state(
     run_id: str,
     state: _LoopState,
@@ -2313,5 +2352,6 @@ __all__ = [
     "restart_action_loop_for_intent",
     "run_until_blocked",
     "start_action_loop",
+    "record_refetched_evidence",
     "submit_evidence",
 ]

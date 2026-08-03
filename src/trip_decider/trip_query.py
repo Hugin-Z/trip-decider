@@ -79,6 +79,24 @@ class TripQueryService:
         # 变成能自己发网络请求的东西——与内核「策略由调用方注入」同理。
         self._refetcher = refetcher
 
+    def _flush_pending(
+        self,
+        run_id: str,
+        pending: object,
+    ) -> None:
+        """把重采的待写回标记交给应用层落盘。
+
+        读取层自己不写盘：那会破它的只读契约，也会让两次读取产生不同的文件
+        内容（I5）。写入走应用层——它本来就是唯一的写入协调者。
+
+        落盘之后节流才真正生效：失败那一支写的是
+        ``refresh_failure.attempted_at``，节流的状态存在它上面。
+        """
+
+        if not pending:
+            return
+        self.application_service.record_refetched_evidence(run_id, pending)
+
     def now(self) -> datetime:
         """Return the instant this read is evaluated against."""
 
@@ -115,6 +133,17 @@ class TripQueryService:
 
         read_at = self.now()
         evidence = self.application_service.current_run_evidence(run_id)
+        # 解析步的**装载点三**：evidence/current.json（动作循环维护的证据表）。
+        # 它与 run.result["context"]["evidence"] 是两份独立落盘的副本，写回只对
+        # 这一份生效——两份的权威归属见 freshness-policy.md §5.2.3。
+        if self._refetcher is not None:
+            resolved = resolve_stale_evidence(
+                dict(evidence),
+                now=read_at,
+                refetcher=self._refetcher,
+            )
+            evidence = resolved.items
+            self._flush_pending(run_id, resolved.pending_writes)
         presentation = _presentation_contract(
             read_run_value,
             events,
@@ -280,6 +309,7 @@ class TripQueryService:
         if self._refetcher is not None:
             deadline = time.monotonic() + REFETCH_BUDGET_SECONDS
             refreshed: dict[str, Mapping[str, object]] = {}
+            pending: list[tuple[str, Mapping[str, object]]] = []
             for destination_id, domains in by_destination.items():
                 if not isinstance(domains, Mapping):
                     refreshed[destination_id] = domains
@@ -295,7 +325,9 @@ class TripQueryService:
                     budget_seconds=max(0.0, deadline - time.monotonic()),
                 )
                 refreshed[destination_id] = {**dict(domains), **resolved.items}
+                pending.extend(resolved.pending_writes)
             by_destination = refreshed
+            self._flush_pending(run_id, pending)
         enriched: list = []
         for option in deepcopy(options if isinstance(options, list) else []):
             if not isinstance(option, Mapping):
@@ -367,7 +399,13 @@ class TripQueryService:
         # compile 一次、各判一次 PARTIAL_READY/PLAN_READY，没有任何东西保证
         # 它们给同一个答案——同一份证据在两个读取面分叉，与「结论和数据不
         # 同步」同族（2026-08-03 裁决：四入口收敛，不分叉）。
-        verdict = plan_verdict_from_result(run.result, now=read_at)
+        verdict = plan_verdict_from_result(
+            run.result,
+            now=read_at,
+            refetcher=self._refetcher,
+        )
+        # 读取层不落盘：待写回交给应用层——唯一的写入协调者（§5.2.2）。
+        self._flush_pending(run_id, verdict.pending_writes)
         readiness["planning_state"] = verdict.planning_state
         readiness["usable_now"] = verdict.usable_now
         readiness["blockers"] = [dict(item) for item in verdict.blockers]

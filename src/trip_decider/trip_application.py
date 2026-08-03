@@ -25,6 +25,7 @@ from trip_decider.agent_actions import (
     restart_action_loop_for_intent,
     run_until_blocked,
     start_action_loop,
+    record_refetched_evidence,
     submit_evidence,
 )
 from trip_decider.destination_runtime import (
@@ -289,6 +290,27 @@ class TripApplicationService:
             evidence_broker=self.evidence_broker,
         )
         return ApplicationOutcome(run_id, action_loop=action_state)
+
+    def record_refetched_evidence(
+        self,
+        run_id: str,
+        items: object,
+    ) -> tuple[str, ...]:
+        """读时重采的写回入口（`freshness-policy.md` §5.2.2 裁决）。
+
+        读取层拿到「重采结果 + 待写回标记」之后交给这里，由应用层——唯一的
+        写入协调者——走既有证据通道落盘。读取层自己不写：写盘会破它的只读
+        契约，也会让两次读取产生不同的文件内容（I5）。
+
+        落盘之后节流才真正生效：失败那一支写的是 ``refresh_failure.attempted_at``，
+        节流的状态就存在它上面。不写回则每次读取都重打一次数据源。
+        """
+
+        return record_refetched_evidence(
+            run_id,
+            list(items or ()),
+            store=self.store,
+        )
 
     def submit_run_evidence(
         self,

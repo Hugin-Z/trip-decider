@@ -55,9 +55,16 @@ class PlanVerdict(NamedTuple):
     planning_state: str | None
     usable_now: bool
     blockers: tuple[Mapping[str, object], ...]
+    #: 读时重采的待写回标记。**本模块不落盘**——写回由应用层执行
+    #: （`freshness-policy.md` §5.2.2）。调用方不写也不会错，只是节流不生效。
+    pending_writes: tuple[tuple[str, Mapping[str, object]], ...] = ()
 
 
-_ABSENT_VERDICT = PlanVerdict(planning_state=None, usable_now=False, blockers=())
+_ABSENT_VERDICT = PlanVerdict(
+    planning_state=None,
+    usable_now=False,
+    blockers=(),
+)
 
 
 def _resolved_context(
@@ -65,7 +72,7 @@ def _resolved_context(
     *,
     now: datetime,
     refetcher: object,
-) -> Mapping[str, object]:
+) -> tuple[Mapping[str, object], tuple[tuple[str, Mapping[str, object]], ...]]:
     """解析步的**装载点一**：``run.result["context"]["evidence"]``（列表容器）。
 
     容器形状是这里唯一的本地知识——转成按域的 mapping 交给唯一实现
@@ -74,23 +81,23 @@ def _resolved_context(
     """
 
     if refetcher is None:
-        return context
+        return context, ()
     raw = context.get("evidence")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        return context
+        return context, ()
     by_domain: dict[str, Mapping[str, object]] = {}
     for item in raw:
         if isinstance(item, Mapping) and isinstance(item.get("domain"), str):
             by_domain[str(item["domain"])] = item
     if not by_domain:
-        return context
+        return context, ()
     resolved = resolve_stale_evidence(
         by_domain,
         now=now,
         refetcher=refetcher,
     )
-    if not resolved.refetched:
-        return context
+    if not resolved.refetched and not resolved.failed:
+        return context, resolved.pending_writes
     # 整份替换：同一次读取里，token 的依据与 fact_values 的依据必须是同一个
     # 实例。只换 token 不换值，就是这条解析步存在的理由所要防的那件事。
     replaced = [
@@ -100,7 +107,10 @@ def _resolved_context(
         else item
         for item in raw
     ]
-    return {**dict(context), "evidence": replaced}
+    return (
+        {**dict(context), "evidence": replaced},
+        resolved.pending_writes,
+    )
 
 
 def plan_verdict_from_result(
@@ -128,11 +138,11 @@ def plan_verdict_from_result(
     context = result.get("context")
     if not isinstance(context, Mapping):
         return _ABSENT_VERDICT
-    context = _resolved_context(context, now=now, refetcher=refetcher)
+    context, pending = _resolved_context(context, now=now, refetcher=refetcher)
     try:
         compiled = PlanningInputCompiler().compile(context, now=now)
     except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
-        return _ABSENT_VERDICT
+        return _ABSENT_VERDICT._replace(pending_writes=pending)
     state = str(compiled.get("planning_state") or "") or None
     return PlanVerdict(
         planning_state=state,
@@ -142,6 +152,7 @@ def plan_verdict_from_result(
             for item in compiled.get("conditional_blockers", ())
             if isinstance(item, Mapping)
         ),
+        pending_writes=pending,
     )
 
 
