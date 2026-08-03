@@ -73,6 +73,7 @@ class _ObservationPolicyIssue(ValueError):
 
 SelectionReader = Callable[[str, tuple[tuple[str, str], ...]], str]
 
+@dataclass(frozen=True)
 class LivePlaceResolutionSummary:
     """Auditable paths and measured counts for one synthetic Stage A run."""
 
@@ -98,6 +99,7 @@ class AmapObservationMode(str, Enum):
     SYNTHETIC_TEST = "synthetic_test"
     EPHEMERAL_LIVE = "ephemeral_live"
 
+@dataclass(frozen=True)
 class ParsedAmapDistrict:
     """Controlled district identity parsed from an AMap-shaped response."""
 
@@ -105,6 +107,7 @@ class ParsedAmapDistrict:
     adcode: str
     level: str
 
+@dataclass(frozen=True)
 class ParsedAmapPoi:
     """Controlled POI fields parsed without policy or persistence decisions."""
 
@@ -121,6 +124,7 @@ class ParsedAmapPoi:
     city_code: str | None
     district_code: str | None
 
+@dataclass(frozen=True)
 class ParsedAmapDistrictResponse:
     """Immutable district response value before observation-policy binding."""
 
@@ -129,6 +133,7 @@ class ParsedAmapDistrictResponse:
     synthetic_test_data: bool | None
     districts: tuple[ParsedAmapDistrict, ...]
 
+@dataclass(frozen=True)
 class ParsedAmapPoiResponse:
     """Immutable POI response value before observation-policy binding."""
 
@@ -138,6 +143,7 @@ class ParsedAmapPoiResponse:
     count: str | None
     pois: tuple[ParsedAmapPoi, ...]
 
+@dataclass(frozen=True)
 class PolicyBoundAmapObservation:
     """Sealed policy binding produced only by the public binding function."""
 
@@ -149,6 +155,7 @@ class PolicyBoundAmapObservation:
     provenance_label: str
     _contract_token: object
 
+@dataclass(frozen=True)
 class AmapCandidateProjection:
     """In-memory shared Candidate projection without persistence methods."""
 
