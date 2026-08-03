@@ -1,4 +1,8 @@
-"""v1 裸 mapping -> 字段级 facts 的推导（persistence-v2.md §1.3）。
+"""写入侧转换器：v1-in-memory → 字段级 facts（persistence-v2.md §1.3）。
+
+采集器返回的是业务字段平铺的 mapping；EvidenceItem.facts 靠这条推导把它
+转成 facts 再落盘。双读拆除后它**不消失**——消失的只是「读落盘时可能需要推导」
+那个分支（见 evidence_projection.item_facts）。
 
 覆盖 `p4a-fixture-shapes.md` §0 清点出的 9 种键集合各至少一例，外加 §3.1
 标注的唯一有损项（availability 抹除）——那一条是字段级 support 存在的理由，
@@ -197,7 +201,7 @@ class DerivationDetailCase(unittest.TestCase):
         facts = derive_facts(
             {
                 "train_code": "G100",
-                "snapshot": {"status": "STALE", "retrieved_at": STAMP},
+                "snapshot": {"acquisition": "cache_fallback", "retrieved_at": STAMP},
                 "schedule_status": "STALE",
                 "support": "sourced",  # item 级元数据，不该成为 fact
                 "refresh_failure": {"missing_reason": "rail_http"},

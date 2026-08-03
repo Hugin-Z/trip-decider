@@ -159,7 +159,7 @@ class ConflictingUnknownNeverSilentCase(unittest.TestCase):
                     "roundtrip_duration_seconds": 21600,
                     "roundtrip_fare_cny": 800.0,
                     "snapshot": {
-                        "status": "LIVE",
+                        "acquisition": "live_fetch",
                         "retrieved_at": "2026-08-02T18:00:00+08:00",
                     },
                 },

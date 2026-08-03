@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
+
 from datetime import datetime, timedelta, timezone
 import unittest
 
@@ -44,7 +46,17 @@ def _item(**overrides: object) -> dict[str, object]:
         "conflict_details": [],
     }
     base.update(overrides)
-    return base
+    # 经真实写入路径产出 v2 形状。读取层只认 v2——手写 v1 dict 喂进去会
+    # 得到零 facts，测的就不是产品会遇到的输入了。
+    return EvidenceItem(
+        evidence_id=str(base["evidence_id"]),
+        domain=str(base["domain"]),
+        status=EvidenceStatus(str(base["status"])),
+        value=base["value"],
+        sources=tuple(dict(item) for item in base["sources"]),
+        missing_reason=base["missing_reason"],
+        conflict_details=tuple(base["conflict_details"]),
+    ).to_dict()
 
 
 class PolicyMirrorCase(unittest.TestCase):

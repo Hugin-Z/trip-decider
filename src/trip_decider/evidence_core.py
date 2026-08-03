@@ -515,8 +515,6 @@ _NON_FACT_PATHS: Mapping[str, frozenset[str] | None] = MappingProxyType(
                 # 改名同步范围的一部分——这一处漏了，acquisition 就不算元
                 # 数据，被推导成事实后从落盘的 snapshot 里消失。
                 "acquisition",
-                # 旧名。双读期内历史数据仍带它，历史存量删除后可去掉。
-                "status",
                 "retrieved_at",
                 "attempted_at",
                 "availability_semantics",

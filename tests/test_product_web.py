@@ -88,6 +88,75 @@ def _guided_test_seeds() -> list[dict[str, object]]:
     ]
 
 
+def _v2_evidence(evidence: list) -> list:
+    """手写 v1 证据列表 → v2 落盘形状。见 `_v2_run`。"""
+
+    from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
+
+    converted = []
+    for item in evidence:
+        if not isinstance(item, dict) or not isinstance(item.get("value"), dict):
+            converted.append(item)
+            continue
+        if "facts" in item["value"]:
+            converted.append(item)
+            continue
+        converted.append(
+            EvidenceItem(
+                evidence_id=str(item.get("evidence_id") or item.get("domain") or "e"),
+                domain=str(item.get("domain") or ""),
+                status=EvidenceStatus(str(item.get("status") or "sourced")),
+                value=item["value"],
+                sources=tuple(dict(x) for x in item.get("sources", [])),
+                missing_reason=item.get("missing_reason"),
+                conflict_details=tuple(item.get("conflict_details") or ()),
+            ).to_dict()
+        )
+    return converted
+
+
+def _v2_run(run: dict) -> dict:
+    """把 run 里手写的 v1 证据转成 v2 落盘形状。
+
+    读取层只认 v2。这些 fixture 手写的是业务字段平铺的 v1 mapping——那是
+    采集器的内存形状，不是落盘形状。经真实写入路径过一遍，测的才是产品会
+    遇到的输入。
+    """
+
+    from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
+
+    result = run.get("result")
+    if not isinstance(result, dict):
+        return run
+    context = result.get("context")
+    if not isinstance(context, dict):
+        return run
+    evidence = context.get("evidence")
+    if not isinstance(evidence, list):
+        return run
+    converted = []
+    for item in evidence:
+        if not isinstance(item, dict) or not isinstance(item.get("value"), dict):
+            converted.append(item)
+            continue
+        if "facts" in item["value"]:
+            converted.append(item)
+            continue
+        converted.append(
+            EvidenceItem(
+                evidence_id=str(item.get("evidence_id") or item.get("domain") or "e"),
+                domain=str(item.get("domain") or ""),
+                status=EvidenceStatus(str(item.get("status") or "sourced")),
+                value=item["value"],
+                sources=tuple(dict(x) for x in item.get("sources", [])),
+                missing_reason=item.get("missing_reason"),
+                conflict_details=tuple(item.get("conflict_details") or ()),
+            ).to_dict()
+        )
+    context["evidence"] = converted
+    return run
+
+
 class ProductWebContractTests(unittest.TestCase):
     def test_detail_loop_runs_independent_missing_tools_in_parallel(
         self,
@@ -428,7 +497,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "roundtrip_duration_seconds": 36000,
                     "roundtrip_fare_cny": 800,
                     "snapshot": {
-                        "status": "LIVE",
+                        "acquisition": "live_fetch",
                         "retrieved_at": "2026-07-30T12:00:00+08:00",
                     },
                     "outbound": {
@@ -515,7 +584,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "roundtrip_duration_seconds": 3600,
                     "roundtrip_fare_cny": 200,
                     "snapshot": {
-                        "status": "LIVE",
+                        "acquisition": "live_fetch",
                         "retrieved_at": "2026-07-30T12:00:00+00:00",
                     },
                 },
@@ -642,7 +711,7 @@ class ProductWebContractTests(unittest.TestCase):
                     "roundtrip_duration_seconds": 3600,
                     "roundtrip_fare_cny": 200,
                     "snapshot": {
-                        "status": "LIVE",
+                        "acquisition": "live_fetch",
                         "retrieved_at": "2026-07-30T12:00:00+00:00",
                     },
                 },
@@ -1025,7 +1094,7 @@ class ProductWebContractTests(unittest.TestCase):
                             "status": "sourced",
                             "value": {
                                 "snapshot": {
-                                    "status": "STALE",
+                                    "acquisition": "cache_fallback",
                                     "retrieved_at": "2026-07-30T12:00:00+08:00",
                                 }
                             },
@@ -1120,7 +1189,7 @@ class ProductWebContractTests(unittest.TestCase):
             }
         }
         payload = _map_payload_contract(
-            run,
+            _v2_run(run),
             plan_version=3,
             now=datetime(2026, 7, 30, 13, 0, tzinfo=timezone.utc),
         )
@@ -1466,7 +1535,7 @@ class ProductWebContractTests(unittest.TestCase):
                 "status": "sourced",
                 "value": {
                     "snapshot": {
-                        "status": "STALE",
+                        "acquisition": "cache_fallback",
                         "retrieved_at": "2026-07-30T12:00:00+08:00",
                     }
                 },
@@ -1502,7 +1571,7 @@ class ProductWebContractTests(unittest.TestCase):
                             {"blocker_id": "HOTEL_DETAIL_PENDING"}
                         ],
                     },
-                    "context": {"evidence": context_evidence},
+                    "context": {"evidence": _v2_evidence(context_evidence)},
                 }
             },
             now=read_at,
@@ -1535,7 +1604,7 @@ class ProductWebContractTests(unittest.TestCase):
                             "accommodation_base": True,
                         },
                     },
-                    "context": {"evidence": context_evidence},
+                    "context": {"evidence": _v2_evidence(context_evidence)},
                 }
             },
             now=read_at,

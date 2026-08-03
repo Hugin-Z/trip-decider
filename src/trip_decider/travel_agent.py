@@ -590,9 +590,15 @@ class EvidenceItem:
     def facts(self) -> tuple[Mapping[str, object], ...]:
         """字段级 facts（persistence-v2.md §1.3）。
 
-        **双读**：落盘已带 ``facts`` 键时直读；否则从 v1 的裸 ``value`` 推导。
-        推导期内写入端仍落 v1 形状，因此这条属性对行为零影响——它只是让消费端
-        可以提前切到字段级视角。
+        两个分支都是活的，**不是双读残余**：
+
+        * ``value`` 已是 v2（从落盘反序列化来的 item）——直读；
+        * ``value`` 是 v1 裸 mapping（采集器刚产出，还没落盘）——推导。
+
+        后者是 **v1-in-memory → v2-on-disk 的转换器**：采集器返回的是业务字段
+        平铺的 mapping，``_persisted_value`` 靠这条推导把它转成 facts 再写盘。
+        它不随双读拆除而消失；消失的只是「读落盘时可能需要推导」那个分支
+        （见 ``evidence_projection.item_facts``）。
 
         support 只下调不上调：``value`` 里为 ``None`` 或字面量 ``"UNKNOWN"``
         的字段降为 ``unknown``，其余继承 item 级。

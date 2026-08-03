@@ -64,7 +64,7 @@ def _sourced_railway(_intent: TravelIntent) -> EvidenceItem:
         value={
             "roundtrip_duration_seconds": 21600,
             "roundtrip_fare_cny": 800.0,
-            "snapshot": {"status": "LIVE", "retrieved_at": COLLECTED_AT},
+            "snapshot": {"acquisition": "live_fetch", "retrieved_at": COLLECTED_AT},
         },
         sources=({"provider": "controlled-rail", "retrieved_at": COLLECTED_AT},),
     )

@@ -443,45 +443,19 @@ USABLE_SUPPORT = frozenset({SUPPORT_SOURCED, SUPPORT_ESTIMATED})
 def item_facts(item: Any) -> tuple[Mapping[str, Any], ...]:
     """落盘证据 mapping → 字段级 facts。
 
-    与 `EvidenceItem.facts` 同样是双读：已带 facts 键就直读，否则从 v1 的裸
-    value 推导。P4-b3 生产端切换后，走的是前一条分支。
+    只直读。双读的推导回落已随 v1 存量删除一并拆除（P4-c 第 2 批）——落盘恒为
+    v2 形状，回落分支再也不会被走到，留着只会让人以为还有第二种落盘形状。
     """
 
     if not isinstance(item, Mapping):
         return ()
     value = item.get("value")
-    if isinstance(value, Mapping) and isinstance(
-        value.get("facts"), (list, tuple)
-    ):
-        return tuple(
-            fact for fact in value["facts"] if isinstance(fact, Mapping)
-        )
-    status = item.get("status")
-    support = (
-        support_from_legacy_name(status)
-        if isinstance(status, str)
-        else SUPPORT_SOURCED
-    )
-    domain = str(item.get("domain") or "")
-    conflict_details = item.get("conflict_details")
-    return derive_facts(
-        value,
-        str(item.get("evidence_id") or domain),
-        domain,
-        item_support=support,
-        data_type=DOMAIN_DATA_TYPES.get(domain, ""),
-        retrieved_at=item_retrieved_at(item),
-        reason=(
-            str(item["missing_reason"])
-            if isinstance(item.get("missing_reason"), str)
-            else None
-        ),
-        conflict_details=(
-            tuple(str(entry) for entry in conflict_details)
-            if isinstance(conflict_details, (list, tuple))
-            else ()
-        ),
-    )
+    if not isinstance(value, Mapping):
+        return ()
+    facts = value.get("facts")
+    if not isinstance(facts, (list, tuple)):
+        return ()
+    return tuple(fact for fact in facts if isinstance(fact, Mapping))
 
 
 def item_retrieved_at(item: Any) -> str | None:

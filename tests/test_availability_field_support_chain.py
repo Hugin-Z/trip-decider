@@ -27,7 +27,7 @@ def _fresh_railway() -> EvidenceItem:
         domain="railway",
         status=EvidenceStatus.SOURCED,
         value={
-            "snapshot": {"status": "LIVE", "retrieved_at": COLLECTED_AT},
+            "snapshot": {"acquisition": "live_fetch", "retrieved_at": COLLECTED_AT},
             "outbound": {
                 "train_code": "G100",
                 "departure_at": "2026-08-04T13:00",
