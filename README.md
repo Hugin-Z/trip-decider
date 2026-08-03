@@ -136,7 +136,7 @@ status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=rep
 
 机械复核（2026-08-03，P5 轮 3）：
 
-- tests：305（1 条预期失败，登记在 `tests/invariant_ledger.json`：I4 等
+- tests：333（1 条预期失败，登记在 `tests/invariant_ledger.json`：I4 等
   `hotel_price` 生产者）；
 - fixture directories：9；
 - 演示 network / LLM calls：0 / 0。

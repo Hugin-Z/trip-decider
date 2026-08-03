@@ -1728,6 +1728,19 @@ def _normalize_local_transit(
                 "mode": selected.get("mode"),
                 "duration_seconds": selected["duration_seconds"],
                 "distance_meters": selected.get("distance_meters"),
+                # 「乘什么、在哪换、走多远」——采集器一直在采（公交路线规划2.0
+                # 的 segments[].bus.buslines[]），此前在**这一步**被丢掉：
+                # 归一化只留了时长/距离/票价，于是行程里只剩一个时长估算。
+                # 这不是数据源缺口，是归一化把已有的东西扔了。
+                #
+                # services 保持采集顺序。换乘点由相邻两段推出：前一段的
+                # alight_at 就是后一段 board_at 的换乘站。不在这里另算一个
+                # transfer 列表——那会变成第二份可以和 services 不一致的数据
+                # （D19）。
+                "services": _normalized_services(selected.get("services")),
+                "walking_distance_meters": _nonnegative_int(
+                    selected.get("walking_distance_meters")
+                ),
                 "polyline": deepcopy(selected.get("polyline")),
                 "route_source": selected.get("source"),
                 "fare": {
@@ -1744,6 +1757,50 @@ def _normalize_local_transit(
             }
         )
     return normalized
+
+
+#: 一段公交线路在事件 detail 里被展示的字段。运营时刻可能缺（高德不总是返回），
+#: 缺就是 ``None``——不编，也不因此丢掉整条线路。
+_SERVICE_FIELDS = (
+    "service",
+    "board_at",
+    "alight_at",
+    "operating_start",
+    "operating_end",
+)
+
+
+def _normalized_services(value: object) -> list[dict[str, object]]:
+    """把采集器的 ``services`` 归一化成可展示的线路段。
+
+    只收**线路身份齐全**的段：线路名、上车站、下车站三者缺一，这一段就说不出
+    「乘什么、在哪上、在哪下」，留着只会在界面上显示一个空行。运营时刻另算，
+    缺了不影响这一段可用。
+    """
+
+    if not isinstance(value, list):
+        return []
+    services: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        identity = {
+            key: item.get(key)
+            for key in ("service", "board_at", "alight_at")
+        }
+        if any(
+            not isinstance(text, str) or not text.strip()
+            for text in identity.values()
+        ):
+            continue
+        services.append({key: item.get(key) for key in _SERVICE_FIELDS})
+    return services
+
+
+def _nonnegative_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
 
 
 def _web_action(intent: TravelIntent) -> dict[str, object]:

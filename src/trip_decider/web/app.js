@@ -1087,7 +1087,31 @@ function eventDescription(event) {
   if (fare && Number.isFinite(fare.amount_cny)) {
     details.push(`约 ¥${fare.amount_cny}`);
   }
+  // 「乘什么、在哪上下、走多远」。此前这一段只显示时长和距离，用户实测点名过。
+  // 数据一直在 map 证据里，缺的只是这几行渲染。
+  const services = Array.isArray(event.services) ? event.services : [];
+  if (services.length) {
+    details.push(services.map(serviceLabel).join(" → "));
+  }
+  if (Number.isFinite(event.walking_distance_meters)) {
+    details.push(`步行 ${event.walking_distance_meters} 米`);
+  }
   return details.join(" · ");
+}
+
+function serviceLabel(service) {
+  const name = service?.service || "线路待核验";
+  const board = service?.board_at;
+  const alight = service?.alight_at;
+  if (!board || !alight) return name;
+  return `${name}（${board} 上，${alight} 下）`;
+}
+
+function serviceOperatingNote(services) {
+  const windows = (services || [])
+    .filter((item) => item?.operating_start && item?.operating_end)
+    .map((item) => `${item.service} ${item.operating_start}–${item.operating_end}`);
+  return windows.length ? `运营时间：${windows.join("；")}` : "";
 }
 
 function renderEvidenceStatuses(target, presentation) {
@@ -1226,6 +1250,36 @@ function renderLocalTransitReferences(target, plan) {
       : "距离待核验"} · ${Number.isFinite(route.fare?.amount_cny)
       ? `约 ¥${route.fare.amount_cny}`
       : "费用待核验"} · ${freshness}`;
+    const services = Array.isArray(route.services) ? route.services : [];
+    if (services.length) {
+      const lines = document.createElement("div");
+      lines.className = "transit-services";
+      lines.textContent = services.map(serviceLabel).join(" → ");
+      item.append(lines);
+      const transfers = Array.isArray(route.transfers) ? route.transfers : [];
+      const walked = transfers.filter((one) => one && one.same_stop === false);
+      if (walked.length) {
+        const note = document.createElement("div");
+        note.className = "transit-transfers";
+        note.textContent = `换乘需走出站：${
+          walked.map((one) => `${one.alight_at} → ${one.board_at}`).join("；")
+        }`;
+        item.append(note);
+      }
+      const operating = serviceOperatingNote(services);
+      if (operating) {
+        const hours = document.createElement("div");
+        hours.className = "transit-operating";
+        hours.textContent = operating;
+        item.append(hours);
+      }
+    }
+    if (Number.isFinite(route.walking_distance_meters)) {
+      const walk = document.createElement("div");
+      walk.className = "transit-walking";
+      walk.textContent = `全程步行约 ${route.walking_distance_meters} 米`;
+      item.append(walk);
+    }
     list.append(item);
   });
   section.append(title, note, list);

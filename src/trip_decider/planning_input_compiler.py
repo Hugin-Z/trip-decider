@@ -613,6 +613,37 @@ def _compile_railway(
         dependencies["transit"].append(evidence_id)
 
 
+def _usable_services(route: Mapping[str, object]) -> list[Mapping[str, object]]:
+    value = route.get("services")
+    return [item for item in value if isinstance(item, Mapping)] if isinstance(
+        value, list
+    ) else []
+
+
+def _transfer_points(route: Mapping[str, object]) -> list[dict[str, object]]:
+    """换乘点：由相邻两段线路**推出**，不另存一份。
+
+    第 n 段的 ``alight_at`` 与第 n+1 段的 ``board_at`` 之间就是一次换乘。两者
+    通常同名（同站换乘），不同名则是走一段路换乘——高德只给整条路线的总步行
+    距离，**分不到每次换乘头上**，所以这里不写每次换乘走多远（见
+    `docs/contracts/local-transit-coverage.md` 的缺口 2）。
+
+    推出而不是存一份：存下来就是第二份可以和 ``services`` 不一致的数据（D19）。
+    """
+
+    services = _usable_services(route)
+    return [
+        {
+            "from_service": previous.get("service"),
+            "to_service": nxt.get("service"),
+            "alight_at": previous.get("alight_at"),
+            "board_at": nxt.get("board_at"),
+            "same_stop": previous.get("alight_at") == nxt.get("board_at"),
+        }
+        for previous, nxt in zip(services, services[1:])
+    ]
+
+
 def _compile_local_transit(
     evidence: Mapping[str, object] | None,
     *,
@@ -678,6 +709,14 @@ def _compile_local_transit(
                 "transport_mode": route.get("mode"),
                 "duration_seconds": duration,
                 "distance_meters": route.get("distance_meters"),
+                # 「乘什么、在哪换、走多远」进事件 detail。此前这一段只给时长，
+                # 用户实测点名过：行程说「30 分钟到」，但没说坐几路、在哪上车。
+                # 数据一直在 map 证据里，缺的是这三行。
+                "services": deepcopy(_usable_services(route)),
+                "transfers": _transfer_points(route),
+                "walking_distance_meters": route.get(
+                    "walking_distance_meters"
+                ),
                 "from_location": deepcopy(route.get("from_location")),
                 "to_location": deepcopy(route.get("to_location")),
                 "polyline": deepcopy(route.get("polyline")),

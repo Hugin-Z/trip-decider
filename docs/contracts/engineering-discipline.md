@@ -316,6 +316,16 @@ commit message 能回答。
 |---|---|---|---|
 | 1 | `user_supply` 铁路证据端到端（声明 → 四层校验 → Planner 消费） | `tests/test_user_supply_railway_end_to_end.py` | `fixtures/host_mcp_smoke/user_supply_railway.json` |
 | 2 | `GUIDED_DISCOVERY` 真实意图路径（含比较失败后的恢复） | `tests/test_guided_discovery_recovery.py` | `fixtures/host_mcp_smoke/guided_discovery_intent.json` |
+| 3 | 宿主最短调用序列（建任务 → 确认 → 推进 → 选候选），含重复确认与最小证据提交 | `tests/test_host_call_protocol_relief.py` | 复用第 1、2 条的夹具 |
+| 4 | 工具描述里的选用钩子与参数示例 | `tests/test_tool_descriptions_help_the_host_choose.py` | 无需夹具（读的是 `list_tools()` 的真实产出） |
+
+第 3、4 条来自实测的**另一半**：不是「调用崩了」，是「宿主没选用 / 选用了也
+要试十几次」。第 4 条守的东西不在代码行为里而在**描述文本**里——它照样能机械
+核对，也照样会因为有人「顺手精简一下描述」而退化。
+
+**人来做的那部分**：选用率与调用序列长度只有真实宿主能测，步骤见
+`docs/field-reports/retest-2026-08-03-host-adoption.md`。自动化守的是「改动没
+退回去」，守不了「宿主真的会选它」——两者不可互相替代。
 
 **两条硬要求**：
 

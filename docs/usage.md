@@ -191,6 +191,10 @@ Claude 里看得到，反之亦然。
 - **候选比较失败（`GUIDED_COMPARISON_UNAVAILABLE`）**：任务不会就此作废。
   `recovery` 会给两条路——重试比较，或者跳过比较直接对你说的那个区域出方案
   （候选列表里那张标着「未比较」的卡）。**不需要重新描述目的地**。
+- **当地交通只显示时长、不显示线路**：说明那一段高德返回的是驾车兜底而不是
+  公交（该城该段没有公交方案）。有公交方案时会给出线路名、上下车站、换乘站、
+  票价与步行距离；覆盖范围与已知缺口见
+  [local-transit-coverage.md](contracts/local-transit-coverage.md)。
 
 运行数据都在 `runtime/sessions/<run_id>/`，出问题时这个目录就是现场。
 
