@@ -186,6 +186,17 @@ A 与 B 目前靠「都从同一个 `state.evidence` 写出」保持一致，那
 domain="user_input", value=intent.to_dict())` 现造的。重建即可，顺带再消灭一份
 副本。**此项待批**。
 
+**执行进度（2026-08-03，轮 8）**：读取侧全部完成——4 个读取点都改吃容器 B，
+`user_input` 按 `travel_agent.user_input_evidence` 重建，守卫 4 已钉住「两面读
+同一份」。**写入侧未做**：A 仍然内联证据，但**已无人读它**，是死数据。
+
+剩余一步是删掉这份死数据，代价是 13 条测试要跟着改（它们直接断言
+`result["context"]["evidence"]` 的旧形状，或调 `plan_verdict_from_result` /
+`recomputed_planning_state` 时不带 evidence）。其中 12 条是机械替换，
+**1 条需要判断**：`tests/test_persisted_round_trip_keeps_verdicts` 断言的是
+证据经落盘往返后 verdict 不变，而它取证据的地方正是要删的那份——改成读 B
+是对的，但「往返」的语义要重新想清楚，不能顺手替换。
+
 **表征预期**：会响。`result.context` 形状变更影响落盘快照；逐条核对必须确认
 变化只落在 context 的证据键上，判定结论零变化（D8）。
 
