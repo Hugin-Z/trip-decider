@@ -35,7 +35,7 @@ _INSTALLABLE_STATES = {"PARTIAL_READY", "PLAN_READY"}
 
 
 class _PlanRefs(NamedTuple):
-    """一次编译里反复要用的字段级引用，算一次传下去。
+    """一次编译里反复要用的引用，算一次传下去。
 
     每个事件都该说清「我出自哪些事实」——读取层拿 ``fact_refs`` 按读取时刻重算
     token，PlanVersion 文件里没有可回落的值，R2（引用解析失败必须产出 unknown）
@@ -43,12 +43,19 @@ class _PlanRefs(NamedTuple):
 
     规划器默认值派生的事件（餐食、休息、缓冲、自由活动）出自**行程窗口**，
     那是用户输入的事实；与铁路时刻挂钩的缓冲另外引用对应的车次事实。
+
+    后两项是**证据级**引用（``evidence_dependencies`` 用），与前四项的字段级
+    引用分成两组字段而不是合成一组：两种粒度指的东西不同，合了就没法在调用点
+    看出这一处该给哪一种（D20 的同类判断，`engineering-discipline.md`）。
+    两种粒度都从传进来的证据现算——写死 id 是本模块此前唯一的引用缺陷来源。
     """
 
     intent_window: tuple[str, ...] = ()
     rail_arrival: tuple[str, ...] = ()
     rail_departure: tuple[str, ...] = ()
     hotel_area: tuple[str, ...] = ()
+    user_evidence: tuple[str, ...] = ()
+    rail_evidence: tuple[str, ...] = ()
 
 
 class PlanningInputCompiler:
@@ -141,6 +148,8 @@ class PlanningInputCompiler:
                 _field_refs(railway, "return.departure_at")
             ),
             hotel_area=tuple(_field_refs(web_item, "hotel_area.name")),
+            user_evidence=tuple(_evidence_ref(evidence.get("user_input"))),
+            rail_evidence=tuple(_evidence_ref(railway)),
         )
         _compile_local_transit(
             map_item,
@@ -842,7 +851,12 @@ def _compile_defaults(
     dependencies: dict[str, list[str]],
     blockers: list[dict[str, object]],
 ) -> None:
-    user_dependency = "confirmed-travel-intent"
+    # 现算，不写死。此前这里是全模块唯一把 evidence_id 当常量写的地方——
+    # 其余五个分支都做 ``str(evidence.get("evidence_id"))``，而本函数是唯一
+    # 拿不到证据表的分支，于是作者按当时的生产点把名字抄了进来。抄来的名字
+    # 只在实采路径成立：采集器未配置走 ``{domain}-{uuid4()}``，提交面
+    # （HTTP / MCP 的 submit_evidence）由调用方给 id，夹具走 ``{domain}-{state}``。
+    user_dependency = list(plan_refs.user_evidence)
     if hotel_area is None:
         blockers.append(
             _blocker(
@@ -884,8 +898,8 @@ def _compile_defaults(
             extra={"location": arrival_station or "抵达车站"},
         )
         buffer_event["evidence_dependencies"] = [
-            "railway-live-query",
-            user_dependency,
+            *plan_refs.rail_evidence,
+            *user_dependency,
         ]
         # 到站缓冲的起点是车次到站时刻——那份事实过期，这个缓冲就不再成立。
         buffer_event["fact_refs"] = [
@@ -905,14 +919,14 @@ def _compile_defaults(
             adjustable=("start_at", "duration_minutes", "hotel_choice"),
             extra={"location": hotel_area},
         )
-        checkin["evidence_dependencies"] = [user_dependency]
+        checkin["evidence_dependencies"] = list(user_dependency)
         checkin["fact_refs"] = [
             *plan_refs.hotel_area,
             *plan_refs.intent_window,
         ]
         _add_event(days, checkin)
         events_by_type["hotel"].append(checkin)
-        dependencies["hotel"].append(user_dependency)
+        dependencies["hotel"].extend(user_dependency)
 
     departure = _rail_time(
         events_by_type["transit"],
@@ -936,7 +950,7 @@ def _compile_defaults(
             adjustable=("start_at", "duration_minutes", "hotel_choice"),
             extra={"location": hotel_area},
         )
-        checkout["evidence_dependencies"] = [user_dependency]
+        checkout["evidence_dependencies"] = list(user_dependency)
         checkout["fact_refs"] = [
             *plan_refs.rail_departure,
             *plan_refs.hotel_area,
@@ -944,7 +958,7 @@ def _compile_defaults(
         ]
         _add_event(days, checkout)
         events_by_type["hotel"].append(checkout)
-        dependencies["hotel"].append(user_dependency)
+        dependencies["hotel"].extend(user_dependency)
         wait = make_event(
             event_id="rail-wait-buffer",
             event_type="buffer",
@@ -961,8 +975,8 @@ def _compile_defaults(
                     "from",
                 ) or "返程车站",
                 "evidence_dependencies": [
-                    "railway-live-query",
-                    user_dependency,
+                    *plan_refs.rail_evidence,
+                    *user_dependency,
                 ]
             },
         )
@@ -1023,7 +1037,7 @@ def _compile_defaults(
             extra={
                 "remove_with_attraction_id": attraction_id,
                 "location": deepcopy(attraction.get("location")),
-                "evidence_dependencies": [user_dependency],
+                "evidence_dependencies": list(user_dependency),
                 # 它依附于某个景点事件而存在，引用跟着那个景点的事实走。
                 "fact_refs": [
                     *(attraction.get("fact_refs") or []),
@@ -1033,7 +1047,7 @@ def _compile_defaults(
         )
         _add_event(days, buffer_event)
         events_by_type["buffer"].append(buffer_event)
-        dependencies["buffer"].append(user_dependency)
+        dependencies["buffer"].extend(user_dependency)
 
     def scheduled_meal_start(
         day: Mapping[str, object],
@@ -1152,11 +1166,11 @@ def _compile_defaults(
             )
             if overlaps_event_id is not None:
                 meal["overlaps_event_id"] = overlaps_event_id
-            meal["evidence_dependencies"] = [user_dependency]
+            meal["evidence_dependencies"] = list(user_dependency)
             meal["fact_refs"] = list(plan_refs.intent_window)
             _add_event(days, meal)
             events_by_type["meal"].append(meal)
-            dependencies["meal"].append(user_dependency)
+            dependencies["meal"].extend(user_dependency)
 
         if day_index < len(days) - 1:
             rest_start = datetime.combine(date_value, time(22, 0))
@@ -1176,13 +1190,13 @@ def _compile_defaults(
                     adjustable=("start_at", "end_at"),
                     extra={
                         "location": hotel_area,
-                        "evidence_dependencies": [user_dependency],
+                        "evidence_dependencies": list(user_dependency),
                         "fact_refs": list(plan_refs.intent_window),
                     },
                 )
                 _add_event(days, rest)
                 events_by_type["rest"].append(rest)
-                dependencies["rest"].append(user_dependency)
+                dependencies["rest"].extend(user_dependency)
 
 
 def _record_evidence_blockers(
@@ -1296,7 +1310,7 @@ def _compile_free_time(
 ) -> None:
     """Make daytime gaps visible without treating them as attractions."""
 
-    dependency = "confirmed-travel-intent"
+    dependency = list(plan_refs.user_evidence)
     base = hotel_area or "当日所在地"
     for day in days:
         day_date = datetime.fromisoformat(str(day["date"])).date()
@@ -1347,13 +1361,13 @@ def _compile_free_time(
                     extra={
                         "location": base,
                         "free_time": True,
-                        "evidence_dependencies": [dependency],
+                        "evidence_dependencies": list(dependency),
                         "fact_refs": list(plan_refs.intent_window),
                     },
                 )
                 _add_event(days, free)
                 events_by_type["rest"].append(free)
-                dependencies["rest"].append(dependency)
+                dependencies["rest"].extend(dependency)
             cursor = max(cursor, end_at)
 
 

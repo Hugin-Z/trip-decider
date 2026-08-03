@@ -930,5 +930,107 @@ class PlanningInputCompilerTests(unittest.TestCase):
         self.assertNotIn("local_transit_refresh_failure", merged.value)
 
 
+class EvidenceDependenciesResolveTests(unittest.TestCase):
+    """``evidence_dependencies`` 里的每个 id 都必须在 context.evidence 里找得到。
+
+    这是**引用可解析性**，不是行为——规划结论不看这个键（全仓唯一消费点是
+    ``agent_actions._planner_handler`` 的原样拷贝），所以写错了没有任何东西会
+    报错，只会在盘上留下一个指不到的名字。用例本身就是这个「没人会报错」的
+    补位：D2 的消费点同表核对，机械化成一条断言。
+
+    参数化两个 id 形状是要点。写死的字面量在**恰好那个形状**下是绿的——旧代码
+    在实采路径下 ``railway-live-query`` 就解析得到，只有换个生产点才露馅。
+    """
+
+    _ID_SHAPES = (
+        # 实采路径：destination_runtime 的两个分支都产这两个 id
+        ("live", "confirmed-travel-intent", "railway-live-query"),
+        # 采集器未配置：travel_agent.collect_destination_evidence 的 uuid 形状
+        ("uuid", "user-3f1c", "railway-9ab2"),
+        # 提交面：HTTP / MCP 的 submit_evidence 由调用方给 id
+        ("submitted", "user", "railway-manual-entry"),
+    )
+
+    def _compile(self, user_id: str, railway_id: str) -> dict:
+        railway = replace(_railway(), evidence_id=railway_id)
+        context = DestinationContext(
+            context_id="context-refs",
+            intent=_intent("乙地"),
+            evidence=(
+                EvidenceItem(
+                    evidence_id=user_id,
+                    domain="user_input",
+                    status=EvidenceStatus.SOURCED,
+                    value=_intent("乙地").to_dict(),
+                    sources=({"source_type": "user_supplied"},),
+                ),
+                railway,
+                _map("乙地"),
+                _web("乙地"),
+            ),
+            built_at="2026-07-30T11:00:00+08:00",
+        )
+        return PlanningInputCompiler().compile(context, now=READ_AT)
+
+    @staticmethod
+    def _referenced(compiled: dict) -> set[str]:
+        seen: set[str] = set()
+        for bucket in compiled["evidence_dependencies"].values():
+            seen.update(str(value) for value in bucket)
+        for key in (
+            "cross_city_rail_events",
+            "local_transit_events",
+            "attraction_events",
+            "meal_events",
+            "hotel_events",
+            "buffer_events",
+            "rest_events",
+        ):
+            for event in compiled[key]:
+                seen.update(
+                    str(value)
+                    for value in event.get("evidence_dependencies", ())
+                )
+        return seen
+
+    def test_no_dependency_points_outside_the_context_evidence(self) -> None:
+        for label, user_id, railway_id in self._ID_SHAPES:
+            with self.subTest(shape=label):
+                compiled = self._compile(user_id, railway_id)
+                known = {
+                    user_id,
+                    railway_id,
+                    "map-live-query",
+                    "web-official-query",
+                }
+                self.assertEqual(
+                    sorted(self._referenced(compiled) - known),
+                    [],
+                    f"{label}：这些 evidence_dependencies 在 context.evidence 里不存在",
+                )
+
+    def test_rail_derived_buffers_still_name_the_railway_evidence(self) -> None:
+        """负向的另一半：解析得到不等于指对了东西。
+
+        改正引用时把两个缓冲的铁路依赖整条删掉，上一个用例照样全绿——空集合
+        永远是子集。这一条钉住它们**确实**指着铁路证据（D14：存在性检查不能
+        冒充可用性检查，这里是「可解析」不能冒充「指对」）。
+        """
+
+        for label, user_id, railway_id in self._ID_SHAPES:
+            with self.subTest(shape=label):
+                compiled = self._compile(user_id, railway_id)
+                by_id = {
+                    str(event["event_id"]): event
+                    for event in compiled["buffer_events"]
+                }
+                for event_id in ("arrival-buffer", "rail-wait-buffer"):
+                    self.assertIn(event_id, by_id)
+                    self.assertEqual(
+                        by_id[event_id]["evidence_dependencies"],
+                        [railway_id, user_id],
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
