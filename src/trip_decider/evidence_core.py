@@ -62,8 +62,6 @@ __all__ = [
     "aggregate_freshness",
     "aggregate_support",
     "build_next_action",
-    "SonarValue",
-    "V1AccessError",
     "collection_metadata",
     "combine_token",
     "classify_support",
@@ -480,7 +478,7 @@ def split_fact_id(value: str) -> tuple[str, str]:
 # ``*_status`` / ``display`` 是展示态（P4-b3 的删除对象）。
 # 剪掉整棵子树的键：它们自上而下都是取证元数据。
 # 采集元数据登记表（persistence-v2.md §1.4.1）。**一个符号，三处使用**：
-# 剪枝（_is_non_fact_path）、保留（collection_metadata）、声呐（SonarValue）。
+# 剪枝（_is_non_fact_path）与保留（collection_metadata）。
 #
 # 值为 None：整棵子树都是元数据。
 # 值为一组叶子名：该键是**重载键**——它本身装着事实（``snapshot`` 下面是车次
@@ -488,7 +486,7 @@ def split_fact_id(value: str) -> tuple[str, str]:
 #
 # 合并成一份是刻意的。分成两个符号时，「剪掉了但没保留」与「保留了但没放行」
 # 在语法上都成立，而这两个错各犯过一次：collection_metadata 漏了重载键让元
-# 数据凭空消失，SonarValue 漏了同一批键报出 8 条假阳性。
+# 数据凭空消失，迁移期的声呐漏了同一批键报出 8 条假阳性（声呐已拆）。
 _NON_FACT_PATHS: Mapping[str, frozenset[str] | None] = MappingProxyType(
     {
         "freshness": None,
@@ -585,43 +583,6 @@ def _flatten_leaves(
             out.extend(_flatten_leaves(child, f"{prefix}[{index}]"))
         return out
     return [(prefix, value)] if prefix else []
-
-
-class V1AccessError(EvidenceCoreError):
-    """有人把 v2 形状的 value 当 v1 裸 mapping 读了。"""
-
-
-class SonarValue(dict):
-    """v2 落盘 value 的迁移期外壳：v1 式访问大声失败。
-
-    ``value.get("outbound")`` 在 v2 下静默返回 ``None``——不报错，只是悄悄什么
-    也没做。静态普查数不出这类消费点，所以让它们自己报名。**迁移完成后拆除。**
-    """
-
-    __slots__ = ()
-
-    _KNOWN = frozenset({"facts"}) | frozenset(_NON_FACT_PATHS)
-
-    def _guard(self, key: object) -> None:
-        name = str(key)
-        if name in self._KNOWN:
-            return
-        raise V1AccessError(
-            f"v1 式访问 v2 落盘形状：键 {name!r} 不在 v2 的 value 里。"
-            f"业务字段要走 usable_fact_values(item_facts(...)) 重建。"
-        )
-
-    def get(self, key, default=None):  # type: ignore[override]
-        self._guard(key)
-        return super().get(key, default)
-
-    def __getitem__(self, key):
-        self._guard(key)
-        return super().__getitem__(key)
-
-    def __contains__(self, key: object) -> bool:
-        self._guard(key)
-        return super().__contains__(key)
 
 
 def collection_metadata(value: Any) -> dict[str, Any]:

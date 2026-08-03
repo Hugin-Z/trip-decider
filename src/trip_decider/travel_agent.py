@@ -18,7 +18,6 @@ import os
 from pathlib import Path
 
 from trip_decider.evidence_core import (
-    SonarValue,
     collection_metadata,
     derive_facts,
     support_from_legacy_name,
@@ -372,13 +371,11 @@ class TravelIntent:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -514,13 +511,11 @@ class Revision:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -635,13 +630,11 @@ class EvidenceItem:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -689,13 +682,11 @@ class DestinationContext:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -747,13 +738,11 @@ class AgentEvent:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -793,13 +782,11 @@ class AgentRun:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -838,13 +825,11 @@ class AgentSession:
             return deepcopy(value)
         if isinstance(value.get("facts"), (list, tuple)):
             return deepcopy(dict(value))
-        return SonarValue(
-            deepcopy(
-                {
-                    **collection_metadata(value),
-                    "facts": [dict(fact) for fact in self.facts],
-                }
-            )
+        return deepcopy(
+            {
+                **collection_metadata(value),
+                "facts": [dict(fact) for fact in self.facts],
+            }
         )
 
     def to_dict(self) -> dict[str, object]:
