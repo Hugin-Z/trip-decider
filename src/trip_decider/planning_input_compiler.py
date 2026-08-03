@@ -117,6 +117,7 @@ def plan_verdict_from_result(
     result: Mapping[str, object] | None,
     *,
     now: datetime,
+    evidence: Mapping[str, Mapping[str, object]] | None = None,
     refetcher: object = None,
 ) -> PlanVerdict:
     """从 ``run.result`` 取 context，按读取时刻编译出计划准入结论。
@@ -138,6 +139,14 @@ def plan_verdict_from_result(
     context = result.get("context")
     if not isinstance(context, Mapping):
         return _ABSENT_VERDICT
+    if evidence is not None:
+        # 证据来自容器 B（`evidence/current.json`），不再读 context 里的内联
+        # 副本——A 已收敛（`persistence-v2.md` §2.1.1）。`user_input` 域不在 B
+        # 里，由调用方按 `travel_agent.user_input_evidence` 重建后一并传入。
+        context = {
+            **dict(context),
+            "evidence": [dict(item) for item in evidence.values()],
+        }
     context, pending = _resolved_context(context, now=now, refetcher=refetcher)
     try:
         compiled = PlanningInputCompiler().compile(context, now=now)

@@ -2350,15 +2350,28 @@ def validate_destination_plan(
 ) -> dict[str, object]:
     """Validate context linkage and evidence provenance."""
 
+    # 两种 context 都要吃：**采集时**的完整 context（证据内联），与**落盘后**
+    # 的 context（证据已收敛进 evidence/current.json，只留 evidence_refs，
+    # persistence-v2.md §2.1.1）。本函数只用证据的 id 集合做引用解析核对，
+    # 因此两种形状给的是同一个信息——收敛不改变它的判定。
     evidence = context.get("evidence")
-    if not isinstance(evidence, list):
-        raise ValueError("context evidence must be an array")
-    available = {
-        str(item["evidence_id"])
-        for item in evidence
-        if isinstance(item, Mapping)
-        and isinstance(item.get("evidence_id"), str)
-    }
+    refs_only = context.get("evidence_refs")
+    if isinstance(evidence, list):
+        available = {
+            str(item["evidence_id"])
+            for item in evidence
+            if isinstance(item, Mapping)
+            and isinstance(item.get("evidence_id"), str)
+        }
+    elif isinstance(refs_only, list):
+        evidence = []
+        available = {
+            str(item) for item in refs_only if isinstance(item, str)
+        }
+    else:
+        raise ValueError(
+            "context must carry either evidence or evidence_refs"
+        )
     refs = plan.get("evidence_refs")
     problems: list[dict[str, object]] = []
     if plan.get("context_id") != context.get("context_id"):

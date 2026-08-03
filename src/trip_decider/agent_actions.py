@@ -487,7 +487,8 @@ def get_next_actions(
 
     state = _state(run_id, store)
     if state.action_status["planner"] == "completed":
-        if _result_is_displayable(state.result):
+        loop_evidence = _loop_evidence(state, run.intent)
+        if _result_is_displayable(state.result, loop_evidence):
             return _snapshot(run_id, "READY", [], result=state.result)
         # 读时重算，不读盘上的副本。此前这里是
         # `_result_planning_state(state.result)`，读 `result["planning_state"]`
@@ -495,7 +496,7 @@ def get_next_actions(
         # 硬约束冲突的 run 拿不到 BLOCKED 快照，只会落到下面那句
         # 「缺展示要件」，叙述与真实原因无关。删掉读盘的那个 helper，接上
         # 与 _result_is_displayable 同一个读时结论。
-        if recomputed_planning_state(state.result) == "BLOCKED":
+        if recomputed_planning_state(state.result, loop_evidence) == "BLOCKED":
             return _snapshot(
                 run_id,
                 "BLOCKED",
@@ -660,7 +661,8 @@ def execute_registered_action(
         # run.json 里却还没有 result，重启后状态自相矛盾。
         store.record_result(run_id, result)
         _persist_loop_state(run_id, state, store)
-        if _result_is_displayable(result):
+        planner_evidence = _loop_evidence(state, run.intent)
+        if _result_is_displayable(result, planner_evidence):
             store.persist_plan_version(run_id, result)
         store.append_event(
             run_id,
@@ -668,7 +670,7 @@ def execute_registered_action(
             status="completed",
             message=(
                 "计划版本已通过证据门并安装。"
-                if _result_is_displayable(result)
+                if _result_is_displayable(result, planner_evidence)
                 else "规划草稿已生成，仍在补充最低真实证据。"
             ),
             details={
@@ -679,7 +681,7 @@ def execute_registered_action(
                 ),
             },
         )
-        if _result_is_displayable(result):
+        if _result_is_displayable(result, planner_evidence):
             store.complete(run_id, result)
         else:
             store.append_event(
@@ -1834,8 +1836,24 @@ def _can_collect_local_transit(state: _LoopState) -> bool:
     )
 
 
+def _loop_evidence(state: "_LoopState", intent: TravelIntent) -> dict:
+    """编译输入的证据：容器 B（内存态即 ``state.evidence``）+ 重建的 user_input。
+
+    A（``result["context"]["evidence"]``）已收敛，不再是证据来源
+    （`persistence-v2.md` §2.1.1）。这里用的是 B 的**内存那一份**——它与盘上
+    的 `evidence/current.json` 由 `_persist_loop_state` 同步写出，是同一份。
+    """
+
+    evidence = {
+        domain: item.to_dict() for domain, item in state.evidence.items()
+    }
+    evidence["user_input"] = user_input_evidence(intent).to_dict()
+    return evidence
+
+
 def recomputed_planning_state(
     result: Mapping[str, object] | None,
+    evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> str | None:
     """按**读取时刻**重算 planning_state，不读盘上的副本。
 
@@ -1853,11 +1871,16 @@ def recomputed_planning_state(
     ``planning_input_compiler.plan_verdict_from_result``。
     """
 
-    return plan_verdict_from_result(result, now=_READ_CLOCK()).planning_state
+    return plan_verdict_from_result(
+        result,
+        now=_READ_CLOCK(),
+        evidence=evidence,
+    ).planning_state
 
 
 def _result_is_displayable(
     result: Mapping[str, object] | None,
+    evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> bool:
     """写入侧只验结构完整，「够不够格显示」是读取时的问题
     （persistence-v2.md §6.2）。
@@ -1871,7 +1894,11 @@ def _result_is_displayable(
     plan = result.get("plan")
     if not (isinstance(plan, Mapping) and plan.get("artifact_kind") == "PlanVersion"):
         return False
-    return plan_verdict_from_result(result, now=_READ_CLOCK()).usable_now
+    return plan_verdict_from_result(
+        result,
+        now=_READ_CLOCK(),
+        evidence=evidence,
+    ).usable_now
 
 
 def _missing_display_requirements(

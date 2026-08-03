@@ -38,6 +38,7 @@ from trip_decider.travel_agent import (
     RunStatus,
     TaskMode,
     TravelAgentError,
+    user_input_evidence,
 )
 
 
@@ -78,6 +79,26 @@ class TripQueryService:
         # 采集器住在上层模块，读取层导入它们会成环，也会把只读的读取层
         # 变成能自己发网络请求的东西——与内核「策略由调用方注入」同理。
         self._refetcher = refetcher
+
+    def _compile_evidence(
+        self,
+        run_id: str,
+        run: object,
+    ) -> dict:
+        """编译输入的证据：容器 B + 重建的 user_input。
+
+        A（`run.result["context"]["evidence"]`）已收敛，不再是证据来源
+        （`persistence-v2.md` §2.1.1）。`user_input` 不在 B 里——它是 intent 的
+        投影不是采集证据，按 `travel_agent.user_input_evidence` 重建，id 稳定。
+        """
+
+        evidence = dict(
+            self.application_service.current_run_evidence(run_id)
+        )
+        intent = getattr(run, "intent", None)
+        if intent is not None:
+            evidence["user_input"] = user_input_evidence(intent).to_dict()
+        return evidence
 
     def _flush_pending(
         self,
@@ -402,6 +423,7 @@ class TripQueryService:
         verdict = plan_verdict_from_result(
             run.result,
             now=read_at,
+            evidence=self._compile_evidence(run_id, run),
             refetcher=self._refetcher,
         )
         # 读取层不落盘：待写回交给应用层——唯一的写入协调者（§5.2.2）。
