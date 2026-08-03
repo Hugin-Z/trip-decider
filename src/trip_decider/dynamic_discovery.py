@@ -19,6 +19,10 @@ from trip_decider.simple_live import (
     list_live_top_level_regions,
     search_live_places,
 )
+from trip_decider.destination_pool import (
+    load_destination_pool,
+    prefilter_pool,
+)
 from trip_decider.travel_agent import (
     EvidenceItem,
     EvidenceStatus,
@@ -179,11 +183,93 @@ def dynamic_destination_seeds(
     return seeds
 
 
+def _trip_days(intent: TravelIntent) -> float:
+    """行程窗长度（天）。解析不出时按 0——0 让天数偏好归零，不排除任何种子。"""
+
+    try:
+        start = datetime.fromisoformat(str(intent.earliest_departure_at))
+        end = datetime.fromisoformat(str(intent.latest_return_at))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (end - start).total_seconds() / 86400.0)
+
+
+def _pool_seeds(
+    intent: TravelIntent,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    """从种子目录取候选（能力 A v0，裁决 7）。
+
+    **取代了「扫描全国所有省份、按 POI 命中数排序」那条路径。** 那条路径是
+    上一轮两条死路的根因：短行程窗的请求会拿到跨半个国家的候选——既不响应
+    意图，也从不问「到得了吗」。实测输入输出见 `capability-a-design.md` §1.1
+    （具体地名留在那份文档里，本模块不得出现地名字面量，I9）。
+
+    本函数一个网络请求都不发：可达性由 `reachability` 在实查车次之后判，
+    相关性由裁决 1 的锚点 POI 要求把关。这里只挑**谁值得去查**。
+    """
+
+    pool = load_destination_pool()
+    if not pool:
+        return []
+    selected = prefilter_pool(
+        pool,
+        themes=list(intent.themes),
+        trip_days=_trip_days(intent),
+    )
+    seeds: list[dict[str, object]] = []
+    for entry in selected[:limit]:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        # **不要用 `gateway_label` 当车站名。** 它是给人看的标签，形如
+        # 「甲 / 乙」（枢纽 / 目的地），整串丢给 12306 一个站都解析不出来——
+        # 实测候选因此全部 railway_support_unknown，退回区里条条一模一样。
+        # 车站名走 `planning_city`，`_station_seed` 会剥掉行政区后缀。
+        gateway = str(entry.get("planning_city") or name).strip()
+        seeds.append(
+            {
+                "id": stable_identifier(
+                    "destination",
+                    "trip-decider:seed-pool",
+                    f"{name}:{gateway}",
+                ),
+                "name": name,
+                "region_label": str(entry.get("region_label") or name),
+                "province": str(entry.get("province") or ""),
+                "planning_city": str(entry.get("planning_city") or name),
+                "planning_adcode": str(entry.get("planning_adcode") or ""),
+                # **不设 `rail_gateway`。** `_station_seed` 只在走
+                # `planning_city` 那一支时才剥「市/县/区」后缀；`rail_gateway`
+                # 有值就原样返回。设了它等于把带后缀的行政区名直接丢给 12306，
+                # 而车站名不带后缀——实测两者一个 SOURCED、一个查不到。
+                # 让它走 planning_city，后缀剥除是现成的。
+                # 标签保留原样给人看，与查询用的站名分开——两者混用是上一个
+                # bug 的成因（gateway_label 形如「甲 / 乙」，不是站名）。
+                "gateway_label": str(entry.get("gateway_label") or gateway),
+                "themes": [str(item) for item in (entry.get("themes") or ())],
+                "intensity": str(entry.get("intensity") or "待核验"),
+                "suggested_days": deepcopy(entry.get("suggested_days")),
+                "dynamic_attractions": [],
+                # 池子是种子不是证据：它自述的一切都要被实查覆盖或核验。
+                "candidate_source": "SEED_POOL_PREFILTERED",
+                "retrieved_at": "",
+            }
+        )
+    return seeds
+
+
 def _open_destination_seeds(
     intent: TravelIntent,
     *,
     limit: int,
 ) -> list[dict[str, object]]:
+    # v0：候选池取代全省扫描（裁决 7）。池子为空时才回落到旧路径——它已知
+    # 不响应意图，留着只为「完全没有种子目录」的部署不至于无候选可给。
+    pooled = _pool_seeds(intent, limit=limit)
+    if pooled:
+        return pooled
     queries = _discovery_queries(intent)
     try:
         region_response = list_live_top_level_regions()
