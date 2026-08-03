@@ -21,6 +21,7 @@ from trip_decider.trip_read_model import (
     _planning_draft_read_model,
     _presentation_contract,
 )
+from trip_decider.planning_input_compiler import PlanningInputCompiler
 from trip_decider.evidence_projection import project_domain, verdict_payload
 from trip_decider.travel_agent import (
     default_agent_store,
@@ -289,11 +290,71 @@ class TripQueryService:
             enriched.append(option)
         return enriched
 
+    def plan_readiness(
+        self,
+        run_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        """这份计划**当前**够不够格呈现（persistence-v2.md §6.2/6.3）。
+
+        与 ``plan_version`` 拆成两个词，因为它们是两种东西：
+
+        * **已写入**：版本号。写下就不变，是永久事实，落盘保证它的结构完整。
+        * **当前可用**：读取时刻的结论。同一份 PlanVersion 在容差窗内外给出
+          不同答案——证据会过期，而计划是拿证据拼的。
+
+        旧实现把后者也读盘，于是一份三天前判定「可呈现」的计划三天后仍然
+        宣称自己可呈现。冻结值不会自己腐烂，它只是停在原地看着世界变化。
+        """
+
+        installed = self._current_plan_payload(run_id)
+        written = isinstance(installed, Mapping)
+        readiness: dict[str, object] = {
+            "written": written,
+            "plan_version": (
+                installed.get("plan_version") if written else None
+            ),
+            "usable_now": False,
+            "planning_state": None,
+            "blockers": [],
+        }
+        if not written:
+            return readiness
+        run = self.store.get_run(run_id)
+        result = run.result if isinstance(run.result, Mapping) else None
+        context = (
+            result.get("context")
+            if isinstance(result, Mapping)
+            and isinstance(result.get("context"), Mapping)
+            else None
+        )
+        if context is None:
+            return readiness
+        read_at = now if now is not None else datetime.now(timezone.utc)
+        try:
+            compiled = PlanningInputCompiler().compile(context, now=read_at)
+        except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
+            return readiness
+        state = str(compiled.get("planning_state") or "") or None
+        readiness["planning_state"] = state
+        readiness["usable_now"] = state in _USABLE_PLAN_STATES
+        readiness["blockers"] = [
+            deepcopy(dict(item))
+            for item in compiled.get("conditional_blockers", [])
+            if isinstance(item, Mapping)
+        ]
+        return readiness
+
     def current_plan(self, run_id: str) -> dict[str, object]:
         value = self._current_plan_payload(run_id)
         if value is None:
             raise TripQueryError("current plan does not exist")
-        return value
+        payload = dict(value)
+        # 「已写入」的载荷加挂「当前可用」的结论。两者同时给出，调用方就
+        # 不必在「有没有」与「能不能用」之间猜。
+        payload["readiness"] = self.plan_readiness(run_id)
+        return payload
 
     def current_plan_version(self, run_id: str) -> int | None:
         value = self._current_plan_payload(run_id)
@@ -409,6 +470,10 @@ class TripQueryService:
         ):
             return None
         return deepcopy(dict(value))
+
+
+# 「当前可用」的判据。与写入侧的结构校验分开——写入只保证结构完整。
+_USABLE_PLAN_STATES = frozenset({"PARTIAL_READY", "PLAN_READY"})
 
 
 _DEFAULT_QUERY: TripQueryService | None = None
