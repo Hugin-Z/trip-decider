@@ -146,7 +146,48 @@
 | `result.context.evidence[]` | **改为 §1.3 的 facts 形状** |
 | `result.planning_state` | **删除**。读时重算，见 §6 |
 | `result.planning_draft.display_status` / `displayable` | **删除** |
+| `result.context.evidence` | **删除，改为 `evidence_refs`**（2026-08-03 裁决「A 收敛进 B」）。目标形状与 `plan-NNNN.json` 一致——那条路径 P4 已经这么做了（`travel_agent._plan_version_context`），本次把 `run.json` 拉齐。**规格已定，实现未落地**，改动面见 §2.1.1 |
 | `error_detail` | **P5 轮 2 新增顶层字段**（`str \| None`）。只存逃出来的异常类名。与 `error_code` 是两段式的两段：码收敛为有限词表（`travel_agent.RUN_ERROR_CODES`，15 个取值），类型名挪到这里，取值域因此从「每个可能的异常类名」变回可穷举。I1 白名单已登记理由（失败时刻的事实，非展示态）。**读侧兼容**：旧文件无此键，缺省 `None`；旧 `error_code`（`EXECUTOR_TRAVELAGENTERROR` 之类）照常读回，不校验——校验只在写入口 `fail()` / `block()` |
+
+### 2.1.1 A 收敛进 B 的改动面（**规格，未实现**）
+
+裁决：`run.result["context"]["evidence"]`（容器 A）删除，读取改经
+`evidence/current.json`（容器 B）。理由见 `freshness-policy.md` §5.2.3——
+A 与 B 目前靠「都从同一个 `state.evidence` 写出」保持一致，那是运气不是保证，
+读时重采的写回已经是第一条只更新其中一份的路径（D19）。
+
+**范围钉死**：只收 A。容器 C（`guided-comparison.json`）的独立性另有裁决，
+容器统一是 P5 后待办，本次不动。
+
+**写入点（3 处）** —— 都要改成写 `evidence_refs` 而非内联证据：
+
+| 位置 | 说明 |
+|---|---|
+| `agent_actions._planner_handler`（`:1130`） | A 的源头，`context.to_dict()` 整份带证据落进 result |
+| `itinerary_planner.revise_generic_plan`（`:2429`/`:2466`） | 重排路径把 `previous_result["context"]` 原样传下去 |
+| `travel_agent` 的 revision executor（`:2306`） | 同上 |
+
+**读取点（4 处）** —— 都要改成从 B 取证据：
+
+| 位置 | 现状 | 切换后 |
+|---|---|---|
+| `planning_input_compiler.compile`（经 `plan_verdict_from_result`） | 读 `payload["evidence"]` | 由调用方注入 B |
+| `trip_read_model._map_payload_contract`（`:225`） | 从 context 建 `evidence` | 加 evidence 参数 |
+| `trip_read_model._presentation_contract`（`:738`） | **同时**有 `evidence=` 参数（B）与 context 派生的一份 | 删掉 context 派生那份 |
+| `itinerary_planner.validate_destination_plan`（`:2298`/`:2353`，经 `revise_generic_plan`） | 读 context 内联证据 | 重排路径要能拿到 B |
+
+**一个结构性缺口，必须先决**：**`user_input` 域只存在于 A，B 里没有。**
+`state.evidence` 的键是动作域（railway / web / map），而编译器要
+`evidence.get("user_input")` 来算 `plan_refs.intent_window` 与 `user_evidence`
+（事件的 `fact_refs` / `evidence_dependencies` 都指它）。
+
+建议：**读时从 `run.intent` 重建**。它本来就是 intent 的投影而不是采集来的证据
+——`_planner_handler` 里就是 `EvidenceItem(evidence_id="confirmed-travel-intent",
+domain="user_input", value=intent.to_dict())` 现造的。重建即可，顺带再消灭一份
+副本。**此项待批**。
+
+**表征预期**：会响。`result.context` 形状变更影响落盘快照；逐条核对必须确认
+变化只落在 context 的证据键上，判定结论零变化（D8）。
 
 **当前 I1 命中：150 处**（`timing_status`×110、`schedule_status`×14、`evidence_status`×9、`snapshot_status`×8、`planning_state`×3、值类若干）。
 
