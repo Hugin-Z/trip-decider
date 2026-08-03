@@ -196,6 +196,7 @@ def _map_payload_contract(
     *,
     plan_version: int | None,
     now: datetime | None = None,
+    evidence: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Project the current plan into a map-only, read-only contract.
 
@@ -222,12 +223,15 @@ def _map_payload_contract(
         and isinstance(result.get("context"), Mapping)
         else {}
     )
+    # 证据来自容器 B（调用方注入），不再从 context 里的内联副本派生——
+    # A 已收敛（persistence-v2.md §2.1.1）。未注入时回落到 context，
+    # 保留是为了让直接拿旧 run 字典调用的测试与历史数据仍读得动。
     raw_evidence = (
         context.get("evidence")
         if isinstance(context.get("evidence"), list)
         else []
     )
-    evidence = {
+    evidence = dict(evidence) if evidence is not None else {
         str(item.get("domain")): item
         for item in raw_evidence
         if isinstance(item, Mapping)
@@ -734,12 +738,16 @@ def _presentation_contract(
         and isinstance(result.get("context"), Mapping)
         else {}
     )
+    # 此前这里从 context 派生一份证据表，而本函数**同时**还收着一个
+    # ``evidence=`` 参数（容器 B）——两份并存正是 A/B 副本问题的现场。
+    # A 收敛后只留注入的那一份（persistence-v2.md §2.1.1）；未注入时回落到
+    # context，供历史数据与直接传 run 字典的测试使用。
     context_evidence = (
         context.get("evidence")
         if isinstance(context.get("evidence"), list)
         else []
     )
-    evidence_by_domain = {
+    evidence_by_domain = dict(evidence) if evidence else {
         str(item.get("domain")): item
         for item in context_evidence
         if isinstance(item, Mapping)

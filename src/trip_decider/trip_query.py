@@ -181,6 +181,15 @@ class TripQueryService:
             read_run_value,
             plan_version=plan_version,
             now=read_at,
+            # 只在**有计划可展示**时供给证据。上面刻意把未安装草稿的 result 置
+            # 空，地图因此不该有标记；无条件注入容器 B 会让证据里的住宿片区
+            # 在「草稿未安装」的状态下冒出来——那是行为变更，不在 A 收敛的
+            # 预期变化集里（D8：表外的即停）。
+            evidence=(
+                evidence
+                if isinstance(read_run_value.get("result"), Mapping)
+                else None
+            ),
         )
         response: dict[str, object] = {
             "session": session.to_dict(),

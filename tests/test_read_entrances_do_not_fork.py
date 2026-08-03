@@ -161,5 +161,76 @@ class ReadEntrancesAgreeCase(unittest.TestCase):
         )
 
 
+class SameEvidenceSourceCase(unittest.TestCase):
+    """守卫 4：两个读取面读的是**同一份**证据（D19 根治的可执行断言）。
+
+    上面几条断言的是「两面结论相等」。那还不够——两份内容恰好相同的副本也能
+    让结论相等，而 A/B 副本此前正是靠「都从同一个 state.evidence 写出」保持相同，
+    那是运气不是保证（读时重采的写回就是第一条只更新其中一份的路径）。
+
+    A 收敛之后，`run.result["context"]` 不再是证据来源，两面都从容器 B 取。
+    本用例改动**只有 B 会看到**的那一份，然后断言两面**一起**跟着变——
+    副本若还在，改 B 不影响读 A 的那一面，用例即响。
+    """
+
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.store = InMemoryAgentStore(
+            runtime_root=Path(self._temporary.name) / "sessions"
+        )
+        self.application = TripApplicationService(store=self.store)
+        self.query = TripQueryService(
+            store=self.store,
+            application_service=self.application,
+            clock=lambda: READ_AT,
+        )
+        previous = set_read_clock(lambda: READ_AT)
+        self.addCleanup(lambda: set_read_clock(previous))
+        self.addCleanup(reset_read_clock)
+
+    def test_mutating_container_b_moves_both_entrances(self) -> None:
+        run_id = ReadEntrancesAgreeCase._ready_run(self)
+
+        before_readiness = self.query.plan_readiness(run_id, now=READ_AT)
+        before_loop = agent_actions.recomputed_planning_state(
+            self.application.next_actions(run_id).get("result"),
+            self.application.current_run_evidence(run_id),
+        )
+        self.assertEqual(before_readiness["planning_state"], before_loop)
+
+        # 只动 B：把铁路证据换成 missing。A（若还存在）不受影响。
+        broken = {
+            "evidence_id": "railway-live-query",
+            "domain": "railway",
+            "status": "missing",
+            "value": None,
+            "sources": [],
+            "missing_reason": "rail_http",
+        }
+        self.application.record_refetched_evidence(
+            run_id,
+            [("railway", broken)],
+        )
+
+        after_readiness = self.query.plan_readiness(run_id, now=READ_AT)
+        after_loop_result = self.application.next_actions(run_id).get("result")
+        after_loop = agent_actions.recomputed_planning_state(
+            after_loop_result,
+            self.application.current_run_evidence(run_id),
+        )
+
+        self.assertNotEqual(
+            before_readiness["planning_state"],
+            after_readiness["planning_state"],
+            "改了容器 B 而 plan_readiness 的结论没变——它还在读别的地方",
+        )
+        self.assertEqual(
+            after_readiness["planning_state"],
+            after_loop,
+            "改了容器 B 之后两个读取面分叉了——副本仍在",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
