@@ -119,10 +119,12 @@ TOKEN_TABLE: dict[tuple[str, str], str] = {
 # noise rather than parallel token implementations.
 SCANNED_TOKEN_LITERALS: frozenset[str] = FORBIDDEN_VALUES
 
-# I9 place-name seed list.  Derived once from the 28 ``name`` values in
-# src/trip_decider/destination_catalog.json plus the places named in
-# PRODUCT.md:22 and PRODUCT.md:50-56 as the one verified chain.  See
-# docs/contracts/invariants.md I9 for why this list is maintained by hand.
+# I9 place-name seed list.  Derived once from the 28 ``name`` values in the
+# destination catalog (then under src/, moved to examples/ in P5 round 1) plus
+# the places named in PRODUCT.md:22 and PRODUCT.md:50-56 as the one verified
+# chain.  The list stays here after the move: it is the scanner's criterion,
+# not a copy of the data.  See docs/contracts/invariants.md I9 for why this
+# list is maintained by hand.
 CITY_LITERAL_SEEDS: tuple[str, ...] = (
     "婺源",
     "上饶",

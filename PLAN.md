@@ -111,7 +111,7 @@
 
 | 位置 | 内容 | 裁决后归类 |
 |---|---|---|
-| `src/trip_decider/destination_catalog.json` | 硬编码 28 个中国目的地 | **违规**（城市专属配置），I9 覆盖 |
+| ~~`src/trip_decider/destination_catalog.json`~~ | 硬编码 28 个中国目的地 | **已处置（P5 轮 1）**：整档移到 `examples/destination_catalog.json`。判定未放宽——`src/` 下不得有地名这一条原样保留，只是这份数据不再在 `src/` 下。移动时实测它在 `src/` 里**零读取点**（唯一读者 `destination_discovery.py` 早已删除），因此没有读取路径要跟着改 |
 | `PRODUCT.md:22,27` | 自述只有「武汉—婺源」一条链路已验证 | **不违规**（文档陈述现状，非 `src/` 代码）；但它记录的单链路依赖是 I9 转绿的实际障碍 |
 | `guided_discovery.py:715` | 硬编码行政区后缀 `("自治州","地区","市","县","区")` | **不违规**（语言配置，已降级） |
 | `guided_discovery.py:723-736` | 硬编码中文区域词表 | **不违规**（语言配置，已降级） |

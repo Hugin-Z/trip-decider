@@ -9,7 +9,7 @@ trip-decider 从模糊出游意图出发，先形成现实可验证的目的地�
 1. **Discover**：模糊意图 → 候选种子排序 → 补齐跨城时间、预算和粗计划 → 现实可达的目的地候选。
 2. **Plan**：目的地确定 → 跨城往返、住宿基地、当地地点、路线、每日时间轴、预算和备选方案。
 
-`destination_catalog.json` 只是候选种子库。`destination_discovery.py` 默认输出 `PRELIMINARY_NOT_FEASIBILITY_VERIFIED`；只有接入真实交通评估的候选才升级为四态可行性。
+候选种子**不再有静态目录**。`examples/destination_catalog.json` 是留档的样例数据，产品代码不读它——它的唯一读者 `destination_discovery.py` 已删除，P5 轮 1 把这份数据整档移出 `src/`（I9：`src/` 下不得有地名字面量）。在线候选由 `dynamic_discovery.py` 生成，默认输出 `PRELIMINARY_NOT_FEASIBILITY_VERIFIED`；只有接入真实交通评估的候选才升级为四态可行性。
 
 `simple_live.py` 是 Plan 阶段的当地规划服务，不是产品入口。产品入口是 `product_web.py`；它负责 Discover/Plan 状态切换，并调用当地规划服务。
 

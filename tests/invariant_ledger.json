@@ -10,13 +10,6 @@
       "expected_green_at": "P5",
       "failing_assertion": "assertEqual([], ['hotel_price'])：唯一的 stale_allowed=False 类型在 src/ 中没有生产者，无法构造端到端场景",
       "blocked_on": "P5：hotel_price 的 status 为 planned（planned_for=P5，freshness-policy.md §2.2 注 2）。生产者落地前只能核对缓存层（第 1 条），第 2、3 条无法执行。"
-    },
-    {
-      "test_id": "tests.test_invariant_i9_no_city_specific_logic.NoCitySpecificLogicCase.test_i9_src_contains_no_place_name_literals",
-      "invariant": "I9",
-      "expected_green_at": "P5",
-      "failing_assertion": "assertEqual([], report)：src/trip_decider/destination_catalog.json 命中 8 个地名（三清山/上饶/九江/婺源/庐山/景德镇/杭州/黄山），src/trip_decider/web/index.html 命中「武汉」",
-      "blocked_on": null
     }
   ],
   "current_phase": "P5",
@@ -34,8 +27,7 @@
   "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
   "exemptions": [],
   "still_red_invariants": [
-    "I4",
-    "I9"
+    "I4"
   ],
   "green_invariants": [
     "I2",
@@ -46,9 +38,10 @@
     "I7",
     "I8",
     "I11",
-    "I1"
+    "I1",
+    "I9"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结，余下 I4、I9 属 P5。",
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。余下只有 I4，等 hotel_price 生产者（P5 轮 3）。",
   "lifecycle": {
     "I1": {
       "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
@@ -73,6 +66,15 @@
       "exemption_history": "P3a 登记 → P3b/P4b/P4c 三次延期 → 2026-08-03 销",
       "closed_at": "P4-c 第 3 批收尾",
       "note": "豁免登记的是「写入侧产出 token 字面量」，前提已清空。剩余 6 处逐类过：2 处是 planning_input_compiler 自己的可展示性开关（独立小词表，内存计算不落盘）、2 处是 support 轴判定的比较字符串（合法消费不是产出）、2 处在注释里。没有一处在豁免语义内。"
+    },
+    "I9": {
+      "statement": "src/ 下不得存在具体地名字面量（invariants.md I9）",
+      "defined_at": "P0（裁决 1 把架构红线 1 拆成两条，城市专属逻辑这一半成为 I9）",
+      "red_since": "P1（测试先行）",
+      "green_at": "P5 轮 1",
+      "closed_by": "移目录，不放宽判定",
+      "note": "转绿动作是把 destination_catalog.json 整档移到 examples/（白名单目录）。扫描范围、种子清单、白名单三者都没动——判定与 P1 写下时逐字相同。移动前实测该文件在 src/ 下零读取点：唯一读者 destination_discovery.py 早已删除，pyproject 的 package-data 只收 *.html，它从来没被打进包，因此没有读取路径要同步。转绿后按 D6 做了负向验证：往 trip_query.py 注入一个地名，扫描器如实报出文件、行号与命中的地名。",
+      "ledger_note_was_stale": "本条目删除前的 failing_assertion 还写着「src/trip_decider/web/index.html 命中『武汉』」，而实测失败信息里早已只剩 catalog 一个文件——index.html 在此前某一批被顺手清掉时没有回头改这行登记。登记文本不参与断言（元测试只比 test_id 集合），所以它错了没有任何东西会响。记在这里是因为它正是 D1 说的那种过期数字。"
     },
     "P4c_closed": {
       "closed_at": "2026-08-03",
