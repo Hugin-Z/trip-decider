@@ -311,11 +311,16 @@ def _compile_railway(
             )
         )
         return
-    value = evidence.get("value")
-    if not isinstance(value, Mapping):
+    facts = item_facts(evidence)
+    if not facts:
         blockers.append(_blocker("RAILWAY_EVIDENCE_MISSING", "railway"))
         return
-    if is_confirmed_absent(value):
+    absent = next(
+        (fact for fact in facts if is_confirmed_absent(fact.get("value"))),
+        None,
+    )
+    if absent is not None:
+        value = dict(absent.get("value") or {})
         # 已核实该时间窗内没有直达车。这是一个确定的结论，不是「没查到」。
         blockers.append(
             _blocker(

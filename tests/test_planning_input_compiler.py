@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from trip_decider.evidence_projection import business_view
+
 from datetime import datetime, timezone
 
 import json
@@ -322,24 +325,26 @@ class PlanningInputCompilerTests(unittest.TestCase):
             for item in ready["result"]["context"]["evidence"]
             if item["domain"] == "railway"
         )
-        self.assertEqual(railway["value"]["snapshot"]["acquisition"], "cache_fallback")
-        self.assertEqual(
-            railway["value"]["outbound"][
-                "second_class_availability"
-            ],
-            "UNKNOWN",
+        self.assertEqual(business_view(railway)["snapshot"]["acquisition"], "cache_fallback")
+        # 余票 support 为 unknown 后**字段缺席**，不是留一个 "UNKNOWN"
+        # 字面量——不可知的字段不得保留旧值，也不该假装有值。
+        self.assertNotIn(
+            "second_class_availability",
+            business_view(railway)["outbound"],
         )
-        self.assertEqual(
-            railway["value"]["outbound"]["schedule_status"],
-            "STALE",
+        # 展示态字段已停止落盘（P4-b3）；陈旧与否读时算。
+        self.assertNotIn(
+            "schedule_status",
+            business_view(railway)["outbound"],
         )
-        self.assertEqual(
-            railway["value"]["outbound"]["fare_status"],
-            "STALE",
+        # 展示态字段已停止落盘（P4-b3）；陈旧与否读时算。
+        self.assertNotIn(
+            "fare_status",
+            business_view(railway)["outbound"],
         )
-        self.assertEqual(
-            railway["value"]["return"]["second_class_availability"],
-            "UNKNOWN",
+        self.assertNotIn(
+            "second_class_availability",
+            business_view(railway)["return"],
         )
         self.assertEqual(
             ready["result"]["plan"]["status"],
@@ -469,10 +474,12 @@ class PlanningInputCompilerTests(unittest.TestCase):
             run = create_run(_intent("乙地"), store=store)
             confirm_intent(run.run_id, store=store)
             start_action_loop(run.run_id, store=store)
-            incomplete_map = _map("乙地").to_dict()
-            incomplete_map["value"]["local_transit"] = incomplete_map[
-                "value"
-            ]["local_transit"][:1]
+            # 在 EvidenceItem 层裁剪，不改落盘 dict——v2 的 value 是 facts
+            # 数组，业务键不在顶层。
+            full_map = _map("乙地")
+            trimmed = dict(full_map.value)
+            trimmed["local_transit"] = trimmed["local_transit"][:1]
+            incomplete_map = replace(full_map, value=trimmed).to_dict()
             for action_id, item in (
                 ("railway", _railway().to_dict()),
                 ("web", _web("乙地").to_dict()),
@@ -695,14 +702,14 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 if item["domain"] == "railway"
             )
             self.assertEqual(
-                railway["value"]["snapshot"]["acquisition"],
+                business_view(railway)["snapshot"]["acquisition"],
                 "cache_fallback",
             )
-            self.assertEqual(
-                railway["value"]["outbound"][
-                    "second_class_availability"
-                ],
-                "UNKNOWN",
+            # 余票 support 为 unknown 后**字段缺席**，不是留一个 "UNKNOWN"
+            # 字面量——不可知的字段不得保留旧值，也不该假装有值。
+            self.assertNotIn(
+                "second_class_availability",
+                business_view(railway)["outbound"],
             )
 
             agent_actions._STATES.pop(run.run_id, None)
@@ -782,14 +789,14 @@ class PlanningInputCompilerTests(unittest.TestCase):
             if item["domain"] == "railway"
         )
         self.assertEqual(
-            railway["value"]["snapshot"]["acquisition"],
+            business_view(railway)["snapshot"]["acquisition"],
             "cache_fallback",
         )
-        self.assertEqual(
-            railway["value"]["outbound"][
-                "second_class_availability"
-            ],
-            "UNKNOWN",
+        # 余票 support 为 unknown 后**字段缺席**，不是留一个 "UNKNOWN"
+        # 字面量——不可知的字段不得保留旧值，也不该假装有值。
+        self.assertNotIn(
+            "second_class_availability",
+            business_view(railway)["outbound"],
         )
 
     def test_run_until_blocked_resumes_same_run_after_web_evidence(

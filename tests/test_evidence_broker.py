@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from trip_decider.evidence_projection import business_view
+
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -326,7 +328,9 @@ class EvidenceBrokerTests(unittest.TestCase):
         store: InMemoryAgentStore,
         run_id: str,
     ) -> dict[str, object]:
-        return self._current_document(store, run_id)["value"]
+        """落盘 value → 断言看得懂的平面视图（业务字段 + 采集元数据）。"""
+
+        return business_view(self._current_document(store, run_id))
 
     def _namespace(
         self,

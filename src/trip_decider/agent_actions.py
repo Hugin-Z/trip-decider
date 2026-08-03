@@ -32,6 +32,7 @@ from trip_decider.evidence_core import (
     token_freshness,
 )
 from trip_decider.evidence_projection import (
+    business_view,
     project_domain,
     usable_fact_values,
 )
@@ -765,7 +766,8 @@ def submit_evidence(
             else item
         )
         if action_id == "web":
-            _validate_web_value(merged.value)
+            # 校验吃重建后的业务字段视图：落盘是 facts 数组。
+            _validate_web_value(usable_fact_values(merged.facts))
         state.evidence[item.domain] = merged
         state.last_sourced_evidence[item.domain] = merged
         state.action_status[action_id] = "completed"
@@ -857,12 +859,12 @@ def _map_handler(
     state: _LoopState,
 ) -> EvidenceItem:
     web_evidence = state.evidence.get("web")
-    web_value = web_evidence.value if web_evidence is not None else None
-    official_name = (
-        web_value.get("destination_official_name")
-        if isinstance(web_value, Mapping)
-        else None
+    web_value = (
+        usable_fact_values(web_evidence.facts)
+        if web_evidence is not None
+        else {}
     )
+    official_name = web_value.get("destination_official_name")
     selected_name = (
         official_name.strip()
         if isinstance(official_name, str) and official_name.strip()
@@ -883,12 +885,12 @@ def _map_handler(
     )
     if (
         district_evidence.status.is_usable
-        and isinstance(district_evidence.value, Mapping)
+        and bool(district_evidence.facts)
         and isinstance(
-            district_evidence.value.get("local_transit"),
+            usable_fact_values(district_evidence.facts).get("local_transit"),
             list,
         )
-        and district_evidence.value["local_transit"]
+        and usable_fact_values(district_evidence.facts)["local_transit"]
     ):
         return district_evidence
     if (
@@ -896,7 +898,7 @@ def _map_handler(
         or not _web_route_inputs(state.evidence.get("web"))
     ):
         return district_evidence
-    value = district_evidence.value
+    value = usable_fact_values(district_evidence.facts)
     destination = (
         value.get("destination")
         if isinstance(value, Mapping)
@@ -1144,11 +1146,12 @@ def _registered_action(
         }
     elif action_id == "map" and state is not None:
         web_evidence = state.evidence.get("web")
-        value = web_evidence.value if web_evidence is not None else None
         arguments = {
             "destination": (
-                value.get("destination_official_name")
-                if isinstance(value, Mapping)
+                usable_fact_values(web_evidence.facts).get(
+                    "destination_official_name"
+                )
+                if web_evidence is not None
                 else None
             )
         }
@@ -1202,7 +1205,9 @@ def _stale_railway_evidence(
         raise TravelAgentError(
             "railway fallback requires prior sourced evidence"
         )
-    value = deepcopy(dict(previous.value))
+    # 从重建视图出发，不从落盘形状——v2 的 value 是 facts 数组，直接
+    # .get("outbound") 会静默拿到 None，余票抹除就悄悄失效了。
+    value = business_view(previous)
     old_snapshot = value.get("snapshot")
     if not isinstance(old_snapshot, Mapping):
         raise TravelAgentError(
@@ -1255,7 +1260,7 @@ def _stale_generic_evidence(
         raise TravelAgentError(
             "evidence fallback requires prior sourced evidence"
         )
-    value = deepcopy(dict(previous.value))
+    value = business_view(previous)
     value["freshness"] = {
         "status": "STALE",
         "retrieved_at": _latest_retrieved_at(previous.sources),

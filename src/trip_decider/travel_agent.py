@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 
 from trip_decider.evidence_core import (
+    SonarValue,
+    collection_metadata,
     derive_facts,
     support_from_legacy_name,
 )
@@ -362,6 +364,23 @@ class TravelIntent:
         ]
         return tuple(dict.fromkeys((*inferred, *self.missing_fields)))
 
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "task_mode": self.task_mode.value,
@@ -487,6 +506,23 @@ class Revision:
             "day_start_times": dict(self.day_start_times),
         }
 
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             **self.planner_edits(),
@@ -591,12 +627,29 @@ class EvidenceItem:
             conflict_details=self.conflict_details,
         )
 
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "evidence_id": self.evidence_id,
             "domain": self.domain,
             "status": self.status.value,
-            "value": deepcopy(self.value),
+            "value": self._persisted_value(),
             "sources": [deepcopy(dict(item)) for item in self.sources],
             "missing_reason": self.missing_reason,
             "conflict_details": list(self.conflict_details),
@@ -626,6 +679,23 @@ class DestinationContext:
             item.domain
             for item in self.evidence
             if item.status is EvidenceStatus.CONFLICTING
+        )
+
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -669,6 +739,23 @@ class AgentEvent:
     occurred_at: str
     details: Mapping[str, object] = field(default_factory=dict)
 
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "sequence": self.sequence,
@@ -698,6 +785,23 @@ class AgentRun:
     result: dict[str, object] | None = None
     error_code: str | None = None
 
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
@@ -725,6 +829,23 @@ class AgentSession:
     created_at: str
     run_ids: list[str]
     current_run_id: str
+
+    def _persisted_value(self) -> object:
+        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
+
+        value = self.value
+        if not isinstance(value, Mapping):
+            return deepcopy(value)
+        if isinstance(value.get("facts"), (list, tuple)):
+            return deepcopy(dict(value))
+        return SonarValue(
+            deepcopy(
+                {
+                    **collection_metadata(value),
+                    "facts": [dict(fact) for fact in self.facts],
+                }
+            )
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {

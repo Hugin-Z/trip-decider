@@ -62,6 +62,9 @@ __all__ = [
     "aggregate_freshness",
     "aggregate_support",
     "build_next_action",
+    "SonarValue",
+    "V1AccessError",
+    "collection_metadata",
     "combine_token",
     "classify_support",
     "compute_freshness",
@@ -508,7 +511,21 @@ _NON_FACT_PATHS: Mapping[str, frozenset[str] | None] = MappingProxyType(
         "display": None,
         "availability_semantics": None,
         # 重载键：装着车次本体，只有这几片叶子是元数据。
-        "snapshot": frozenset({"status", "retrieved_at", "source", "provider"}),
+        "snapshot": frozenset(
+            {
+                # P4-b3 把 status 改名为 acquisition 并脱轴取值。名单自身是
+                # 改名同步范围的一部分——这一处漏了，acquisition 就不算元
+                # 数据，被推导成事实后从落盘的 snapshot 里消失。
+                "acquisition",
+                # 旧名。双读期内历史数据仍带它，历史存量删除后可去掉。
+                "status",
+                "retrieved_at",
+                "attempted_at",
+                "availability_semantics",
+                "source",
+                "provider",
+            }
+        ),
     }
 )
 
@@ -568,6 +585,72 @@ def _flatten_leaves(
             out.extend(_flatten_leaves(child, f"{prefix}[{index}]"))
         return out
     return [(prefix, value)] if prefix else []
+
+
+class V1AccessError(EvidenceCoreError):
+    """有人把 v2 形状的 value 当 v1 裸 mapping 读了。"""
+
+
+class SonarValue(dict):
+    """v2 落盘 value 的迁移期外壳：v1 式访问大声失败。
+
+    ``value.get("outbound")`` 在 v2 下静默返回 ``None``——不报错，只是悄悄什么
+    也没做。静态普查数不出这类消费点，所以让它们自己报名。**迁移完成后拆除。**
+    """
+
+    __slots__ = ()
+
+    _KNOWN = frozenset({"facts"}) | frozenset(_NON_FACT_PATHS)
+
+    def _guard(self, key: object) -> None:
+        name = str(key)
+        if name in self._KNOWN:
+            return
+        raise V1AccessError(
+            f"v1 式访问 v2 落盘形状：键 {name!r} 不在 v2 的 value 里。"
+            f"业务字段要走 usable_fact_values(item_facts(...)) 重建。"
+        )
+
+    def get(self, key, default=None):  # type: ignore[override]
+        self._guard(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self._guard(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        self._guard(key)
+        return super().__contains__(key)
+
+
+def collection_metadata(value: Any) -> dict[str, Any]:
+    """从裸 value 里摘出该持久化的采集元数据。
+
+    判据是 ``_NON_FACT_PATHS``——与剪枝、声呐同一份名单。不做深拷贝：内核只用
+    标准库最小集，拷贝责任留给调用方。
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key, leaves in _NON_FACT_PATHS.items():
+        if key not in value:
+            continue
+        if leaves is None:
+            metadata[key] = value[key]
+            continue
+        nested = value[key]
+        if not isinstance(nested, Mapping):
+            continue
+        kept = {
+            str(name): item
+            for name, item in nested.items()
+            if str(name) in leaves
+        }
+        if kept:
+            metadata[key] = kept
+    return metadata
 
 
 def normalized_retrieved_at(value: Any, fallback: Any = None) -> str | None:

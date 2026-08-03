@@ -30,6 +30,7 @@ from trip_decider.evidence_core import (
     SourceRef,
     derive_facts,
     evaluate_fact,
+    collection_metadata,
     normalized_retrieved_at,
     support_from_legacy_name,
     token_support,
@@ -39,6 +40,7 @@ __all__ = [
     "DOMAIN_DATA_TYPES",
     "item_facts",
     "item_retrieved_at",
+    "business_view",
     "usable_fact_values",
     "INTERNAL_CONTRACT_VIOLATION_EVENT",
     "READ_POLICIES",
@@ -215,8 +217,13 @@ def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _data_type_for(domain: str, value: Mapping[str, object]) -> str:
-    if domain == "map" and isinstance(value.get("local_transit"), list):
+def _data_type_for(domain: str, facts: Iterable[Mapping[str, Any]]) -> str:
+    """判据从裸 value 的 ``local_transit`` 键换成 facts 的字段前缀。"""
+
+    if domain == "map" and any(
+        str(fact.get("field", "")).startswith("local_transit")
+        for fact in facts
+    ):
         return "route_duration"
     return DOMAIN_DATA_TYPES.get(domain, "destination_profile")
 
@@ -310,7 +317,7 @@ def _fact_from_item(
     """
 
     value = _mapping(item.get("value"))
-    data_type = _data_type_for(domain, value)
+    data_type = _data_type_for(domain, item_facts(item))
     retrieved_at = _retrieved_at(item)
     refresh_failed, refresh_failed_at = _refresh_failure(value)
     status = str(item.get("status") or "").lower()
@@ -560,3 +567,29 @@ def _plant(root: dict[str, Any], steps: list[Any], value: Any) -> None:
         cursor[last] = value
     else:
         cursor[last] = value
+
+
+def business_view(item: Any) -> dict[str, Any]:
+    """落盘证据 → 「业务字段 + 采集元数据」的平面视图。
+
+    重建出的业务字段与保留下来的元数据可能落在**同一个键**上——``snapshot``
+    既装着车次（事实）又装着采集时刻（元数据）。扁平 ``{**a, **b}`` 会让一边
+    整个盖掉另一边；这里按键深合并，元数据叶子胜出。
+
+    两种形态都收：落盘 dict 走 ``item_facts``，``EvidenceItem`` 走它的 ``.facts``。
+    """
+
+    if isinstance(item, Mapping):
+        facts = item_facts(item)
+        value = item.get("value")
+    else:
+        facts = getattr(item, "facts", ())
+        value = getattr(item, "value", None)
+    view = usable_fact_values(facts)
+    for key, meta in collection_metadata(value).items():
+        current = view.get(key)
+        if isinstance(meta, Mapping) and isinstance(current, Mapping):
+            view[key] = {**current, **meta}
+        else:
+            view[key] = meta
+    return view
