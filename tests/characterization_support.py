@@ -18,10 +18,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import sys
 from typing import Any
 from unittest.mock import patch
 
@@ -372,6 +373,54 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     return lines
 
 
-if __name__ == "__main__":  # 手工重新采基线用
+def diff_paths(lines: Sequence[str]) -> list[str]:
+    """从 diff 行里抽出路径，供「变化只该落在哪几个字段上」这类断言使用。
+
+    逐条肉眼看差异会漏；断言**路径集合**能抓住「还有别的字段也动了」这一类，
+    那正是改名批次里最容易被当成噪音放过去的信号。
+    """
+
+    return [str(line).splitlines()[0] for line in lines]
+
+
+def check() -> list[str]:
+    """当前快照与基线文件的差异。空列表即零 diff。"""
+
+    return diff(load_baseline(), capture())
+
+
+def _main(argv: Sequence[str]) -> int:
+    """核对优先。裸跑**不写盘**——重刷必须显式带 ``--save``。
+
+    此前这里是 ``save_baseline(capture())`` 一行，裸跑即覆盖。那让重刷从
+    「确认」退回成「信任」：谁都可能在没看过差异的情况下把基线洗掉，而基线
+    是判断其他改动有没有踩坏东西的唯一工具。
+    """
+
+    mismatches = check()
+    if not mismatches:
+        print("表征零 diff。基线与当前快照一致，无需重刷。")
+        return 0
+
+    print(f"表征差异 {len(mismatches)} 条：\n")
+    for item in mismatches:
+        print(item)
+    print("\n受影响的字段路径：")
+    for path in sorted(set(diff_paths(mismatches))):
+        print(f"  {path}")
+
+    if "--save" not in argv:
+        print(
+            "\n未重刷。确认以上每一条都在本轮裁决表内之后，"
+            "再跑 `python -m tests.characterization_support --save`。"
+            "\n表外的差异即停——那是改坏了，不是该重刷的理由。"
+        )
+        return 1
+
     save_baseline(capture())
-    print(f"baseline written to {BASELINE_PATH}")
+    print(f"\n已重刷基线：{BASELINE_PATH}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))
