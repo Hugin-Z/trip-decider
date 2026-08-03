@@ -32,21 +32,7 @@
     "P5"
   ],
   "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
-  "exemptions": [
-    {
-      "invariant": "I6",
-      "scope": "6 个写入侧模块仍在产出 token 字面量。P4-b2 结束时另测得写入侧展示态字段产出 35 处（口径不同：本条只管 token 字面量）。清零动作属 P4-b3，见 persistence-v2.md §11.3。",
-      "reason": "P4-b2 的范围是读取侧：消费点迁到 facts、判定点改读取时 token。写入侧清零会改变 run.json / plan-version.json 的字节内容，属 P4-b3。本阶段已提前吃掉两块——timing_status 退役（1eda5ea）移除了整套第四词表的生产点，local_transit_outcome 改名（636fa91）把 4 处误判为展示态的采集元数据移出范围。延期至 P5：I6 豁免登记的是 token 字面量，剩 4 个模块（agent_actions / evidence_broker / guided_discovery / planning_input_compiler）仍在写入侧产出它们。P4-b3 清的是展示态字段，token 字面量的最后一批压在候选卡引用化（P4-c）之后。",
-      "expires_at_phase": "P5",
-      "tracked_in": "docs/contracts/invariants.md",
-      "paths": [
-        "src/trip_decider/agent_actions.py",
-        "src/trip_decider/evidence_broker.py",
-        "src/trip_decider/guided_discovery.py",
-        "src/trip_decider/planning_input_compiler.py"
-      ]
-    }
-  ],
+  "exemptions": [],
   "still_red_invariants": [
     "I4",
     "I9"
@@ -81,6 +67,12 @@
         0
       ],
       "note": "两个维度各自归零才算转绿：写入侧靠逐阶段摘除展示态产出，历史存量靠 P4-c 第 2 批整目录删除。两者在 P4-b3 期间一度脱节——写入侧从 476 掉到 78 时存量纹丝不动，因为命中数数的是盘上存量、不是写入行为。最后 4 处压在候选卡引用化上：事件流兼任读模型数据源，剥掉事件里的 token 会让 I3a 转红，直到 candidates() 改为按 evidence_id 重算才解开。"
+    },
+    "I6": {
+      "statement": "token 定级只许有一份实现（invariants.md I6）",
+      "exemption_history": "P3a 登记 → P3b/P4b/P4c 三次延期 → 2026-08-03 销",
+      "closed_at": "P4-c 第 3 批收尾",
+      "note": "豁免登记的是「写入侧产出 token 字面量」，前提已清空。剩余 6 处逐类过：2 处是 planning_input_compiler 自己的可展示性开关（独立小词表，内存计算不落盘）、2 处是 support 轴判定的比较字符串（合法消费不是产出）、2 处在注释里。没有一处在豁免语义内。"
     }
   }
 }

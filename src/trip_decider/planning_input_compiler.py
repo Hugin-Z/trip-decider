@@ -258,11 +258,6 @@ class PlanningInputCompiler:
             "planning_state": planning_state,
             "status": status,
             "displayable": displayable,
-            "display_status": (
-                "DISPLAYABLE_CONDITIONAL_ITINERARY"
-                if displayable
-                else "SUPPLEMENTING_DATA"
-            ),
             "display_requirements": display_requirements,
             "missing_requirements": missing_requirements,
             "days": days,

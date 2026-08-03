@@ -356,7 +356,7 @@ def _stale_projection(
     if not isinstance(value, Mapping):
         raise TravelAgentError("cached evidence value must be an object")
     normalized = deepcopy(dict(value))
-    # 只留采集时刻与 data_type。旧代码还写 status="STALE" 与 expires_at——
+    # 只留采集时刻与 data_type。旧代码还把陈旧判定与它的有效期写进 status——
     # 那是把新鲜度判定连同它的有效期一起冻进盘里，而两者都是读取时刻的函数：
     # 读取层拿 retrieved_at + 策略表就能算出来，算出来的才会随 now 变。
     normalized["retrieved_at"] = record.collected_at

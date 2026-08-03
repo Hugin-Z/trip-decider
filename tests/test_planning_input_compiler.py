@@ -202,10 +202,6 @@ class PlanningInputCompilerTests(unittest.TestCase):
             self.assertTrue(compiled["displayable"])
             self.assertEqual(compiled["planning_state"], "PLAN_READY")
             self.assertEqual(
-                compiled["display_status"],
-                "DISPLAYABLE_CONDITIONAL_ITINERARY",
-            )
-            self.assertEqual(
                 [
                     blocker["blocker_id"]
                     for blocker in compiled["conditional_blockers"]
@@ -267,10 +263,6 @@ class PlanningInputCompilerTests(unittest.TestCase):
         self.assertEqual(len(rail_events), 2)
         self.assertTrue(compiled["conditional_blockers"])
         self.assertFalse(compiled["displayable"])
-        self.assertEqual(
-            compiled["display_status"],
-            "SUPPLEMENTING_DATA",
-        )
 
     def test_failed_refresh_retains_stale_snapshot_in_same_run(self) -> None:
         store = InMemoryAgentStore()

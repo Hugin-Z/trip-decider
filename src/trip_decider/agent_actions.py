@@ -1261,7 +1261,7 @@ def _stale_generic_evidence(
             "evidence fallback requires prior sourced evidence"
         )
     value = business_view(previous)
-    # 只留采集时刻。旧代码还写 status="STALE"——freshness 是读取时刻的函数，
+    # 只留采集时刻。旧代码还把陈旧判定写进 status——freshness 是读取时刻的函数，
     # 冻进盘里就是 I5 违反，而 freshness 键本身在 I1 的禁用集里。
     value["freshness"] = {
         "retrieved_at": _latest_retrieved_at(previous.sources),

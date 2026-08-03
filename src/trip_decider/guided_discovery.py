@@ -565,7 +565,7 @@ def _coarse_option(
     ]
     if not rail_sourced:
         missing.insert(0, "可用的往返铁路时刻与票价")
-    # 这里曾拿 token 比 "MISSING"——那是 C 套词表的字面量，token 词表里
+    # 这里曾拿 token 比 C 套词表的那个缺失字面量，而 token 词表里
     # 根本没有它，两个分支因此**恒假**：缺失的地图/网页核验从来没被列进去。
     # 轴上说「没有支撑」叫 unknown。
     if token_support(checks["map"].display_status) == SUPPORT_UNKNOWN:
@@ -592,7 +592,7 @@ def _coarse_option(
             "timed_out": rail_check.timed_out,
         },
         "playable_time_seconds": playable,
-        # support 轴取值，不是展示态字面量。旧的 "MISSING" 是 B 套词表的
+        # support 轴取值，不是展示态字面量。旧值是 B 套词表的
         # 又一处残留——它说的就是「没有支撑」，轴上叫 unknown。
         "local_transport_difficulty": {
             "support": SUPPORT_UNKNOWN,
