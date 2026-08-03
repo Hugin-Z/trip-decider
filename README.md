@@ -116,6 +116,12 @@ status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=rep
 - 确定性输出、失败传播、事务安装与 rollback；
 - 演示全程不调用网络或 LLM。
 
+## 运行数据兼容性
+
+> **运行数据不向后兼容。** `runtime/` 下的运行记录采用 `schema_version` 标记格式版本。v2（2026-08-02，落盘契约移除全部展示状态字段）与 v1 不兼容，且不提供迁移——v1 时期的运行数据无法归因到确定的代码版本（见 `docs/audit/handover-baseline.md` H6），迁移它们没有可验证的正确性标准。升级到 v2 前请自行备份或直接删除 `runtime/`。
+
+本仓库的 v1 存量已于 2026-08-03 删除。删除后首次运行会自行重建目录。
+
 ## 当前边界
 
 - 这是原型，不是生产系统；
