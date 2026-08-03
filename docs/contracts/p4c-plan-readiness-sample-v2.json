@@ -1,5 +1,6 @@
 {
   "_meta": {
+    "blocker_id_note": "本样例采于第 5 批改名之前，conditional_blockers 里的 blocker_id 是旧词表（RAILWAY_SNAPSHOT_STALE / RAILWAY_AVAILABILITY_UNKNOWN 已分别并入 RAILWAY_INPUT_UNAVAILABLE 与改名为 RAILWAY_SEAT_NOT_GUARANTEED），且尚未带 fact_id。留档不重采：它记录的是当时闸门的真实输入。对照表见 persistence-v2 §7.4。",
     "note": "与 v1 样例的唯一差异是 planning_state 不再落盘（a7b2045）。闸门改为调 recomputed_planning_state 读时算——落盘只保证结构完整（persistence-v2 §6.2）。其余字段逐项一致：v2 形状切换与双读拆除对闸门输入零影响。",
     "produced_by": "P4-c 第 3 批开工前置（时效核验后重出）",
     "purpose": "安装闸门读时重算的真实输入样例",

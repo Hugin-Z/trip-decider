@@ -84,7 +84,7 @@ P4-b3 已把两处写入闸门按 §6.2 改成只验结构（`persist_plan_versi
 | 量级 | 中 |
 | 复用 | `fact_id` / `split_fact_id`（内核）、已有的两个先例 |
 
-## 5. blocker 家族改名 — **数字需重盘**
+## 5. blocker 家族改名 — **已完成（第 5 批，2026-08-03）**
 
 规格 §7 写的是 21 → 11。P3b 之后新增过 blocker（`RAILWAY_SNAPSHOT_STALE` /
 `RAILWAY_AVAILABILITY_UNKNOWN` 等），**21 这个数已过时**。
@@ -94,6 +94,8 @@ P4-b3 已把两处写入闸门按 §6.2 改成只验结构（`persist_plan_versi
 | 前置 | 先普查当前 blocker_id 全集，重出映射表，再动手 |
 | 量级 | 小（普查）+ 中（改名波及断言） |
 | 教训 | 「按 N 处改」的指令普查先行——这是 P4-b2 立的默认动作 |
+| 实测 | 17 处调用点 / 17 种 id，非规格写的 21；普查另抓到规格漏登的两族 |
+| 结果 | 终态 12 种，执行清单见 `persistence-v2.md` §7.4 |
 
 ## 6. 生产点切 v2 形状（facts 落盘）
 

@@ -145,6 +145,7 @@ class PlanningInputCompiler:
             latest=latest,
             defaults=defaults,
             hotel_area=hotel_area,
+            web_fact_ref=_evidence_ref(web_item),
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -291,24 +292,26 @@ def _compile_railway(
     if not _is_usable(evidence):
         blockers.append(
             _blocker(
-                "RAILWAY_EVIDENCE_MISSING",
+                "RAILWAY_INPUT_UNAVAILABLE",
                 "railway",
                 reason=(
                     evidence.get("missing_reason")
                     if evidence is not None
                     else None
                 ),
-                fact_id=(
-                    str(evidence.get("evidence_id"))
-                    if evidence is not None
-                    else None
-                ),
+                fact_id=_evidence_ref(evidence),
             )
         )
         return
     facts = item_facts(evidence)
     if not facts:
-        blockers.append(_blocker("RAILWAY_EVIDENCE_MISSING", "railway"))
+        blockers.append(
+            _blocker(
+                "RAILWAY_INPUT_UNAVAILABLE",
+                "railway",
+                fact_id=_evidence_ref(evidence),
+            )
+        )
         return
     absent = next(
         (fact for fact in facts if is_confirmed_absent(fact.get("value"))),
@@ -329,21 +332,36 @@ def _compile_railway(
     # 时刻可靠性由读取时刻判定，不再读落盘的 snapshot.status——那是采集时
     # 冻结的判断，同一份字节无论何时读都给同一个答案（I5）。
     # 本判定排在确认否定分支**之后**：已核实无直达车是确定结论，与新鲜度无关。
+    evidence_id = str(evidence.get("evidence_id"))
     token = project_domain({"railway": evidence}, "railway", now=now).token
+    # 「没结论」与「过期」在规划层是同一个后果：这份铁路输入不能据以推进。
+    # 二者的区分不在 blocker_id 里复述，消费方顺 fact_id 读 token 得知
+    # （persistence-v2.md §7.2）。
     if token_support(token) == SUPPORT_UNKNOWN:
-        blockers.append(_blocker("RAILWAY_SNAPSHOT_UNKNOWN", "railway"))
+        blockers.append(
+            _blocker(
+                "RAILWAY_INPUT_UNAVAILABLE",
+                "railway",
+                fact_id=evidence_id,
+            )
+        )
         return
     if token_freshness(token) == FRESHNESS_STALE:
         blockers.extend(
             (
-                _blocker("RAILWAY_SNAPSHOT_STALE", "railway"),
                 _blocker(
-                    "RAILWAY_AVAILABILITY_UNKNOWN",
+                    "RAILWAY_INPUT_UNAVAILABLE",
                     "railway",
+                    fact_id=evidence_id,
+                ),
+                # 余票不是「未知状态」而是「不保证有座」——后者是规划层结论。
+                _blocker(
+                    "RAILWAY_SEAT_NOT_GUARANTEED",
+                    "railway",
+                    fact_id=evidence_id,
                 ),
             )
         )
-    evidence_id = str(evidence.get("evidence_id"))
     usable = usable_fact_values(item_facts(evidence))
     for direction, prefix in (
         ("outbound", "去程"),
@@ -351,10 +369,13 @@ def _compile_railway(
     ):
         train = usable.get(direction)
         if not isinstance(train, Mapping):
+            # 规划后果：该方向排不出车次事件。与 LOCAL_TRANSIT_DURATION_MISSING
+            # 同类——说的是「这段规划不出来」，不是在复述某个 support 取值。
             blockers.append(
                 _blocker(
                     f"RAILWAY_{direction.upper()}_MISSING",
                     "railway",
+                    fact_id=evidence_id,
                 )
             )
             continue
@@ -398,7 +419,15 @@ def _compile_local_transit(
 ) -> None:
     routes = _value_list(evidence, "local_transit")
     if not routes:
-        blockers.append(_blocker("LOCAL_TRANSIT_EVIDENCE_MISSING", "map"))
+        # persistence-v2.md §7.2：并入 map 域的动态族，与 _record_evidence_blockers
+        # 产的是同一个 blocker_id，重复由 _unique_blockers 收敛。
+        blockers.append(
+            _blocker(
+                "MAP_INPUT_UNAVAILABLE",
+                "map",
+                fact_id=_evidence_ref(evidence),
+            )
+        )
         return
     evidence_id = str(evidence.get("evidence_id"))
     cursor = _bounded_time(earliest, latest, 1, time(8, 30))
@@ -410,7 +439,11 @@ def _compile_local_transit(
             or duration <= 0
         ):
             blockers.append(
-                _blocker("LOCAL_TRANSIT_DURATION_MISSING", "map")
+                _blocker(
+                    "LOCAL_TRANSIT_DURATION_MISSING",
+                    "map",
+                    fact_id=evidence_id,
+                )
             )
             continue
         start_at = cursor + timedelta(minutes=(index - 1) * 45)
@@ -495,7 +528,14 @@ def _compile_attractions(
             seen.add(attraction_id)
             candidates.append((value, evidence_id))
     if not candidates:
-        blockers.append(_blocker("ATTRACTION_EVIDENCE_MISSING", "web"))
+        # persistence-v2.md §7.2：并入 web 域的动态族。
+        blockers.append(
+            _blocker(
+                "WEB_INPUT_UNAVAILABLE",
+                "web",
+                fact_id=_evidence_ref(web_item),
+            )
+        )
         return
     local_routes = [
         event
@@ -573,6 +613,7 @@ def _compile_attractions(
                         f"{attraction.get('name')}在返程候车前没有足够时间，"
                         "保留为未排入候选"
                     ),
+                    fact_id=evidence_id,
                 )
             )
             continue
@@ -642,6 +683,8 @@ def _compile_attractions(
                     reason=(
                         f"{attraction.get('name')}缺少对应的到达交通证据"
                     ),
+                    # 引用 map 域证据：缺的是到达交通事实，与 domain 一致。
+                    fact_id=_evidence_ref(map_item),
                 )
             )
         end_at = min(start_at + timedelta(minutes=minutes), latest)
@@ -729,6 +772,7 @@ def _compile_defaults(
     latest: datetime,
     defaults: Mapping[str, object],
     hotel_area: str | None,
+    web_fact_ref: str | None,
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],
@@ -736,7 +780,13 @@ def _compile_defaults(
 ) -> None:
     user_dependency = "confirmed-travel-intent"
     if hotel_area is None:
-        blockers.append(_blocker("HOTEL_SELECTION_MISSING", "web"))
+        blockers.append(
+            _blocker(
+                "HOTEL_SELECTION_MISSING",
+                "web",
+                fact_id=web_fact_ref,
+            )
+        )
         hotel_area = "住宿地点待用户确认"
     else:
         blockers.append(
@@ -748,6 +798,7 @@ def _compile_defaults(
                     "具体酒店未选择，当前使用住宿片区或交通枢纽；"
                     "首末段交通待酒店确定后细化"
                 ),
+                fact_id=web_fact_ref,
             )
         )
 
@@ -1049,21 +1100,34 @@ def _record_evidence_blockers(
     evidence: Mapping[str, Mapping[str, object]],
     blockers: list[dict[str, object]],
 ) -> None:
+    # persistence-v2.md §7.1：三个触发条件合并为一个 blocker_id。规划层的后果
+    # 是同一个——这个域没有可用输入，规划无法据此推进。至于是压根没这个域、
+    # 没采到、还是采到了打架，是**证据层**的区分，消费方顺着 fact_id 读该事实
+    # 的 token 得知；在 blocker_id 里复述一遍正是命名原则要消灭的东西。
+    # 触发条件三分不变，只是三支产同一个 id。
     for domain in ("railway", "map", "web"):
         item = evidence.get(domain)
         if item is None:
-            blockers.append(_blocker(f"{domain.upper()}_OMITTED", domain))
+            # 该域压根没有证据，没有可指的事实——省掉引用而不是写个空的。
+            blockers.append(
+                _blocker(f"{domain.upper()}_INPUT_UNAVAILABLE", domain)
+            )
         elif item.get("status") == "missing":
             blockers.append(
                 _blocker(
-                    f"{domain.upper()}_MISSING",
+                    f"{domain.upper()}_INPUT_UNAVAILABLE",
                     domain,
                     reason=item.get("missing_reason"),
+                    fact_id=_evidence_ref(item),
                 )
             )
         elif item.get("status") == "conflicting":
             blockers.append(
-                _blocker(f"{domain.upper()}_CONFLICTING", domain)
+                _blocker(
+                    f"{domain.upper()}_INPUT_UNAVAILABLE",
+                    domain,
+                    fact_id=_evidence_ref(item),
+                )
             )
 
 
@@ -1417,6 +1481,24 @@ def _is_usable(evidence: Mapping[str, object] | None) -> bool:
         evidence is not None
         and str(evidence.get("status")) in _USABLE_STATUSES
     )
+
+
+def _evidence_ref(evidence: Mapping[str, object] | None) -> str | None:
+    """blocker 的 ``fact_id`` 引用：指向该域证据。
+
+    引用是命名原则的另一半（persistence-v2.md §7.3）。``blocker_id`` 只说规划
+    层后果，「为什么没有可用输入」由消费方顺着这个引用读该事实的 token 得知；
+    只改名不补引用等于把那半边信息丢了。
+
+    没有证据可指时返回 ``None``——``_blocker`` 会省掉这个键，而不是写一个指不
+    到任何东西的空引用。
+    """
+
+    if not isinstance(evidence, Mapping):
+        return None
+    reference = str(evidence.get("evidence_id") or "").strip()
+    return reference or None
+
 
 def _blocker(
     blocker_id: str,

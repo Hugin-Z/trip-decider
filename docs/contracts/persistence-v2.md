@@ -390,6 +390,12 @@ P3b 后从 55 降至 **48 处**（`guided_discovery` 由 12 降至 5）。逐模
 
 > 表达规划层后果 + `fact_id` 引用，不复述证据状态。
 
+**已于 P4-c 第 5 批执行。执行结果见 §7.4——本节 §7.1/§7.2/§7.3 是规格拟定时
+的清单，其中的行号与 21 → 11 两组数字均出自 P3b 之前的普查，已过时**（P3b 之后
+新增过 `RAILWAY_SNAPSHOT_STALE` / `RAILWAY_AVAILABILITY_UNKNOWN` 等，且原普查
+漏了 `HARD_CONSTRAINT_CONFLICT_{n}` 与 `RAILWAY_{方向}_MISSING` 两族）。裁决理由
+仍以本节为准，落地清单以 §7.4 为准。
+
 ### 7.1 动态族（`planning_input_compiler.py:1001-1012`）
 
 | 旧名 | 触发条件 | v2 新名 | 引用 |
@@ -428,6 +434,58 @@ P3b 后从 55 降至 **48 处**（`guided_discovery` 由 12 降至 5）。逐模
 | **合计** | **21** | **11** |
 
 删掉的 10 个全部是「复述证据状态」的那一类。**全部保留项都要加 `fact_id`**——引用是原则的另一半，只改名不加引用等于把信息丢了。
+
+### 7.4 执行结果（P4-c 第 5 批，2026-08-03）
+
+普查以 `_blocker(` 调用点为准，实测 17 处调用、17 种 `blocker_id`（含两处
+`f"..."` 动态拼接）。**目标数字不预设，原则执行完剩几个就是几个。**
+
+| 旧 `blocker_id` | 调用点 | 处置 | 新 `blocker_id` | 引用 |
+|---|---|---|---|---|
+| `HARD_CONSTRAINT_CONFLICT_{n}` | `:170` | 保留 | 不变 | — |
+| `RAILWAY_EVIDENCE_MISSING` | `:294`、`:311` | 改名 | `RAILWAY_INPUT_UNAVAILABLE` | 铁路 |
+| `RAILWAY_NO_DIRECT_TRAIN` | `:322` | 保留 | 不变 | 铁路（原有） |
+| `RAILWAY_SNAPSHOT_UNKNOWN` | `:334` | 删，并入 | `RAILWAY_INPUT_UNAVAILABLE` | 铁路 |
+| `RAILWAY_SNAPSHOT_STALE` | `:339` | 删，并入 | `RAILWAY_INPUT_UNAVAILABLE` | 铁路 |
+| `RAILWAY_AVAILABILITY_UNKNOWN` | `:341` | 改名 | `RAILWAY_SEAT_NOT_GUARANTEED` | 铁路 |
+| `RAILWAY_{OUTBOUND,RETURN}_MISSING` | `:356` | 保留 | 不变 | 铁路 |
+| `LOCAL_TRANSIT_EVIDENCE_MISSING` | `:401` | 改名，并入动态族 | `MAP_INPUT_UNAVAILABLE` | map |
+| `LOCAL_TRANSIT_DURATION_MISSING` | `:413` | 保留 | 不变 | map |
+| `ATTRACTION_EVIDENCE_MISSING` | `:498` | 改名，并入动态族 | `WEB_INPUT_UNAVAILABLE` | web |
+| `ATTRACTION_RETAINED_UNSCHEDULED` | `:570` | 保留 | 不变 | 景点来源 |
+| `ATTRACTION_TRANSIT_MISSING` | `:640` | 保留 | 不变 | map |
+| `HOTEL_SELECTION_MISSING` | `:739` | 保留 | 不变 | web |
+| `HOTEL_DETAIL_PENDING` | `:744` | 保留 | 不变 | web |
+| `{DOMAIN}_OMITTED` | `:1055` | 删，并入 | `{DOMAIN}_INPUT_UNAVAILABLE` | —（无证据可指） |
+| `{DOMAIN}_MISSING` | `:1059` | 改名 | `{DOMAIN}_INPUT_UNAVAILABLE` | 该域 |
+| `{DOMAIN}_CONFLICTING` | `:1066` | 删，并入 | `{DOMAIN}_INPUT_UNAVAILABLE` | 该域 |
+
+**终态 12 种**（`RAILWAY_OUTBOUND_MISSING` 与 `RAILWAY_RETURN_MISSING` 算一族，
+展开为 13 个字面量）：`HARD_CONSTRAINT_CONFLICT_{n}`、`RAILWAY_INPUT_UNAVAILABLE`、
+`RAILWAY_NO_DIRECT_TRAIN`、`RAILWAY_SEAT_NOT_GUARANTEED`、
+`RAILWAY_{方向}_MISSING`、`MAP_INPUT_UNAVAILABLE`、`LOCAL_TRANSIT_DURATION_MISSING`、
+`WEB_INPUT_UNAVAILABLE`、`ATTRACTION_RETAINED_UNSCHEDULED`、
+`ATTRACTION_TRANSIT_MISSING`、`HOTEL_SELECTION_MISSING`、`HOTEL_DETAIL_PENDING`。
+
+两处与 §7.2 的差异，理由如下：
+
+1. **`ATTRACTION_RETAINED_UNSCHEDULED` 加了引用**，§7.2 原写「—」。它虽是纯规划
+   结论，但「哪个景点」这件事有确定来源（该景点所属的证据项），§7.3「全部保留项
+   都要加 `fact_id`」优先。
+2. **表外两族按同一原则现场归类**：`HARD_CONSTRAINT_CONFLICT_{n}` 的冲突来自
+   `context.hard_constraint_conflicts`，不是证据项，无可指的事实，保留且不加引用
+   （同 §7.2 对纯规划结论的处理）；`RAILWAY_{方向}_MISSING` 说的是「该方向排不出
+   车次事件」，与 `LOCAL_TRANSIT_DURATION_MISSING` 同类——是规划后果，不是在复述
+   某个 support 取值，故保留并补引用。
+
+**引用粒度**：本轮补的 `fact_id` 一律是**该域证据的 `evidence_id`**，沿用 `:302`
+与 `:325` 两处既有先例，不是 `evidence_core.fact_id()` 生成的
+`<evidence_id>#<field>`。字段级引用属第 4 批（PlanVersion 引用化）的范围，本轮
+不改引用形状。§7.2 中「余票字段的 fact_id」因此暂按域级引用落地。
+
+**未改动的相邻词表**：`run.error_code` 的 `RAILWAY_ACTION_STALLED` /
+`MAP_ACTION_STALLED` / `WEB_EVIDENCE_REQUIRED`（`web/app.js:1750-1752`）不是
+`blocker_id`，不在本节范围。
 
 ---
 
