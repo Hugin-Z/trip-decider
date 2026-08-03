@@ -45,6 +45,7 @@
 | `effective_at` | 业务生效时刻，与 freshness 轴无关 |
 | `data_type` | freshness 计算的必需输入 |
 | `refresh_failure`、`local_transit_refresh_failure` | **采集元数据，非展示态**。记录「某时刻试过刷新、没成功」这一发生过的事实，写入后不再变化，与 `support` 同性质。它是 freshness 封顶规则的输入（`evidence-axes.md` §3.4），不是「现在该怎么显示」的结论 |
+| `error_detail` | **失败时刻的事实，非展示态**（P5 轮 2 新增，`run.json` 顶层）。只存逃出来的异常类名，写入后不再变化，与 `refresh_failure` 同性质——记的是发生过什么，不是「现在该怎么显示」。它与 `error_code` 是两段式的两段：码保持有限可查表（`travel_agent.RUN_ERROR_CODES`），类型名放这里，两者都不参与展示判定。**为什么明明不在禁用键名集合里也要登记**：本表的既有条目（`support` / `retrieved_at` / `data_type`）同样不在禁用集合里——本表登记的是「看着像展示态、实际不是」的键，作用是让下一个人不必重新论证一遍。不登记不会让 I1 变红，但会让这个判断只存在于某次 commit message 里 |
 
 ### 判定方法
 

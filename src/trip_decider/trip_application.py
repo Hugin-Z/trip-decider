@@ -57,6 +57,7 @@ from trip_decider.travel_agent import (
     create_run,
     atomic_runtime_json as _atomic_json,
     revise_run,
+    run_error_code,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -834,8 +835,10 @@ class TripApplicationService:
                 if isinstance(actions, list)
                 else []
             )
+            # 判据看的是 action_type 前缀，**不看 domain**——旧名
+            # WEB_EVIDENCE_REQUIRED 既复述证据状态又和自己的触发条件对不上。
             reason = (
-                "WEB_EVIDENCE_REQUIRED"
+                "CODEX_ACTION_REQUIRED"
                 if any(value.startswith("codex") for value in action_types)
                 else "USER_INPUT_REQUIRED"
             )
@@ -855,8 +858,8 @@ class TripApplicationService:
             # 这里在后台线程里，重抛只会让线程静默死掉——比包装还糟。
             # 所以走「如实记类型」那一支：编程错误必须在对外叙述里自报家门，
             # 不得混进业务失败的话术，也不得只留一个错误码就把栈丢掉。
-            programming_error = isinstance(error, NON_BUSINESS_ERRORS)
-            if programming_error:
+            code, detail = run_error_code(error, "ACTION_LOOP_FAILED")
+            if code == "INTERNAL_ERROR":
                 _LOGGER.exception(
                     "action loop background thread hit a programming error "
                     "(run_id=%s)",
@@ -874,11 +877,8 @@ class TripApplicationService:
                             "blocked_domains": [],
                         }
                     ),
-                    (
-                        f"INTERNAL_ERROR_{type(error).__name__.upper()}"
-                        if programming_error
-                        else f"ACTION_LOOP_{type(error).__name__.upper()}"
-                    ),
+                    code,
+                    error_detail=detail,
                 )
 
     def _guided_evidence_path(self, run_id: str) -> Path:

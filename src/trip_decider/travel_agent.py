@@ -68,6 +68,81 @@ NON_BUSINESS_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+#: ``run.error_code`` 的完整取值域（P5 轮 2 收敛，`p5r1-handoff.md` §3 裁决 2）。
+#:
+#: 此前这个字段**没有取值域**：唯一的两个写入口 ``fail()`` / ``block()`` 收任意
+#: 字符串，而九个生产点里有四个把异常类名插进码里
+#: （``f"EXECUTOR_{型名}"`` 之类）。取值域因此是「能逃出那四个 try 的每一个异常
+#: 类名」——穷举不了，前端也就不可能查得全，实测 4 键的查表漏掉了
+#: ``WEB_ACTION_STALLED`` 与四个 ``*_EVIDENCE_BLOCKED``，全部静默落到兜底文案。
+#:
+#: 收敛成两段式：**码本身有限**，异常类名降进 ``AgentRun.error_detail``。
+#: 有限性由形状保证而不是靠九个调用点自律——``fail()`` / ``block()`` 在入口
+#: 校验，未注册的码直接抛（D20）。同仓已有先例：
+#: ``adapters/contracts.py`` 的 ``INGESTION_PROBLEM_CODES`` 就是这么做的。
+#:
+#: 命名原则与 blocker_id 同源：说**动作为什么停**，不复述证据状态。
+#: ``*_EVIDENCE_BLOCKED`` 说的是证据不是动作，故改 ``*_ACTION_FAILED``；
+#: ``WEB_EVIDENCE_REQUIRED`` 的判据只看 ``action_type`` 前缀、根本不看 domain，
+#: 故改 ``CODEX_ACTION_REQUIRED``。``*_ACTION_STALLED`` 有意保留原名（裁决 1：
+#: 「停滞」与「超时」的语义差不值一次全量同步的风险）。
+_ACTION_DOMAINS: tuple[str, ...] = ("RAILWAY", "WEB", "MAP", "PLANNER")
+
+RUN_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        # 动作超时：等满 30 秒没有新进展，我们不再等了
+        *(f"{domain}_ACTION_STALLED" for domain in _ACTION_DOMAINS),
+        # 动作执行失败：注册工具抛了业务异常，这个域没有下一步可试
+        *(f"{domain}_ACTION_FAILED" for domain in _ACTION_DOMAINS),
+        # 停下来等外部动作
+        "CODEX_ACTION_REQUIRED",
+        "USER_INPUT_REQUIRED",
+        # 阶段性失败（业务）
+        "RUN_EXECUTION_FAILED",
+        "REVISION_EXECUTION_FAILED",
+        "ACTION_LOOP_FAILED",
+        "GUIDED_COMPARISON_UNAVAILABLE",
+        # 我们自己的代码坏了（D12：非业务异常必须自报家门，不穿业务外衣）
+        "INTERNAL_ERROR",
+    }
+)
+
+
+def _require_registered_error_code(code: str) -> None:
+    """写入口守门：未注册的码直接抛，不静默放行。
+
+    这一条是收敛能不能守住的**全部**保证。九个生产点里有六个是 f-string 拼的，
+    靠 review 盯着「别再往码里插变量」是纪律，纪律会被下一个人绕过；把校验放在
+    仅有的两个写入口，绕过它就得改这个函数——D20 说的「让不小心无从发生」。
+
+    只管写，不管读：盘上的历史旧码照常读得回来（见 ``_run_from_persisted``）。
+    """
+
+    if code not in RUN_ERROR_CODES:
+        raise TravelAgentError(
+            f"unregistered run error_code: {code!r}. "
+            "取值域是 travel_agent.RUN_ERROR_CODES；"
+            "异常类名放 error_detail，不要拼进码里。"
+        )
+
+
+def run_error_code(error: BaseException, business_code: str) -> tuple[str, str]:
+    """按 D12 分流，返回 ``(error_code, error_detail)``。
+
+    非业务异常（``NON_BUSINESS_ERRORS``）一律归 ``INTERNAL_ERROR``——「这段代码
+    有 bug」和「采集器没拿到数据」在可观测层面完全一样，不在码上分开，归因就得
+    靠猜。业务失败用调用点给的有限码。
+
+    两支都把异常类名放进 ``error_detail``：类型信息一条都不能丢（D12 的
+    「如实记下类型」），但它不进码本身，否则取值域立刻回到无界。
+    """
+
+    detail = type(error).__name__
+    if isinstance(error, NON_BUSINESS_ERRORS):
+        return "INTERNAL_ERROR", detail
+    return business_code, detail
+
+
 class TaskMode(str, Enum):
     """Top-level routing selected before tool execution."""
 
@@ -798,6 +873,11 @@ class AgentRun:
     completed_at: str | None = None
     result: dict[str, object] | None = None
     error_code: str | None = None
+    #: 停下来的补充事实——目前只放异常类名。与 ``error_code`` 分成两段是为了
+    #: 让码保持有限可查表（``RUN_ERROR_CODES``）而类型信息不丢（D12）。
+    #: I1：这是**失败时刻的事实**，写入后不再变化，不是「现在该怎么显示」的
+    #: 结论，与 ``refresh_failure`` 同性质（`invariants.md` I1 白名单）。
+    error_detail: str | None = None
 
     def _persisted_value(self) -> object:
         """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
@@ -832,6 +912,7 @@ class AgentRun:
             "completed_at": self.completed_at,
             "result": deepcopy(self.result),
             "error_code": self.error_code,
+            "error_detail": self.error_detail,
         }
 
 
@@ -1242,18 +1323,29 @@ class InMemoryAgentStore:
         )
         return deepcopy(payload)
 
-    def fail(self, run_id: str, error_code: str) -> AgentRun:
+    def fail(
+        self,
+        run_id: str,
+        error_code: str,
+        *,
+        error_detail: str | None = None,
+    ) -> AgentRun:
+        _require_registered_error_code(error_code)
         with self._condition:
             run = self._required_run(run_id)
             run.status = RunStatus.FAILED
             run.error_code = error_code
+            run.error_detail = error_detail
             run.completed_at = _now()
             self._append_unlocked(
                 run,
                 event_type="run.failed",
                 status="failed",
                 message="旅行任务执行失败。",
-                details={"error_code": error_code},
+                details={
+                    "error_code": error_code,
+                    "error_detail": error_detail,
+                },
             )
             return deepcopy(run)
 
@@ -1262,9 +1354,12 @@ class InMemoryAgentStore:
         run_id: str,
         result: Mapping[str, object],
         reason_code: str,
+        *,
+        error_detail: str | None = None,
     ) -> AgentRun:
         """Finish an action loop that cannot make honest progress."""
 
+        _require_registered_error_code(reason_code)
         with self._condition:
             run = self._required_run(run_id)
             if run.status is not RunStatus.RUNNING:
@@ -1272,13 +1367,17 @@ class InMemoryAgentStore:
             run.status = RunStatus.BLOCKED
             run.result = deepcopy(dict(result))
             run.error_code = reason_code
+            run.error_detail = error_detail
             run.completed_at = _now()
             self._append_unlocked(
                 run,
                 event_type="run.blocked",
                 status="failed",
                 message="真实证据不足，当前运行已停止。",
-                details={"reason_code": reason_code},
+                details={
+                    "reason_code": reason_code,
+                    "error_detail": error_detail,
+                },
             )
             return deepcopy(run)
 
@@ -1843,6 +1942,14 @@ def _run_from_mapping(value: Mapping[str, object]) -> AgentRun:
             value.get("error_code"),
             "error_code",
         ),
+        # 读侧**不校验** error_code 属不属于 RUN_ERROR_CODES。盘上已经躺着
+        # 收敛前写下的旧码（`EXECUTOR_TRAVELAGENTERROR`、
+        # `RAILWAY_EVIDENCE_BLOCKED` 之类），读它们不该崩——校验的位置是写入口，
+        # 读取只负责如实还原历史。旧文件没有 error_detail 键，缺省 None。
+        error_detail=_loaded_optional_text(
+            value.get("error_detail"),
+            "error_detail",
+        ),
     )
 
 
@@ -2021,7 +2128,8 @@ def execute_run(
             raise TravelAgentError("run executor must return an object")
         return store.complete(run_id, result)
     except Exception as error:
-        store.fail(run_id, f"EXECUTOR_{type(error).__name__.upper()}")
+        code, detail = run_error_code(error, "RUN_EXECUTION_FAILED")
+        store.fail(run_id, code, error_detail=detail)
         raise
 
 
@@ -2272,10 +2380,8 @@ def revise_run(
         store.persist_plan_version(run_id, result)
         return store.complete(run_id, result)
     except Exception as error:
-        store.fail(
-            run_id,
-            f"REVISION_EXECUTOR_{type(error).__name__.upper()}",
-        )
+        code, detail = run_error_code(error, "REVISION_EXECUTION_FAILED")
+        store.fail(run_id, code, error_detail=detail)
         raise
 
 
@@ -2405,6 +2511,8 @@ __all__ = [
     "EvidenceItem",
     "EvidenceStatus",
     "InMemoryAgentStore",
+    "NON_BUSINESS_ERRORS",
+    "RUN_ERROR_CODES",
     "Revision",
     "RunStatus",
     "TaskMode",
@@ -2419,5 +2527,6 @@ __all__ = [
     "build_destination_context",
     "progress_contract",
     "revise_run",
+    "run_error_code",
     "runtime_status",
 ]

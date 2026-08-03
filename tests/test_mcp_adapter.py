@@ -261,7 +261,7 @@ class TripMCPAdapterTests(unittest.TestCase):
         store.block(
             run_id,
             {"action_loop_status": "BLOCKED", "blocked_domains": ["web"]},
-            "WEB_EVIDENCE_REQUIRED",
+            "CODEX_ACTION_REQUIRED",
         )
 
         response = adapter.submit_trip_evidence(

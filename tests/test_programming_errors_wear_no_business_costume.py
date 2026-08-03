@@ -12,8 +12,9 @@
 
 * `agent_actions.execute_registered_action` 是同步调用 → **重抛**，栈留得住；
 * `trip_application._run_action_loop_background` 在后台线程 → 重抛只会让线程
-  静默死掉，所以走**如实记类型**：错误码自报 `INTERNAL_ERROR_NAMEERROR`，
-  并把栈打进日志。
+  静默死掉，所以走**如实记类型**：错误码自报 `INTERNAL_ERROR`、
+  `error_detail` 记 `NameError`，并把栈打进日志。P5 轮 2 把类型名从码里
+  挪进 `error_detail`——码要保持有限可查表，类型信息一条不丢（两段式收敛）。
 
 每条用例都配一条正向对照：业务失败必须**保留**原叙述。只证明「编程错误会
 响」是不够的——那可能是把所有失败都改成了同一句话。
@@ -38,9 +39,29 @@ from trip_decider.travel_agent import (
     create_run,
 )
 
-from tests.invariant_support import offline_intent
+from tests.invariant_support import (
+    NoBackgroundApplication as _NoBackgroundService,
+    offline_intent,
+)
 
-_BUSINESS_NARRATIVE = ("EVIDENCE_BLOCKED", "EVIDENCE_REQUIRED", "ACTION_STALLED")
+#: 业务失败话术的**片段**，按子串匹配。
+#:
+#: 此前这里是三个整词，断言写成 ``assertNotIn(run.error_code, _BUSINESS_NARRATIVE)``
+#: ——那是**恒真**的：实际错误码是 ``RAILWAY_EVIDENCE_BLOCKED`` 之类的带域全名，
+#: 与 ``"EVIDENCE_BLOCKED"`` 从不相等，所以这条守卫对它点名要防的那个值也不会响
+#: （D6：没响过的绿是没有信息的）。改成子串匹配，并在 P5 轮 2 的词表收敛后同步
+#: 片段：``*_EVIDENCE_BLOCKED`` → ``*_ACTION_FAILED``，
+#: ``WEB_EVIDENCE_REQUIRED`` → ``CODEX_ACTION_REQUIRED``。
+_BUSINESS_NARRATIVE = (
+    "ACTION_FAILED",
+    "ACTION_REQUIRED",
+    "INPUT_REQUIRED",
+    "ACTION_STALLED",
+)
+
+
+def _wears_business_costume(code: str) -> list[str]:
+    return [item for item in _BUSINESS_NARRATIVE if item in code]
 
 
 def _started_run(store: InMemoryAgentStore) -> str:
@@ -78,16 +99,16 @@ class ProgrammingErrorsCase(unittest.TestCase):
                 )
 
         # 关键在「对外叙述里没有业务失败」：run 没有被判成证据受阻，
-        # 也没有落下一个 *_EVIDENCE_BLOCKED 错误码去误导归因。
+        # 也没有落下一个 *_ACTION_FAILED 错误码去误导归因。
         run = self.store.get_run(run_id)
         self.assertIsNot(
             run.status,
             RunStatus.BLOCKED,
             "NameError 把 run 判成了业务阻塞，归因会被引向采集器",
         )
-        self.assertNotIn(
-            str(run.error_code or ""),
-            _BUSINESS_NARRATIVE,
+        self.assertEqual(
+            [],
+            _wears_business_costume(str(run.error_code or "")),
             f"NameError 被翻译成了业务失败话术：{run.error_code!r}",
         )
 
@@ -115,10 +136,79 @@ class ProgrammingErrorsCase(unittest.TestCase):
             "业务失败不再阻塞 run——原叙述被改坏了",
         )
         self.assertEqual(
-            "RAILWAY_EVIDENCE_BLOCKED",
+            "RAILWAY_ACTION_FAILED",
             run.error_code,
             "业务失败的叙述被改了，正向对照失效",
         )
+
+
+class BackgroundThreadNarrativeCase(unittest.TestCase):
+    """后台线程那个落点——本文件此前**只测了同步落点**。
+
+    模块 docstring 从一开始就写着「两个落点各有各的处置」，但用例全部打在
+    ``execute_registered_action`` 上，``_run_action_loop_background`` 一条都没有。
+    P5 轮 2 改那半边（型名从码里挪进 ``error_detail``）时做 D6 负向验证才发现：
+    往后台分支注入故障，本文件全绿——它对自己声称覆盖的一半是瞎的。
+
+    这正是 D9 说的那种零覆盖路径：套件绿了很久，靠逐条查验才发现它没被执行过。
+    """
+
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.store = InMemoryAgentStore(
+            runtime_root=Path(self._temporary.name) / "sessions"
+        )
+        self.service = _NoBackgroundService(store=self.store)
+
+    def _running_run(self) -> str:
+        created = self.service.create_trip(offline_intent())
+        self.service.confirm_trip(created.run_id)
+        # 必须真的进 RUNNING：那个 except 分支只在 RUNNING 时才落 block，
+        # 停在 CONFIRMED 上驱动后台会得到一个 error_code 恒为 None 的假绿。
+        self.service.execute_trip(created.run_id)
+        self.assertIs(
+            self.store.get_run(created.run_id).status,
+            RunStatus.RUNNING,
+        )
+        return created.run_id
+
+    def _drive_background(self, error: BaseException) -> None:
+        def exploding(*_args, **_kwargs):
+            raise error
+
+        with patch(
+            "trip_decider.trip_application.run_until_blocked",
+            exploding,
+        ):
+            self.service._run_action_loop_background(self._run_id)
+
+    def test_programming_error_reports_internal_error_with_the_type(
+        self,
+    ) -> None:
+        """D12 的「如实记类型」：码说这是我们的 bug，类型名进 error_detail。"""
+
+        self._run_id = self._running_run()
+        self._drive_background(NameError("undefined_helper"))
+
+        run = self.store.get_run(self._run_id)
+        self.assertEqual("INTERNAL_ERROR", run.error_code)
+        self.assertEqual("NameError", run.error_detail)
+        self.assertEqual(
+            [],
+            _wears_business_costume(str(run.error_code or "")),
+            f"NameError 被翻译成了业务失败话术：{run.error_code!r}",
+        )
+
+    def test_business_failure_keeps_the_business_code(self) -> None:
+        """正向对照：业务失败不许被一起吞进 INTERNAL_ERROR。"""
+
+        self._run_id = self._running_run()
+        self._drive_background(TravelAgentError("loop_http"))
+
+        run = self.store.get_run(self._run_id)
+        self.assertEqual("ACTION_LOOP_FAILED", run.error_code)
+        self.assertEqual("TravelAgentError", run.error_detail)
 
 
 if __name__ == "__main__":

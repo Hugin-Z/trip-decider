@@ -613,7 +613,7 @@ def execute_registered_action(
         )
     except NON_BUSINESS_ERRORS:
         # 编程错误不穿业务外衣。走下面那条路会把它变成
-        # 「{域}_EVIDENCE_BLOCKED」+「该域缺证据」，那句叙述与事故原因毫无
+        # 「{域}_ACTION_FAILED」+「该域缺证据」，那句叙述与事故原因毫无
         # 关系，只会把归因引向采集器和数据源。这里是同步调用，重抛能让它
         # 原样浮到调用方，栈也留得住。
         state.action_status[action_id] = "blocked"
@@ -2043,7 +2043,7 @@ def _block_run(
         (
             f"{domain.upper()}_ACTION_STALLED"
             if stalled
-            else f"{domain.upper()}_EVIDENCE_BLOCKED"
+            else f"{domain.upper()}_ACTION_FAILED"
         ),
     )
 

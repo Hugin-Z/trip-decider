@@ -1746,15 +1746,38 @@ function renderCompleted(result, presentation, run) {
   if (run.status === "RUNNING") {
     lifecycle.textContent = "正在生成新版本；当前继续显示上一版行程。";
   } else if (run.status === "BLOCKED" || run.status === "FAILED") {
+    // 键集与 travel_agent.RUN_ERROR_CODES 同表维护（D2/D3：生产点与消费点
+    // 一起改）。此前这里只有 4 键，而生产侧产得出 15 个——WEB_ACTION_STALLED
+    // 和四个 *_EVIDENCE_BLOCKED 全都静默落到兜底文案，用户看到的是
+    // 「新版本未能完成」，与真实原因无关。
     const reasons = {
       RAILWAY_ACTION_STALLED: "铁路查询超过30秒没有新进展",
+      WEB_ACTION_STALLED: "网页证据查询超过30秒没有新进展",
       MAP_ACTION_STALLED: "当地交通查询超过30秒没有新进展",
-      WEB_EVIDENCE_REQUIRED: "仍需补充网页证据",
+      PLANNER_ACTION_STALLED: "行程编排超过30秒没有新进展",
+      RAILWAY_ACTION_FAILED: "铁路查询失败",
+      WEB_ACTION_FAILED: "网页证据查询失败",
+      MAP_ACTION_FAILED: "当地交通查询失败",
+      PLANNER_ACTION_FAILED: "行程编排失败",
+      CODEX_ACTION_REQUIRED: "仍需补充网页证据",
       USER_INPUT_REQUIRED: "仍需用户补充信息",
+      RUN_EXECUTION_FAILED: "本次任务执行失败",
+      REVISION_EXECUTION_FAILED: "新版本生成失败",
+      ACTION_LOOP_FAILED: "证据收集流程失败",
+      GUIDED_COMPARISON_UNAVAILABLE: "候选比较未能完成",
     };
+    // INTERNAL_ERROR 走前缀匹配而不是整键：盘上还躺着收敛前写下的
+    // INTERNAL_ERROR_NAMEERROR 这类旧码（读侧有意不校验，见
+    // travel_agent._run_from_persisted），前缀匹配把新旧一起接住。
+    // 兜底文案如实说「我们这边坏了」——旧的「新版本未能完成」把系统故障
+    // 说成了任务没做完，读的人会去查数据源（D12 在前端这一侧的同一件事）。
+    const code = String(run.error_code || "");
     lifecycle.classList.add("error");
     lifecycle.textContent = `本次修改未切换：${
-      reasons[run.error_code] || "新版本未能完成"
+      reasons[code] ||
+      (code.startsWith("INTERNAL_ERROR")
+        ? "系统内部错误，详情见运行记录"
+        : "运行以未登记的原因停止，详情见运行记录")
     }；以下继续显示上一版行程。`;
   }
 

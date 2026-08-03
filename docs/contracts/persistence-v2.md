@@ -146,6 +146,7 @@
 | `result.context.evidence[]` | **改为 §1.3 的 facts 形状** |
 | `result.planning_state` | **删除**。读时重算，见 §6 |
 | `result.planning_draft.display_status` / `displayable` | **删除** |
+| `error_detail` | **P5 轮 2 新增顶层字段**（`str \| None`）。只存逃出来的异常类名。与 `error_code` 是两段式的两段：码收敛为有限词表（`travel_agent.RUN_ERROR_CODES`，15 个取值），类型名挪到这里，取值域因此从「每个可能的异常类名」变回可穷举。I1 白名单已登记理由（失败时刻的事实，非展示态）。**读侧兼容**：旧文件无此键，缺省 `None`；旧 `error_code`（`EXECUTOR_TRAVELAGENTERROR` 之类）照常读回，不校验——校验只在写入口 `fail()` / `block()` |
 
 **当前 I1 命中：150 处**（`timing_status`×110、`schedule_status`×14、`evidence_status`×9、`snapshot_status`×8、`planning_state`×3、值类若干）。
 
@@ -483,9 +484,11 @@ P3b 后从 55 降至 **48 处**（`guided_discovery` 由 12 降至 5）。逐模
 `<evidence_id>#<field>`。字段级引用属第 4 批（PlanVersion 引用化）的范围，本轮
 不改引用形状。§7.2 中「余票字段的 fact_id」因此暂按域级引用落地。
 
-**未改动的相邻词表**：`run.error_code` 的 `RAILWAY_ACTION_STALLED` /
-`MAP_ACTION_STALLED` / `WEB_EVIDENCE_REQUIRED`（`web/app.js:1750-1752`）不是
-`blocker_id`，不在本节范围。
+**相邻词表**：`run.error_code` 不是 `blocker_id`，不在本节范围。本节写下时它被
+记为「未改动」，**P5 轮 2 已按同一条命名原则收敛**——见 §2.1 的 `error_detail`
+行与 `travel_agent.RUN_ERROR_CODES`。当时举的三个例子里，
+`WEB_EVIDENCE_REQUIRED` 已改名 `CODEX_ACTION_REQUIRED`，
+`*_ACTION_STALLED` 有意保留。
 
 ---
 
