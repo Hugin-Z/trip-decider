@@ -230,6 +230,49 @@
 - 但**没有任何主动重查触发器**。当前 STALE 一旦产生就一直是 STALE，直到下一次有人手动重跑。MCP 面甚至没有重试入口（基线报告 H4：`retry_action` 只存在于 HTTP 面 `product_web.py:536-549`）。`auto_refetch` 档位在 P5 之前无处落地。
 - `_stale_projection()` 返回的 `EvidenceItem` 未传 `missing_reason`（`evidence_broker.py:437-443`），导致陈旧证据对外的 `missing_reason` 恒为 `null`（基线报告 §5.3 实证）。新模型下这个信息应进入 `next_action.reason_code = beyond_tolerance_window`。
 
+### 5.1 触发时机：读取时同步重查（2026-08-03 裁决）
+
+§6 未决 4 的三选一，取第一个。理由：
+
+- **本地单进程产品没有可靠的「之后」。** 异步排队与「仅在下次推进时」都要求一个「之后会发生」的承诺，而用户关掉进程就没有之后了——那两档会退化成「永远不重查」，比不做还糟，因为它们看起来像做了。
+- **与整个模型同构。** freshness 读时算，重查读时触发；`retry_after_at` 从「调度器预计下次跑的时刻」改为**节流阀**语义（见下），防读取风暴。
+- **实现面最小。** 判定已收敛到唯一漏斗（`evidence_projection.project_domain` 是 `evaluate_fact` 的唯一调用者）。
+
+执行约束：
+
+| 项 | 规定 |
+|---|---|
+| 触发条件 | `freshness == stale` ∧ `feasibility_critical` ∧ `on_stale == auto_refetch` |
+| 节流 | `next_action.retry_after_at` **此刻之前不再触发重查**。语义变更见 `evidence-axes.md` §5.2 |
+| 预算 | 单次读取的重查总预算有超时上限；超预算按现有 stale 降级，**不阻塞读取** |
+| 失败 | 走 `stale_after_failure` 既有兜底。它**不是触发器**（入口即断言实采已失败），是触发后失败路径的承接 |
+| 成功 | 新证据入 store，freshness 重算，token 相应变化 |
+
+### 5.2 落点归因：判定点唯一，替换点不唯一（2026-08-03 实测）
+
+**实现未落地，原因记录在此。** P5 轮 1 的结论「落点已收敛到唯一漏斗
+`project_domain`」**仍然成立，但只覆盖判定**：`evaluate_fact` 至今只有
+`project_domain` 一个调用者，「这份证据算不算 stale」确实只有一处答案。
+
+轮 2 实施时查出**上一轮没问的第二个问题**：那个漏斗是不是**动手**的可行位置。
+不是。`project_domain` 的调用方拿同一份 evidence mapping 做的事远不止取 token：
+
+| 调用点 | token 之后还用同一份 evidence 做什么 |
+|---|---|
+| `planning_input_compiler.py:380` → `:416` | `usable_fact_values(item_facts(evidence))` 建全部车次事件、票价、`fact_refs` |
+| `trip_read_model.py:255` | verdict 与 `evidence_value(domain)` 各读各的 |
+| `trip_query.py:285` | 只覆盖候选条目的 `token` / `next_action`，其余字段原样保留 |
+
+若在 `project_domain` 内部重采，**token 反映新数据而下游全部字段仍是旧的**——
+计划会一边宣称 `verified` 一边用过期车次拼出来。那比不重查更坏：I5 与 R2 要防的
+正是「结论与它所依据的数据不同步」。
+
+因此重采必须发生在**证据被任何消费方读到之前**，一次替换整份证据，而不是在取
+token 的那一瞬间。这是「第二个触发点」，触及停点规则，故停下报。提议方案见轮 3
+入口讨论：在读取层入口（`trip_query.candidates` / `plan_readiness`）加一个
+**读时证据解析步**，用 `project_domain` 判定该不该重采（判定仍走唯一漏斗，I6
+不破），重采后整份替换再往下走。这样纯函数编译器不必被穿进 store。
+
 ---
 
 ## 6. 未决问题
@@ -239,6 +282,6 @@
 | 1 | §2.2 中 5 项 `max_reuse_seconds` 的具体取值 | **已决**（裁决 6，2026-08-02）：按建议值执行，标记为可调，P5 拿到真实运行数据后复核 |
 | 2 | 4 个无生产者的 data_type 是保留还是删除 | **已决**（裁决 2，2026-08-02）：`seat_availability` 删除（属订票域）；`hotel_price` 保留且为 `planned`（价格区间是预算硬约束输入）；`opening_hours` 与 `ticket_price` 标记 `reserved` |
 | 3 | `itinerary_planner.py:160-170` 的 `"support": "estimated"` 与两轴 support 是否同义 | **已核对**（P1，见 `docs/contracts/support-reclassification.md` §4）：不同义，是规划器默认值的自描述字段，与证据 support 无关 |
-| 4 | `auto_refetch` 的触发时机（读取时同步重查 / 异步排队 / 仅在下次推进时） | 未定，P5 决定 |
+| 4 | `auto_refetch` 的触发时机（读取时同步重查 / 异步排队 / 仅在下次推进时） | **已决**（裁决，2026-08-03）：**读取时同步重查**。理由见 §5.1。**实现未落地**，落点归因见 §5.2 |
 | 5 | PlanVersion 落盘契约的版本标记方案 | 未定，P4 决定 |
 | 6 | `status` 三态（含新增的 `planned`）与 I8 反向规则的修订 | **待 Hugin 复核**，见 §2.1.1。这是 P1 为解决裁决 2 与 I8 的冲突所做的契约修订 |
