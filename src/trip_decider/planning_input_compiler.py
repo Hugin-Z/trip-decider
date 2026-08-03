@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
+from typing import NamedTuple
 
 from trip_decider.evidence_core import (
     FRESHNESS_STALE,
@@ -31,6 +32,23 @@ from trip_decider.travel_agent import DestinationContext
 
 
 _INSTALLABLE_STATES = {"PARTIAL_READY", "PLAN_READY"}
+
+
+class _PlanRefs(NamedTuple):
+    """一次编译里反复要用的字段级引用，算一次传下去。
+
+    每个事件都该说清「我出自哪些事实」——读取层拿 ``fact_refs`` 按读取时刻重算
+    token，PlanVersion 文件里没有可回落的值，R2（引用解析失败必须产出 unknown）
+    因此由数据形状保证而不是靠代码自律（persistence-v2.md §5.1）。
+
+    规划器默认值派生的事件（餐食、休息、缓冲、自由活动）出自**行程窗口**，
+    那是用户输入的事实；与铁路时刻挂钩的缓冲另外引用对应的车次事实。
+    """
+
+    intent_window: tuple[str, ...] = ()
+    rail_arrival: tuple[str, ...] = ()
+    rail_departure: tuple[str, ...] = ()
+    hotel_area: tuple[str, ...] = ()
 
 
 class PlanningInputCompiler:
@@ -110,6 +128,20 @@ class PlanningInputCompiler:
         map_item = evidence.get("map")
         web_item = evidence.get("web")
         hotel_area = _hotel_area(web_item)
+        plan_refs = _PlanRefs(
+            intent_window=tuple(
+                _field_refs(
+                    evidence.get("user_input"),
+                    "earliest_departure_at",
+                    "latest_return_at",
+                )
+            ),
+            rail_arrival=tuple(_field_refs(railway, "outbound.arrival_at")),
+            rail_departure=tuple(
+                _field_refs(railway, "return.departure_at")
+            ),
+            hotel_area=tuple(_field_refs(web_item, "hotel_area.name")),
+        )
         _compile_local_transit(
             map_item,
             earliest=earliest,
@@ -135,6 +167,7 @@ class PlanningInputCompiler:
                 defaults["inter_event_buffer_minutes"]
             ),
             planner_defaults=defaults,
+            plan_refs=plan_refs,
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -145,7 +178,8 @@ class PlanningInputCompiler:
             latest=latest,
             defaults=defaults,
             hotel_area=hotel_area,
-            web_fact_ref=_evidence_ref(web_item),
+            web_evidence_refs=_evidence_ref(web_item),
+            plan_refs=plan_refs,
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -155,6 +189,7 @@ class PlanningInputCompiler:
             earliest=earliest,
             latest=latest,
             hotel_area=hotel_area,
+            plan_refs=plan_refs,
             days=days,
             events_by_type=events_by_type,
             dependencies=dependencies,
@@ -299,7 +334,7 @@ def _compile_railway(
                     if evidence is not None
                     else None
                 ),
-                fact_id=_evidence_ref(evidence),
+                evidence_refs=_evidence_ref(evidence),
             )
         )
         return
@@ -309,7 +344,7 @@ def _compile_railway(
             _blocker(
                 "RAILWAY_INPUT_UNAVAILABLE",
                 "railway",
-                fact_id=_evidence_ref(evidence),
+                evidence_refs=_evidence_ref(evidence),
             )
         )
         return
@@ -325,7 +360,7 @@ def _compile_railway(
                 "RAILWAY_NO_DIRECT_TRAIN",
                 "railway",
                 reason=value.get("scope"),
-                fact_id=str(evidence.get("evidence_id")),
+                evidence_refs=_evidence_ref(evidence),
             )
         )
         return
@@ -342,7 +377,7 @@ def _compile_railway(
             _blocker(
                 "RAILWAY_INPUT_UNAVAILABLE",
                 "railway",
-                fact_id=evidence_id,
+                evidence_refs=[evidence_id],
             )
         )
         return
@@ -352,13 +387,20 @@ def _compile_railway(
                 _blocker(
                     "RAILWAY_INPUT_UNAVAILABLE",
                     "railway",
-                    fact_id=evidence_id,
+                    evidence_refs=[evidence_id],
                 ),
                 # 余票不是「未知状态」而是「不保证有座」——后者是规划层结论。
+                # 这一支的指代对象是**余票字段本身**（persistence-v2.md §7.2），
+                # 不是整个铁路域：本分支里证据是可用的（只是过期），两个方向的
+                # 余票事实都在，字段级引用指得到，故用 fact_refs 而非
+                # evidence_refs。分方向两个 fact，引用天然是复数。
                 _blocker(
                     "RAILWAY_SEAT_NOT_GUARANTEED",
                     "railway",
-                    fact_id=evidence_id,
+                    fact_refs=_field_refs(
+                        evidence,
+                        "second_class_availability",
+                    ),
                 ),
             )
         )
@@ -375,7 +417,7 @@ def _compile_railway(
                 _blocker(
                     f"RAILWAY_{direction.upper()}_MISSING",
                     "railway",
-                    fact_id=evidence_id,
+                    evidence_refs=[evidence_id],
                 )
             )
             continue
@@ -425,7 +467,7 @@ def _compile_local_transit(
             _blocker(
                 "MAP_INPUT_UNAVAILABLE",
                 "map",
-                fact_id=_evidence_ref(evidence),
+                evidence_refs=_evidence_ref(evidence),
             )
         )
         return
@@ -442,7 +484,7 @@ def _compile_local_transit(
                 _blocker(
                     "LOCAL_TRANSIT_DURATION_MISSING",
                     "map",
-                    fact_id=evidence_id,
+                    evidence_refs=[evidence_id],
                 )
             )
             continue
@@ -508,32 +550,46 @@ def _compile_attractions(
     lunch_window_end: time,
     inter_event_buffer_minutes: int,
     planner_defaults: Mapping[str, object],
+    plan_refs: _PlanRefs,
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],
     blockers: list[dict[str, object]],
 ) -> None:
-    candidates: list[tuple[Mapping[str, object], str]] = []
+    # 第三项是该景点的字段级引用。采集时就算好——出了这个循环就不知道它在
+    # 源证据的 attractions[] 里排第几了，而 fact_id 的字段路径带下标。
+    # 形状与本地交通事件一致（local_transit[i]. 前缀匹配，commit e901c69）。
+    candidates: list[tuple[Mapping[str, object], str, list[str]]] = []
     seen: set[str] = set()
     for evidence in (map_item, web_item):
         if not _is_usable(evidence):
             continue
         evidence_id = str(evidence.get("evidence_id"))
-        for value in _value_list(evidence, "attractions"):
+        facts = item_facts(evidence)
+        for position, value in enumerate(_value_list(evidence, "attractions")):
             attraction_id = str(
                 value.get("attraction_id") or value.get("id") or ""
             )
             if not attraction_id or attraction_id in seen:
                 continue
             seen.add(attraction_id)
-            candidates.append((value, evidence_id))
+            prefix = f"attractions[{position}]."
+            candidates.append((
+                value,
+                evidence_id,
+                [
+                    str(fact["fact_id"])
+                    for fact in facts
+                    if str(fact.get("field", "")).startswith(prefix)
+                ],
+            ))
     if not candidates:
         # persistence-v2.md §7.2：并入 web 域的动态族。
         blockers.append(
             _blocker(
                 "WEB_INPUT_UNAVAILABLE",
                 "web",
-                fact_id=_evidence_ref(web_item),
+                evidence_refs=_evidence_ref(web_item),
             )
         )
         return
@@ -543,7 +599,9 @@ def _compile_attractions(
         if not str(event.get("event_id", "")).startswith("rail-")
     ]
 
-    def route_position(item: tuple[Mapping[str, object], str]) -> int:
+    def route_position(
+        item: tuple[Mapping[str, object], str, list[str]],
+    ) -> int:
         attraction = item[0]
         name = str(attraction.get("name") or "")
         route_query_name = str(attraction.get("route_query_name") or name)
@@ -583,7 +641,10 @@ def _compile_attractions(
                 + int(planner_defaults["hotel_checkout_minutes"])
             )
         )
-    for index, (attraction, evidence_id) in enumerate(candidates, start=1):
+    for index, (attraction, evidence_id, attraction_refs) in enumerate(
+        candidates,
+        start=1,
+    ):
         start_at = _bounded_time(
             earliest,
             latest,
@@ -613,7 +674,7 @@ def _compile_attractions(
                         f"{attraction.get('name')}在返程候车前没有足够时间，"
                         "保留为未排入候选"
                     ),
-                    fact_id=evidence_id,
+                    evidence_refs=[evidence_id],
                 )
             )
             continue
@@ -684,7 +745,7 @@ def _compile_attractions(
                         f"{attraction.get('name')}缺少对应的到达交通证据"
                     ),
                     # 引用 map 域证据：缺的是到达交通事实，与 domain 一致。
-                    fact_id=_evidence_ref(map_item),
+                    evidence_refs=_evidence_ref(map_item),
                 )
             )
         end_at = min(start_at + timedelta(minutes=minutes), latest)
@@ -727,6 +788,8 @@ def _compile_attractions(
             }
         )
         event["evidence_dependencies"] = [evidence_id]
+        # 景点事件出自该景点的字段级事实；到达交通由 inbound 事件自己引用。
+        event["fact_refs"] = list(attraction_refs)
         event["inbound_transit_event_id"] = (
             matching_route.get("event_id")
             if matching_route is not None
@@ -772,7 +835,8 @@ def _compile_defaults(
     latest: datetime,
     defaults: Mapping[str, object],
     hotel_area: str | None,
-    web_fact_ref: str | None,
+    web_evidence_refs: Sequence[str],
+    plan_refs: _PlanRefs,
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],
@@ -784,7 +848,7 @@ def _compile_defaults(
             _blocker(
                 "HOTEL_SELECTION_MISSING",
                 "web",
-                fact_id=web_fact_ref,
+                evidence_refs=web_evidence_refs,
             )
         )
         hotel_area = "住宿地点待用户确认"
@@ -798,7 +862,7 @@ def _compile_defaults(
                     "具体酒店未选择，当前使用住宿片区或交通枢纽；"
                     "首末段交通待酒店确定后细化"
                 ),
-                fact_id=web_fact_ref,
+                evidence_refs=web_evidence_refs,
             )
         )
 
@@ -823,6 +887,11 @@ def _compile_defaults(
             "railway-live-query",
             user_dependency,
         ]
+        # 到站缓冲的起点是车次到站时刻——那份事实过期，这个缓冲就不再成立。
+        buffer_event["fact_refs"] = [
+            *plan_refs.rail_arrival,
+            *plan_refs.intent_window,
+        ]
         _add_event(days, buffer_event)
         events_by_type["buffer"].append(buffer_event)
         dependencies["buffer"].extend(buffer_event["evidence_dependencies"])
@@ -837,6 +906,10 @@ def _compile_defaults(
             extra={"location": hotel_area},
         )
         checkin["evidence_dependencies"] = [user_dependency]
+        checkin["fact_refs"] = [
+            *plan_refs.hotel_area,
+            *plan_refs.intent_window,
+        ]
         _add_event(days, checkin)
         events_by_type["hotel"].append(checkin)
         dependencies["hotel"].append(user_dependency)
@@ -864,6 +937,11 @@ def _compile_defaults(
             extra={"location": hotel_area},
         )
         checkout["evidence_dependencies"] = [user_dependency]
+        checkout["fact_refs"] = [
+            *plan_refs.rail_departure,
+            *plan_refs.hotel_area,
+            *plan_refs.intent_window,
+        ]
         _add_event(days, checkout)
         events_by_type["hotel"].append(checkout)
         dependencies["hotel"].append(user_dependency)
@@ -888,6 +966,10 @@ def _compile_defaults(
                 ]
             },
         )
+        wait["fact_refs"] = [
+            *plan_refs.rail_departure,
+            *plan_refs.intent_window,
+        ]
         _add_event(days, wait)
         events_by_type["buffer"].append(wait)
         dependencies["buffer"].extend(wait["evidence_dependencies"])
@@ -942,6 +1024,11 @@ def _compile_defaults(
                 "remove_with_attraction_id": attraction_id,
                 "location": deepcopy(attraction.get("location")),
                 "evidence_dependencies": [user_dependency],
+                # 它依附于某个景点事件而存在，引用跟着那个景点的事实走。
+                "fact_refs": [
+                    *(attraction.get("fact_refs") or []),
+                    *plan_refs.intent_window,
+                ],
             },
         )
         _add_event(days, buffer_event)
@@ -1066,6 +1153,7 @@ def _compile_defaults(
             if overlaps_event_id is not None:
                 meal["overlaps_event_id"] = overlaps_event_id
             meal["evidence_dependencies"] = [user_dependency]
+            meal["fact_refs"] = list(plan_refs.intent_window)
             _add_event(days, meal)
             events_by_type["meal"].append(meal)
             dependencies["meal"].append(user_dependency)
@@ -1089,6 +1177,7 @@ def _compile_defaults(
                     extra={
                         "location": hotel_area,
                         "evidence_dependencies": [user_dependency],
+                        "fact_refs": list(plan_refs.intent_window),
                     },
                 )
                 _add_event(days, rest)
@@ -1118,7 +1207,7 @@ def _record_evidence_blockers(
                     f"{domain.upper()}_INPUT_UNAVAILABLE",
                     domain,
                     reason=item.get("missing_reason"),
-                    fact_id=_evidence_ref(item),
+                    evidence_refs=_evidence_ref(item),
                 )
             )
         elif item.get("status") == "conflicting":
@@ -1126,7 +1215,7 @@ def _record_evidence_blockers(
                 _blocker(
                     f"{domain.upper()}_INPUT_UNAVAILABLE",
                     domain,
-                    fact_id=_evidence_ref(item),
+                    evidence_refs=_evidence_ref(item),
                 )
             )
 
@@ -1200,6 +1289,7 @@ def _compile_free_time(
     earliest: datetime,
     latest: datetime,
     hotel_area: str | None,
+    plan_refs: _PlanRefs,
     days: list[dict[str, object]],
     events_by_type: dict[str, list[dict[str, object]]],
     dependencies: dict[str, list[str]],
@@ -1258,6 +1348,7 @@ def _compile_free_time(
                         "location": base,
                         "free_time": True,
                         "evidence_dependencies": [dependency],
+                        "fact_refs": list(plan_refs.intent_window),
                     },
                 )
                 _add_event(days, free)
@@ -1483,21 +1574,41 @@ def _is_usable(evidence: Mapping[str, object] | None) -> bool:
     )
 
 
-def _evidence_ref(evidence: Mapping[str, object] | None) -> str | None:
-    """blocker 的 ``fact_id`` 引用：指向该域证据。
+def _evidence_ref(evidence: Mapping[str, object] | None) -> list[str]:
+    """blocker 的 ``evidence_refs``：指向该域证据。
 
     引用是命名原则的另一半（persistence-v2.md §7.3）。``blocker_id`` 只说规划
     层后果，「为什么没有可用输入」由消费方顺着这个引用读该事实的 token 得知；
     只改名不补引用等于把那半边信息丢了。
 
-    没有证据可指时返回 ``None``——``_blocker`` 会省掉这个键，而不是写一个指不
-    到任何东西的空引用。
+    没有证据可指时返回空列表——``_blocker`` 会省掉这个键，而不是写一个指不到
+    任何东西的空引用。
     """
 
     if not isinstance(evidence, Mapping):
-        return None
+        return []
     reference = str(evidence.get("evidence_id") or "").strip()
-    return reference or None
+    return [reference] if reference else []
+
+
+def _field_refs(
+    evidence: Mapping[str, object] | None,
+    *suffixes: str,
+) -> list[str]:
+    """按字段名后缀挑出字段级 ``fact_refs``。
+
+    与事件的 ``fact_refs`` 同形（``<evidence_id>#<field>``），走的是
+    ``evidence_projection.item_facts`` 已经算好的 ``fact_id``，不在这里自己拼——
+    两侧各拼一套会让引用在读取时对不上（``evidence_core.fact_id`` 的文档说明）。
+    """
+
+    if not isinstance(evidence, Mapping):
+        return []
+    return [
+        str(fact["fact_id"])
+        for fact in item_facts(evidence)
+        if str(fact.get("field", "")).endswith(suffixes)
+    ]
 
 
 def _blocker(
@@ -1506,8 +1617,25 @@ def _blocker(
     *,
     reason: object = None,
     severity: str = "conditional",
-    fact_id: str | None = None,
+    evidence_refs: Sequence[str] = (),
+    fact_refs: Sequence[str] = (),
 ) -> dict[str, object]:
+    """构造一个 conditional blocker。
+
+    **两个引用键，各有一个确定含义**（persistence-v2.md §7.4 的键名裁决）：
+
+    * ``evidence_refs`` —— 指向整个证据项（``evidence_id``）。用在指代对象是
+      「该域的裁断」时，包括该证据**没有任何字段级事实**的情形；
+    * ``fact_refs`` —— 指向具体字段（``<evidence_id>#<field>``）。用在指代对象
+      确实是某几个字段时。
+
+    此前这里是一个单数 ``fact_id``，装的却是域级 ``evidence_id``——名实不符。
+    不能靠「把值升成字段级」了结：``*_INPUT_UNAVAILABLE` 恰恰在证据 missing /
+    unknown 时触发，那时 ``item_facts()`` 返回**空**，字段级引用会退化成空列表，
+    把引用丢干净——而那正是最需要引用的一类 blocker。所以按语义分两个键，
+    单数 ``fact_id`` 就此消失。
+    """
+
     suggested_actions = {
         "railway": ["重新查询铁路", "手动填写车次"],
         "map": ["查询高德公交或路线"],
@@ -1518,8 +1646,9 @@ def _blocker(
         "domain": domain,
         "severity": severity,
         # 裁决 8.2 / evidence-axes.md §5.5：结论层不复述证据状态，改为引用。
-        # 消费方顺着 fact_id 读该事实的 token，得知是「没结论」还是「打架」。
-        **({"fact_id": fact_id} if fact_id else {}),
+        # 消费方顺着引用读该事实的 token，得知是「没结论」还是「打架」。
+        **({"evidence_refs": list(evidence_refs)} if evidence_refs else {}),
+        **({"fact_refs": list(fact_refs)} if fact_refs else {}),
         "reason": reason,
         "suggested_actions": suggested_actions.get(
             domain,

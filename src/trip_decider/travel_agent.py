@@ -49,6 +49,25 @@ class TravelAgentError(RuntimeError):
     """Raised when an agent contract or lifecycle transition is invalid."""
 
 
+#: 编程错误——**不是**业务失败。
+#:
+#: 宽捕获 + 专属失败叙述 = 任何 bug 都穿它的外衣。此前一处
+#: ``except Exception`` 把 ``NameError`` 包装成「真实证据不足」，对外叙述与
+#: 事故原因毫无关系，归因浪费了一整轮：日志里写着证据不足，于是所有人去查
+#: 采集器和数据源，而故障在代码里。
+#:
+#: 判据是「这个异常说明输入不合预期，还是说明代码写错了」。下面这几类只可能
+#: 是后者：它们不该被任何 ``except Exception`` 消化成一句业务话术，要么重抛，
+#: 要么如实记下类型。业务失败保留原叙述——本注释不是要消灭宽捕获，是要它
+#: 别说谎。
+NON_BUSINESS_ERRORS: tuple[type[BaseException], ...] = (
+    NameError,
+    AttributeError,
+    TypeError,
+    ImportError,
+)
+
+
 class TaskMode(str, Enum):
     """Top-level routing selected before tool execution."""
 
@@ -1026,6 +1045,28 @@ class InMemoryAgentStore:
             )
             return deepcopy(run)
 
+    def record_result(
+        self,
+        run_id: str,
+        result: Mapping[str, object],
+    ) -> AgentRun:
+        """把 ``result`` 落进 ``run.json``，不改 run 状态。
+
+        persistence-v2.md §13.1 的写入顺序约束需要这个入口：``run.json`` 是
+        ``result`` 的**权威**，必须先落；``action-loop.json`` 后落，且不再存
+        副本。此前唯一能把 ``result`` 写进 ``run.json`` 的是 ``complete()``，
+        而它同时把 run 判为 COMPLETED——草稿态（证据没补齐、不该完成）就没有
+        任何途径先落权威，只能让 action-loop 先写。顺序颠倒的根因在这里，
+        不在调用点。
+        """
+
+        with self._condition:
+            run = self._required_run(run_id)
+            run.result = deepcopy(dict(result))
+            self._persist_unlocked(run)
+            self._condition.notify_all()
+            return deepcopy(run)
+
     def resume(self, run_id: str) -> AgentRun:
         """Resume one completed run for an explicit evidence refresh."""
 
@@ -1131,6 +1172,31 @@ class InMemoryAgentStore:
             )
             return deepcopy(run)
 
+    @staticmethod
+    def _plan_version_context(
+        context: Mapping[str, object],
+    ) -> dict[str, object]:
+        """PlanVersion 的 context：只留结构与引用，不留证据副本。
+
+        persistence-v2.md §2.3 要求 ``context.evidence`` 删除、改为引用读时解析；
+        §5.1 的 R2 是硬要求——引用解析失败必须产出 ``unknown`` + ``next_action``，
+        **不得回落到文件内的旧值**。
+
+        落法是让文件里**根本没有可回落的值**：R2 因此由数据形状保证，而不是靠
+        读取层自律。留一份内联副本，R2 就退化成一句纪律——而纪律会被下一个人
+        绕过，形状不会。
+        """
+
+        trimmed = deepcopy(dict(context))
+        evidence = trimmed.pop("evidence", None)
+        trimmed["evidence_refs"] = [
+            str(item["evidence_id"])
+            for item in (evidence if isinstance(evidence, list) else [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("evidence_id"), str)
+        ]
+        return trimmed
+
     def persist_plan_version(
         self,
         run_id: str,
@@ -1165,7 +1231,7 @@ class InMemoryAgentStore:
         }
         context = result.get("context")
         if isinstance(context, Mapping):
-            payload["context"] = deepcopy(dict(context))
+            payload["context"] = self._plan_version_context(context)
         _atomic_json(
             versions / f"plan-{version:04d}.json",
             payload,

@@ -233,10 +233,20 @@ def _planning_snapshot(
             for item in compiled.get("conditional_blockers", [])
             if isinstance(item, Mapping)
         ),
-        "blocker_fact_refs": sorted(
-            str(item.get("fact_id"))
+        # 两个引用键各有含义（persistence-v2.md §7.4）：evidence_refs 指整个
+        # 证据项，fact_refs 指具体字段。快照分开记——合成一列会让「引用降级成
+        # 域级」这类变化看不出来。
+        "blocker_evidence_refs": sorted(
+            reference
             for item in compiled.get("conditional_blockers", [])
-            if isinstance(item, Mapping) and item.get("fact_id")
+            if isinstance(item, Mapping)
+            for reference in item.get("evidence_refs", [])
+        ),
+        "blocker_fact_refs": sorted(
+            reference
+            for item in compiled.get("conditional_blockers", [])
+            if isinstance(item, Mapping)
+            for reference in item.get("fact_refs", [])
         ),
         "missing_requirements": sorted(
             str(

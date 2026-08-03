@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 import re
 import threading
@@ -45,6 +46,7 @@ from trip_decider.travel_agent import (
     EvidenceItem,
     EvidenceStatus,
     InMemoryAgentStore,
+    NON_BUSINESS_ERRORS,
     Revision,
     RunStatus,
     TaskMode,
@@ -57,9 +59,8 @@ from trip_decider.travel_agent import (
     revise_run,
 )
 
+_LOGGER = logging.getLogger(__name__)
 
-# 编程错误：它们不是业务失败，不该被翻译成运行状态。
-_PROGRAMMING_ERRORS = (NameError, AttributeError, TypeError, ImportError)
 
 
 class TripApplicationError(ValueError):
@@ -770,7 +771,7 @@ class TripApplicationService:
                 },
             )
             self.store.complete(run_id, result)
-        except _PROGRAMMING_ERRORS:
+        except NON_BUSINESS_ERRORS:
             # 编程错误不穿业务外衣。这个 except 曾把一个 NameError 报成
             # 「真实证据不足」——同一个叙述覆盖了「采集器没拿到数据」和
             # 「这段代码有 bug」，两者在可观测层面无法区分，归因因此走了
@@ -851,6 +852,16 @@ class TripApplicationService:
             )
             self.store.block(run_id, retained, reason)
         except Exception as error:
+            # 这里在后台线程里，重抛只会让线程静默死掉——比包装还糟。
+            # 所以走「如实记类型」那一支：编程错误必须在对外叙述里自报家门，
+            # 不得混进业务失败的话术，也不得只留一个错误码就把栈丢掉。
+            programming_error = isinstance(error, NON_BUSINESS_ERRORS)
+            if programming_error:
+                _LOGGER.exception(
+                    "action loop background thread hit a programming error "
+                    "(run_id=%s)",
+                    run_id,
+                )
             current = self.store.get_run(run_id)
             if current.status is RunStatus.RUNNING:
                 self.store.block(
@@ -863,7 +874,11 @@ class TripApplicationService:
                             "blocked_domains": [],
                         }
                     ),
-                    f"ACTION_LOOP_{type(error).__name__.upper()}",
+                    (
+                        f"INTERNAL_ERROR_{type(error).__name__.upper()}"
+                        if programming_error
+                        else f"ACTION_LOOP_{type(error).__name__.upper()}"
+                    ),
                 )
 
     def _guided_evidence_path(self, run_id: str) -> Path:

@@ -59,6 +59,7 @@ from trip_decider.travel_agent import (
     EvidenceItem,
     EvidenceStatus,
     InMemoryAgentStore,
+    NON_BUSINESS_ERRORS,
     RunStatus,
     TravelAgentError,
     TravelIntent,
@@ -86,9 +87,25 @@ class _LoopState:
     fallback_result: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        """action-loop.json 的内容。**不含 ``result``**——见 §13.1 的去重裁决。
+
+        ``result`` 曾经在这里逐字节重复 ``run.json`` 的同名字段（实测 78,102
+        字节，两边 ``==`` 为真）。它是同一份数据的第二个副本，而副本的问题不
+        是占地方，是**两份可以不一致**：谁是权威没有写下来，两边就都不是。
+
+        裁决把权威钉在 ``run.json``：``run.json`` 先落，``action-loop.json``
+        后落，恢复时以 ``run.json`` 为准。这里只留调度状态。
+
+        ``fallback_result`` **留下**——它不是重复。它是动作循环启动那一刻的
+        ``run.result`` 快照（比较阶段的候选卡，实测 1,270 字节），而
+        ``run.result`` 之后会被详细规划结果覆盖。从当前的 ``run.json`` 重建
+        不出它来。
+        """
+
         return {
             "action_status": dict(self.action_status),
-            "result": deepcopy(self.result),
+            # 权威在 run.json。写明白，免得下一个人以为这里少了个字段。
+            "result_source": "run.json#result",
             "fallback_result": deepcopy(self.fallback_result),
         }
 
@@ -594,6 +611,14 @@ def execute_registered_action(
             run.intent,
             state,
         )
+    except NON_BUSINESS_ERRORS:
+        # 编程错误不穿业务外衣。走下面那条路会把它变成
+        # 「{域}_EVIDENCE_BLOCKED」+「该域缺证据」，那句叙述与事故原因毫无
+        # 关系，只会把归因引向采集器和数据源。这里是同步调用，重抛能让它
+        # 原样浮到调用方，栈也留得住。
+        state.action_status[action_id] = "blocked"
+        _persist_loop_state(run_id, state, store)
+        raise
     except Exception as error:
         state.action_status[action_id] = "blocked"
         _persist_loop_state(run_id, state, store)
@@ -620,6 +645,10 @@ def execute_registered_action(
         result = deepcopy(dict(outcome))
         state.result = result
         state.action_status[action_id] = "completed"
+        # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
+        # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
+        # run.json 里却还没有 result，重启后状态自相矛盾。
+        store.record_result(run_id, result)
         _persist_loop_state(run_id, state, store)
         if _result_is_displayable(result):
             store.persist_plan_version(run_id, result)
@@ -2127,6 +2156,12 @@ def _load_loop_state(
         evidence_path = legacy_evidence_path
     if not action_path.exists() and not evidence_path.exists():
         return None
+    if not action_path.is_file() and evidence_path.is_file():
+        # §13.1 的中断窗口：run.json 先落、action-loop.json 后落，两次写之间
+        # 崩溃就留下这个状态。裁决要求「action-loop.json 缺失或落后时，从
+        # run.json 重建」——权威在 run.json，这里据它把调度状态重算出来，
+        # 而不是把这次崩溃当成不可恢复。
+        return _rebuild_loop_state(run_id, store, evidence_path)
     if not action_path.is_file() or not evidence_path.is_file():
         raise TravelAgentError(
             "persisted action loop omitted state or evidence"
@@ -2159,10 +2194,14 @@ def _load_loop_state(
         evidence.get("last_sourced"),
         "last_sourced",
     )
-    raw_result = action.get("result")
+    # result 的权威是 run.json（§13.1）。action-loop.json 里不再有副本，
+    # 恢复时从 run.json 取——「action-loop.json 缺失或落后时，从 run.json
+    # 重建」在这里落地。旧文件里若还残留 result，忽略它：权威只有一个，
+    # 读两个来源、挑一个用，等于把「哪份对」的问题留给运行时掷骰子。
+    raw_result = store.get_run(run_id).result
     if raw_result is not None and not isinstance(raw_result, Mapping):
         raise TravelAgentError(
-            "persisted action loop has invalid result"
+            "persisted run has invalid result"
         )
     raw_fallback = action.get("fallback_result")
     if raw_fallback is not None and not isinstance(
@@ -2188,6 +2227,51 @@ def _load_loop_state(
             if isinstance(raw_fallback, Mapping)
             else None
         ),
+    )
+
+
+def _rebuild_loop_state(
+    run_id: str,
+    store: InMemoryAgentStore,
+    evidence_path: Path,
+) -> _LoopState:
+    """从 ``run.json`` + ``evidence/current.json`` 重建动作循环状态。
+
+    只在 ``action-loop.json`` 缺失时走这里（§13.1 的恢复条款）。重建的是
+    **调度状态**：哪些域已经拿到可用证据、planner 跑没跑完。这些都能从权威
+    数据推出来，不需要 action-loop.json 那份副本。
+
+    ``fallback_result`` 重建不出来——它是动作循环启动那一刻的 ``run.result``
+    快照，而 ``run.result`` 已被覆盖。这里如实留 ``None``，不拿当前的
+    ``run.result`` 冒充它：那会把详细规划结果当成比较阶段的候选卡，是一次
+    静默的张冠李戴。
+    """
+
+    evidence = _runtime_json_object(evidence_path)
+    current = _evidence_items(evidence.get("current"), "current")
+    last_sourced = _evidence_items(
+        evidence.get("last_sourced"),
+        "last_sourced",
+    )
+    result = store.get_run(run_id).result
+    statuses = {action_id: "waiting" for action_id in _ACTION_ORDER}
+    for item in current:
+        if item.domain in statuses and item.status.is_usable:
+            statuses[item.domain] = "completed"
+    if isinstance(result, Mapping) and result.get("plan") is not None:
+        statuses["planner"] = "completed"
+    return _LoopState(
+        evidence={item.domain: item for item in current},
+        last_sourced_evidence={
+            item.domain: item for item in last_sourced
+        },
+        action_status=statuses,
+        result=(
+            deepcopy(dict(result))
+            if isinstance(result, Mapping)
+            else None
+        ),
+        fallback_result=None,
     )
 
 

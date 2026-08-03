@@ -32,10 +32,11 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-estimated",
         "web-estimated"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
@@ -53,11 +54,14 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-estimated",
         "railway-estimated",
-        "railway-estimated",
         "web-estimated"
+      ],
+      "blocker_fact_refs": [
+        "railway-estimated#outbound.second_class_availability",
+        "railway-estimated#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -107,10 +111,11 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
@@ -128,11 +133,14 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-sourced",
-        "railway-sourced",
         "web-sourced"
+      ],
+      "blocker_fact_refs": [
+        "railway-sourced#outbound.second_class_availability",
+        "railway-sourced#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -183,12 +191,13 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 0,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-missing",
         "railway-missing",
         "web-missing",
         "web-missing"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "HOTEL_SELECTION_MISSING",
         "MAP_INPUT_UNAVAILABLE",
@@ -214,12 +223,13 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 0,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-missing",
         "railway-missing",
         "web-missing",
         "web-missing"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "HOTEL_SELECTION_MISSING",
         "MAP_INPUT_UNAVAILABLE",
@@ -291,11 +301,12 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-conflicting",
         "map-conflicting",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -315,12 +326,15 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-conflicting",
         "map-conflicting",
-        "railway-sourced",
         "railway-sourced",
         "web-sourced"
+      ],
+      "blocker_fact_refs": [
+        "railway-sourced#outbound.second_class_availability",
+        "railway-sourced#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -372,10 +386,11 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-estimated",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
@@ -393,11 +408,14 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-estimated",
         "railway-sourced",
-        "railway-sourced",
         "web-sourced"
+      ],
+      "blocker_fact_refs": [
+        "railway-sourced#outbound.second_class_availability",
+        "railway-sourced#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -447,11 +465,12 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-missing",
         "map-missing",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -471,12 +490,15 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-missing",
         "map-missing",
-        "railway-sourced",
         "railway-sourced",
         "web-sourced"
+      ],
+      "blocker_fact_refs": [
+        "railway-sourced#outbound.second_class_availability",
+        "railway-sourced#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -528,11 +550,12 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-absent",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -553,11 +576,12 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-absent",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -611,11 +635,12 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-conflicting",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -636,11 +661,12 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-conflicting",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -693,10 +719,11 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING"
@@ -714,11 +741,14 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-estimated",
-        "railway-estimated",
         "web-sourced"
+      ],
+      "blocker_fact_refs": [
+        "railway-estimated#outbound.second_class_availability",
+        "railway-estimated#return.second_class_availability"
       ],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
@@ -769,11 +799,12 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-missing",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -794,11 +825,12 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 3,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "map-sourced",
         "railway-missing",
         "web-sourced"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "ATTRACTION_TRANSIT_MISSING",
         "HOTEL_DETAIL_PENDING",
@@ -848,10 +880,11 @@
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 0,
-      "blocker_fact_refs": [
+      "blocker_evidence_refs": [
         "web-missing",
         "web-missing"
       ],
+      "blocker_fact_refs": [],
       "blockers": [
         "HOTEL_SELECTION_MISSING",
         "WEB_INPUT_UNAVAILABLE"
@@ -871,11 +904,14 @@
     },
     "stale_read_planning": {
       "attraction_event_count": 0,
-      "blocker_fact_refs": [
-        "railway-sourced",
+      "blocker_evidence_refs": [
         "railway-sourced",
         "web-missing",
         "web-missing"
+      ],
+      "blocker_fact_refs": [
+        "railway-sourced#outbound.second_class_availability",
+        "railway-sourced#return.second_class_availability"
       ],
       "blockers": [
         "HOTEL_SELECTION_MISSING",
