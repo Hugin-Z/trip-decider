@@ -68,6 +68,7 @@ from trip_decider.travel_agent import (
     TravelIntent,
     atomic_runtime_json as _atomic_runtime_json,
     build_destination_context,
+    user_input_evidence,
 )
 
 
@@ -1052,18 +1053,9 @@ def _planner_handler(
     intent: TravelIntent,
     state: _LoopState,
 ) -> Mapping[str, object]:
-    user = EvidenceItem(
-        evidence_id="confirmed-travel-intent",
-        domain="user_input",
-        status=EvidenceStatus.SOURCED,
-        value=intent.to_dict(),
-        sources=(
-            {
-                "source_type": "user_supplied",
-                "locator": "confirmed_travel_intent",
-            },
-        ),
-    )
+    # 单一出处：读取层要按同样规则重建它（persistence-v2.md §2.1.1），
+    # 两处各造一份就会在 evidence_id 上分叉，引用随即解析不到（D5）。
+    user = user_input_evidence(intent)
     context = build_destination_context(
         intent,
         (user, *(state.evidence[domain] for domain in _DOMAINS)),

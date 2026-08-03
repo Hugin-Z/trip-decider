@@ -2154,6 +2154,39 @@ def continue_run_with_intent(
     return store.continue_with_intent(run_id, contract)
 
 
+#: 用户输入证据的固定 id。**不是 uuid**：它必须在两次重建之间稳定，因为
+#: PlanVersion 的事件靠 ``fact_id``（``<evidence_id>#<field>``）指向行程窗事实，
+#: id 一变引用就全部解析不到（D13：内部寻址方式变了，对外形状不该跟着变）。
+USER_INPUT_EVIDENCE_ID = "confirmed-travel-intent"
+
+
+def user_input_evidence(intent: TravelIntent) -> EvidenceItem:
+    """把 intent 投影成 ``user_input`` 域证据。
+
+    **它不是采集来的证据，是 intent 的投影**——``_planner_handler`` 一直是现造
+    这一条，从来没有哪个采集器产出过它。因此它不必落盘：读取时从
+    ``run.intent`` 重建即可，与整个「读时计算」的架构同构，也顺带消灭一份副本
+    （`persistence-v2.md` §2.1.1，2026-08-03 裁决）。
+
+    **重建必须稳定**：同一个 intent 两次重建得到同一个 ``evidence_id``，
+    因而得到同一批 ``fact_id``。事件的 ``fact_refs`` 指着它们，不稳定就等于
+    每次读取都把引用打断一次。
+    """
+
+    return EvidenceItem(
+        evidence_id=USER_INPUT_EVIDENCE_ID,
+        domain="user_input",
+        status=EvidenceStatus.SOURCED,
+        value=intent.to_dict(),
+        sources=(
+            {
+                "source_type": "user_supplied",
+                "locator": "confirmed_travel_intent",
+            },
+        ),
+    )
+
+
 def collect_destination_evidence(
     intent: TravelIntent,
     *,
@@ -2529,4 +2562,6 @@ __all__ = [
     "revise_run",
     "run_error_code",
     "runtime_status",
+    "user_input_evidence",
+    "USER_INPUT_EVIDENCE_ID",
 ]
