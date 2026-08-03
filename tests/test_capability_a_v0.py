@@ -217,6 +217,57 @@ class ReachabilityCase(unittest.TestCase):
         self.assertTrue(lenient.admitted)
         self.assertFalse(strict.admitted)
 
+    def test_a_roundtrip_only_shape_is_understood(self) -> None:
+        """只带 `roundtrip_duration_seconds` 的证据也要认。
+
+        那是本产品既有的字段——采集器与候选卡都用它。第一版只认逐段的
+        outbound/return，把这种证据判成「结构不全」：判据照着一个测试夹具的
+        形状写，而不是照着管线真正携带的形状。
+        """
+
+        from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
+
+        item = EvidenceItem(
+            evidence_id="estimated-railway",
+            domain="railway",
+            status=EvidenceStatus.ESTIMATED,
+            value={
+                "retrieved_at": "2026-07-30T10:44:00+08:00",
+                "roundtrip_duration_seconds": 21600,
+                "roundtrip_fare_cny": 800.0,
+                "snapshot": {
+                    "acquisition": "live_fetch",
+                    "retrieved_at": "2026-07-30T10:44:00+08:00",
+                },
+            },
+            sources=(
+                {
+                    "provider": "controlled-rail",
+                    "retrieved_at": "2026-07-30T10:44:00+08:00",
+                },
+            ),
+        ).to_dict()
+        result = assess_reachability(
+            item,
+            window_seconds=WINDOW,
+            now=READ_AT,
+        )
+        self.assertTrue(result.admitted, f"未准入：{result.reason}")
+
+    def test_estimated_support_is_admitted(self) -> None:
+        """裁决 5：estimated **可以**参与判定，不得被拦死。
+
+        重查不会让推算值变精确，拦掉它等于永久拦死一条本来可用的路径
+        （`evidence-axes.md` §5.2.1 的已知不对称，同一个道理）。
+        """
+
+        from trip_decider.reachability import ADMISSIBLE_SUPPORT
+
+        self.assertIn("estimated", ADMISSIBLE_SUPPORT)
+        self.assertIn("sourced", ADMISSIBLE_SUPPORT)
+        self.assertNotIn("unknown", ADMISSIBLE_SUPPORT)
+        self.assertNotIn("conflicting", ADMISSIBLE_SUPPORT)
+
     def test_net_playable_never_goes_negative(self) -> None:
         self.assertEqual(
             0,

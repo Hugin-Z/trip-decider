@@ -131,6 +131,9 @@
 | 1 | 候选的 `feasibility_status` | `guided_discovery._coarse_option` 中对 `feasibility_status` 的赋值 |
 | 2 | 计划的 `planning_state` | `planning_input_compiler.compile` 中对 `planning_state` 的赋值 |
 | 3 | `conditional_blockers` 中任一 blocker 的存在与否 | `planning_input_compiler` 中的 `_blocker(...)` 调用，逐条见 §3.1.1 |
+| 4 | **候选进不进结果集**（准入过滤，能力 A v0 新增） | `reachability` 中的 `Reachability(...)` 构造，逐条见 §3.1.1 |
+
+**第 4 类是新形态。** 前三类的输出都是「给这个对象什么结论」，对象始终在结果集里；第 4 类的输出是「这个对象还在不在」。它同样改变可行性结论——一个被过滤掉的目的地，其可行性对用户而言就是「不可行」——因此必须登记，否则 §3.2 的闭包分析会漏掉整条准入路径。对应的「不静默」要求见 `invariants.md` I7 第 4 条。
 
 **清单以「函数名 + blocker_id」为键，行号只作参考、不作判据。** 上一版把 16 个行号写进契约，一次重构之后**无一命中**、处数也从 17 变成 18——行号是最先过期的那种数字（D1）。函数名与 blocker_id 跟着语义走，重构时要么不变，要么变了就是真的换了语义。
 
@@ -159,6 +162,11 @@
 | `_compile_defaults` | `HOTEL_SELECTION_MISSING` | 未选住宿，用片区兜底 |
 | `_compile_defaults` | `HOTEL_DETAIL_PENDING` | 已有片区但未定具体酒店 |
 | `_record_evidence_blockers` | `{}_INPUT_UNAVAILABLE` | 按域补记的输入不可用（与上面三处同 id，由 `_unique_blockers` 收敛） |
+| `assess_reachability` | `railway_not_collected` | 该域根本没采（判定点 4） |
+| `assess_reachability` | `railway_support_{}` | 车次证据的 support 不可准入（unknown / conflicting） |
+| `assess_reachability` | `railway_duration_unavailable` | 有车次但拿不到往返时长，算不出净可玩时长 |
+| `assess_reachability` | `net_playable_below_threshold` | 净可玩时长低于阈值（裁决 5） |
+| `assess_reachability` | `admitted` | 准入结论本身（判定点 4，非 blocker） |
 
 **为什么不钉调用点处数**：同一个 `(函数, blocker_id)` 目前对应 1–4 个调用点
 （`_compile_railway` 的 `RAILWAY_INPUT_UNAVAILABLE` 有 4 支）。同一函数里为同一个

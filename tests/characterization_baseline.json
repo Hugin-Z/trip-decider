@@ -1,6 +1,7 @@
 {
   "all_estimated": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [
         "往返交通时长为推算值，实际耗时可能不同"
@@ -28,6 +29,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "estimated"
     },
     "decision_point_2_3_planning": {
@@ -83,6 +85,7 @@
   },
   "all_sourced": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
@@ -107,6 +110,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "verified"
     },
     "decision_point_2_3_planning": {
@@ -162,32 +166,18 @@
   },
   "all_unknown": {
     "decision_point_1_guided": {
-      "coarse_plan_status": "UNKNOWN",
-      "conditions": [],
+      "admitted_count": 0,
       "conflict_details_visible": false,
-      "evidence_missing_count": 6,
-      "evidence_statuses": [
+      "no_feasible_candidates": true,
+      "rejected": [
         {
-          "domain": "railway",
-          "token": "unknown"
-        },
-        {
-          "domain": "map",
-          "token": "unknown"
-        },
-        {
-          "domain": "web",
+          "name": "目的地一",
+          "next_action_kind": "auto_refetch",
+          "reason": "railway_support_unknown",
           "token": "unknown"
         }
       ],
-      "feasibility_status": "UNKNOWN",
-      "has_next_action": [
-        "railway",
-        "map",
-        "web"
-      ],
-      "playable_time_seconds": null,
-      "roundtrip_transport_status": "unknown"
+      "relaxation_hint": "候选都没有查到可用的往返车次：可以换出发地或日期，也可能是这些方向暂时没有可查的直达铁路。"
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 0,
@@ -273,6 +263,7 @@
   },
   "map_conflicting": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
@@ -297,6 +288,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "verified"
     },
     "decision_point_2_3_planning": {
@@ -358,6 +350,7 @@
   },
   "map_estimated": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
@@ -382,6 +375,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "verified"
     },
     "decision_point_2_3_planning": {
@@ -437,6 +431,7 @@
   },
   "map_unknown": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
@@ -461,6 +456,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "verified"
     },
     "decision_point_2_3_planning": {
@@ -522,31 +518,18 @@
   },
   "railway_confirmed_absent": {
     "decision_point_1_guided": {
-      "coarse_plan_status": "INFEASIBLE_NO_TRANSPORT",
-      "conditions": [],
+      "admitted_count": 0,
       "conflict_details_visible": false,
-      "evidence_missing_count": 6,
-      "evidence_statuses": [
+      "no_feasible_candidates": true,
+      "rejected": [
         {
-          "domain": "railway",
+          "name": "目的地一",
+          "next_action_kind": "user_supply",
+          "reason": "railway_duration_unavailable",
           "token": "verified"
-        },
-        {
-          "domain": "map",
-          "token": "unknown"
-        },
-        {
-          "domain": "web",
-          "token": "unknown"
         }
       ],
-      "feasibility_status": "INFEASIBLE_NO_TRANSPORT",
-      "has_next_action": [
-        "map",
-        "web"
-      ],
-      "playable_time_seconds": null,
-      "roundtrip_transport_status": "verified"
+      "relaxation_hint": "候选都没有查到可用的往返车次：可以换出发地或日期，也可能是这些方向暂时没有可查的直达铁路。"
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
@@ -603,35 +586,18 @@
   },
   "railway_conflicting": {
     "decision_point_1_guided": {
-      "coarse_plan_status": "UNKNOWN",
-      "conditions": [],
+      "admitted_count": 0,
       "conflict_details_visible": true,
-      "evidence_missing_count": 6,
-      "evidence_statuses": [
+      "no_feasible_candidates": true,
+      "rejected": [
         {
-          "conflict_details": [
-            "来源A与来源B不一致"
-          ],
-          "domain": "railway",
+          "name": "目的地一",
+          "next_action_kind": "user_choice",
+          "reason": "railway_support_conflicting",
           "token": "conflicting"
-        },
-        {
-          "domain": "map",
-          "token": "unknown"
-        },
-        {
-          "domain": "web",
-          "token": "unknown"
         }
       ],
-      "feasibility_status": "UNKNOWN",
-      "has_next_action": [
-        "railway",
-        "map",
-        "web"
-      ],
-      "playable_time_seconds": null,
-      "roundtrip_transport_status": "conflicting"
+      "relaxation_hint": "候选都没有查到可用的往返车次：可以换出发地或日期，也可能是这些方向暂时没有可查的直达铁路。"
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
@@ -688,6 +654,7 @@
   },
   "railway_estimated": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [
         "往返交通时长为推算值，实际耗时可能不同"
@@ -715,6 +682,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "estimated"
     },
     "decision_point_2_3_planning": {
@@ -770,32 +738,18 @@
   },
   "railway_unknown": {
     "decision_point_1_guided": {
-      "coarse_plan_status": "UNKNOWN",
-      "conditions": [],
+      "admitted_count": 0,
       "conflict_details_visible": false,
-      "evidence_missing_count": 6,
-      "evidence_statuses": [
+      "no_feasible_candidates": true,
+      "rejected": [
         {
-          "domain": "railway",
-          "token": "unknown"
-        },
-        {
-          "domain": "map",
-          "token": "unknown"
-        },
-        {
-          "domain": "web",
+          "name": "目的地一",
+          "next_action_kind": "auto_refetch",
+          "reason": "railway_support_unknown",
           "token": "unknown"
         }
       ],
-      "feasibility_status": "UNKNOWN",
-      "has_next_action": [
-        "railway",
-        "map",
-        "web"
-      ],
-      "playable_time_seconds": null,
-      "roundtrip_transport_status": "unknown"
+      "relaxation_hint": "候选都没有查到可用的往返车次：可以换出发地或日期，也可能是这些方向暂时没有可查的直达铁路。"
     },
     "decision_point_2_3_planning": {
       "attraction_event_count": 3,
@@ -852,6 +806,7 @@
   },
   "web_unknown": {
     "decision_point_1_guided": {
+      "admitted_count": 1,
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
@@ -876,6 +831,7 @@
         "web"
       ],
       "playable_time_seconds": 273600.0,
+      "rejected": [],
       "roundtrip_transport_status": "verified"
     },
     "decision_point_2_3_planning": {

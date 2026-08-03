@@ -50,6 +50,16 @@ def _intent() -> TravelIntent:
     )
 
 
+def _rejected_entry(result: dict) -> dict:
+    """退回区的第一条。空退回区即为**信息消失**——I7 第 4 条要防的正是它。"""
+
+    rejected = result.get("rejected_candidates")
+    assert isinstance(rejected, list) and rejected, (
+        "被拦下的候选没有进退回区，直接消失了——I7 第 4 条不成立"
+    )
+    return rejected[0]
+
+
 def _compare(collector: object) -> dict[str, object]:
     broker = EvidenceBroker(
         clock=lambda: datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
@@ -84,20 +94,23 @@ class ConflictingUnknownNeverSilentCase(unittest.TestCase):
                 conflict_details=("两个来源给出不同的到达时刻",),
             )
 
-        option = _compare(conflicting)["options"][0]
+        # 第 4 条（准入过滤形态）：conflicting 的铁路证据支撑不了「这趟能不能
+        # 成行」，候选因此不进入选区——但**不是消失**，它进退回区。
+        result = _compare(conflicting)
+        entry = _rejected_entry(result)
 
-        self.assertNotIn(
-            str(option["feasibility_status"]),
-            _UNCONDITIONAL,
-            "conflicting 输入产出了无条件可行结论",
+        self.assertEqual(
+            [],
+            result["options"],
+            "conflicting 的铁路证据不该产出可行候选",
         )
         self.assertEqual(
             "conflicting",
-            _railway_status(option),
-            "conflicting 证据被折叠为另一个展示态"
-            "（guided_discovery.py:595-599 的 else 分支把 CONFLICTING "
-            "映射为 MISSING），第 3 条不成立",
+            str(entry["token"]),
+            "conflicting 证据在退回项上被折叠成了另一个 token，第 3 条不成立",
         )
+        self.assertTrue(entry.get("reason"), "退回项没有 reason")
+        self.assertTrue(entry.get("next_action"), "退回项没有 next_action")
 
     def test_i7_conflict_details_survive_to_the_caller(self) -> None:
         def conflicting(_intent: TravelIntent) -> EvidenceItem:
@@ -109,13 +122,14 @@ class ConflictingUnknownNeverSilentCase(unittest.TestCase):
                 conflict_details=("两个来源给出不同的到达时刻",),
             )
 
-        option = _compare(conflicting)["options"][0]
-        serialized = repr(option)
+        # 候选被准入过滤拦下之后，conflict_details 必须在**退回区**可见——
+        # 信息换了位置不算消失，换没了才算。
+        result = _compare(conflicting)
+        serialized = repr(result["rejected_candidates"])
         self.assertIn(
             "两个来源给出不同的到达时刻",
             serialized,
-            "conflict_details 未出现在对外返回值中"
-            "（guided_discovery.py:548-590 的返回体没有该字段），"
+            "conflict_details 未出现在退回区，"
             "用户无从知道两个来源在哪一点上打架",
         )
 
@@ -129,17 +143,31 @@ class ConflictingUnknownNeverSilentCase(unittest.TestCase):
                 missing_reason="collector_error",
             )
 
-        option = _compare(missing)["options"][0]
+        # 第 4 条的判定方法（`invariants.md` I7）：构造一个 railway 为 unknown
+        # 的候选，断言它**出现在 rejected_candidates 而不是消失**，且 token
+        # 原样为 unknown。
+        result = _compare(missing)
+        entry = _rejected_entry(result)
 
-        self.assertNotIn(
-            str(option["feasibility_status"]),
-            _UNCONDITIONAL,
-            "unknown 输入产出了无条件可行结论",
+        self.assertEqual(
+            [],
+            result["options"],
+            "查不到车次的目的地进了候选集——裁决 1 的准入门槛没生效",
         )
         self.assertEqual(
             "unknown",
-            _railway_status(option),
-            "unknown 证据的展示态不是 unknown",
+            str(entry["token"]),
+            "unknown 证据在退回项上被折叠成了另一个 token",
+        )
+        self.assertTrue(entry.get("reason"), "退回项没有 reason")
+        self.assertTrue(entry.get("next_action"), "退回项没有 next_action")
+        self.assertTrue(
+            result.get("no_feasible_candidates"),
+            "全部候选被拦下时没有如实报「无可行候选」",
+        )
+        self.assertTrue(
+            result.get("relaxation_hint"),
+            "无可行候选时没有给放松建议——那会让用户无从下手",
         )
 
     def test_i7_estimated_input_produces_at_least_one_conditional(self) -> None:

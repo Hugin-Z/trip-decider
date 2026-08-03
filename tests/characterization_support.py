@@ -169,8 +169,30 @@ def _guided_snapshot(
     except Exception as error:  # noqa: BLE001 - 表征测试要记录异常本身
         return {"error": f"{type(error).__name__}: {error}"}
 
+    # 准入过滤（能力 A v0）之后，「候选被拦下」也是一种判定结果——它必须进
+    # 表征，否则「本来有候选、后来一个都不剩」这类变化不会响。退回区是 I7
+    # 第 4 条要求的可见位置，同样进快照。
+    rejected = [
+        {
+            "name": entry.get("name"),
+            "token": entry.get("token"),
+            "reason": entry.get("reason"),
+            "next_action_kind": (entry.get("next_action") or {}).get("kind"),
+        }
+        for entry in result.get("rejected_candidates", [])
+    ]
+    if not result["options"]:
+        return {
+            "admitted_count": 0,
+            "rejected": rejected,
+            "no_feasible_candidates": result.get("no_feasible_candidates"),
+            "relaxation_hint": result.get("relaxation_hint"),
+            "conflict_details_visible": "来源A与来源B不一致" in repr(result),
+        }
     option = result["options"][0]
     return {
+        "admitted_count": len(result["options"]),
+        "rejected": rejected,
         "feasibility_status": option.get("feasibility_status"),
         "coarse_plan_status": option.get("coarse_plan_status"),
         "roundtrip_transport_status": (

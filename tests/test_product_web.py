@@ -655,7 +655,16 @@ class ProductWebContractTests(unittest.TestCase):
                 timeouts={"railway": 0.02},
             )
         self.assertLess(time.monotonic() - started, 0.12)
-        self.assertEqual(result["option_count"], 2)
+        # 超时的候选不进选区（拿不到车次就谈不上 Plan-backed），但**进退回区**
+        # 且原因是「查询超时」而不是「到不了」——两者都让 support 落到 unknown，
+        # 对用户的含义却完全不同：一个是我们没查完，一个是那地方没有车次。
+        self.assertEqual(result["option_count"], 0)
+        rejected = result["rejected_candidates"]
+        self.assertEqual(2, len(rejected), "超时的候选没有进退回区，直接消失了")
+        for entry in rejected:
+            self.assertEqual("railway_check_timed_out", entry["reason"])
+            self.assertEqual("auto_refetch", entry["next_action"]["kind"])
+        return
         for option in result["options"]:
             rail = next(
                 item

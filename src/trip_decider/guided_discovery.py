@@ -8,7 +8,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     wait,
 )
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import time
@@ -26,6 +26,7 @@ from trip_decider.evidence_core import (
 )
 from trip_decider.evidence_projection import project_domain, usable_fact_values
 from trip_decider.dynamic_discovery import dynamic_destination_seeds
+from trip_decider.reachability import assess_reachability
 from trip_decider.evidence_broker import (
     default_evidence_broker,
     EvidenceBroker,
@@ -460,11 +461,18 @@ def build_guided_comparison(
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    options = [
+    built = [
         options_by_id[str(seed["id"])]
         for seed in seeds
         if str(seed["id"]) in options_by_id
     ]
+    options, rejected = _admit_reachable(
+        built,
+        seeds=seeds,
+        checks=checks,
+        intent=intent,
+        now=read_at,
+    )
     reusable_evidence = {
         seed_id: {
             domain: check.evidence.to_dict()
@@ -483,6 +491,11 @@ def build_guided_comparison(
         "region_anchor": intent.destination_anchor,
         "expected_option_count": len(seeds),
         "option_count": len(options),
+        # I7 第 4 条：准入过滤的退回区，对外可见，每条带原样 token +
+        # reason + next_action。被拦下的候选**不是消失**，是换到落选区且可追问。
+        "rejected_candidates": rejected,
+        "no_feasible_candidates": not options,
+        "relaxation_hint": _relaxation_hint(rejected) if not options else None,
         "cancelled": (
             bool(should_cancel is not None and should_cancel())
         ),
@@ -496,6 +509,154 @@ def build_guided_comparison(
             "条件可行只表示值得继续核验，不等于详细行程已经可发布。",
         ],
     }
+
+
+#: 一次比较最多呈现几个候选。
+MAX_PRESENTED_OPTIONS = 3
+
+
+def _window_seconds(intent: TravelIntent) -> int:
+    try:
+        start = datetime.fromisoformat(str(intent.earliest_departure_at))
+        end = datetime.fromisoformat(str(intent.latest_return_at))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((end - start).total_seconds()))
+
+
+def _relaxation_hint(rejected: Sequence[Mapping[str, object]]) -> str:
+    """全池不可达时给放松建议，**不硬凑候选**。
+
+    「没有可行候选」是诚实的结论，比端出一个到不了的地方有用。建议按最常见的
+    拦截原因给——它来自本次实测的拦截统计，不是一句通用套话。
+    """
+
+    reasons = [str(item.get("reason") or "") for item in rejected]
+    if not reasons:
+        return "没有可用的候选种子，请检查种子目录配置。"
+    if reasons.count("net_playable_below_threshold") >= max(1, len(reasons) // 2):
+        return (
+            "候选都因为路上耗时过长被排除：可以延长行程窗，"
+            "或换一个离出发地更近的方向。"
+        )
+    return (
+        "候选都没有查到可用的往返车次：可以换出发地或日期，"
+        "也可能是这些方向暂时没有可查的直达铁路。"
+    )
+
+
+def _rejection_next_action(reason: str | None, check: object) -> Mapping[str, object]:
+    """退回项的 ``next_action``（I7 第 4 条）。
+
+    优先用证据自己的那条——它是内核按两轴算出来的，语义最准。证据侧没有
+    （例如根本没采到）时才现构造一条，让用户知道能做什么。
+    """
+
+    if reason == "railway_check_timed_out":
+        # 超时该给的是「再查一次」，不是「你来提供」——问题在我们这边。
+        return {
+            "kind": "auto_refetch",
+            "field_ref": "evidence.railway",
+            "data_type": "railway_schedule_fare",
+            "reason_code": "collector_timeout",
+            "actor": "system",
+            "blocking": True,
+            "detail": "查询该地车次超时，尚未得到结果；可以稍后重试。",
+        }
+    existing = getattr(check, "next_action", None)
+    if isinstance(existing, Mapping) and existing:
+        return dict(existing)
+    return {
+        "kind": "user_supply",
+        "field_ref": "evidence.railway",
+        "data_type": "railway_schedule_fare",
+        "reason_code": "no_source_found",
+        "actor": "user",
+        "blocking": True,
+        "detail": (
+            "未查到该地的往返车次，可能是站名解析问题；"
+            "你可以手动指定车站，或换一个日期再试。"
+        ),
+    }
+
+
+def _admit_reachable(
+    built: list[dict[str, object]],
+    *,
+    seeds: Sequence[Mapping[str, object]],
+    checks: Mapping[str, Mapping[str, object]],
+    intent: TravelIntent,
+    now: datetime,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """准入门槛 + 唯一排序判据（裁决 1、6），退回区满足 I7 第 4 条。
+
+    **过滤不是降权**：车次查不到、或净可玩时长不足的目的地不进候选集。
+    **但不是消失**：它们进退回区，带原样 token、reason 与 next_action。
+    两条规则的共同敌人是信息消失——候选卡上把 unknown 显示成可用，与候选集里
+    悄悄少一个地方，是同一种病的两个入口（`invariants.md` I7）。
+
+    **排序只按可达性**（净可玩时长），不合成总分：合成权重就是神秘匹配分，
+    而 `PLAN.md` §10 明文禁止。主题匹配只在候选卡上并列呈现。
+    """
+
+    window = _window_seconds(intent)
+    by_id = {str(seed["id"]): seed for seed in seeds}
+    admitted: list[tuple[int, str, dict[str, object]]] = []
+    rejected: list[dict[str, object]] = []
+    for option in built:
+        option_id = str(option.get("destination_id"))
+        check = checks.get(option_id, {}).get("railway")
+        item = (
+            check.evidence.to_dict()
+            if check is not None and getattr(check, "evidence", None) is not None
+            else None
+        )
+        verdict = assess_reachability(item, window_seconds=window, now=now)
+        option["reachability"] = verdict.as_payload()
+        # 超时不等于「到不了」。两者都让 support 落到 unknown，但对用户的含义
+        # 完全不同：一个是「这地方没有可查的车次」，一个是「我们没查完」。
+        # 退回区如实区分，否则用户会把一次超时读成一个结论。
+        timed_out = bool(getattr(check, "timed_out", False))
+        reason = (
+            "railway_check_timed_out"
+            if timed_out and not verdict.admitted
+            else verdict.reason
+        )
+        if verdict.admitted:
+            admitted.append(
+                (
+                    -(verdict.net_playable_seconds or 0),
+                    str(option.get("name") or ""),
+                    option,
+                )
+            )
+            continue
+        rejected.append(
+            {
+                "destination_id": option_id,
+                "name": str(
+                    by_id.get(option_id, {}).get("name") or option.get("name") or ""
+                ),
+                # 原样 token，不折叠（I7 第 3 条在退回项上同样成立）
+                "token": (
+                    getattr(check, "display_status", None)
+                    if check is not None
+                    else "unknown"
+                ),
+                "reason": reason,
+                "next_action": _rejection_next_action(reason, check),
+                "net_playable_seconds": verdict.net_playable_seconds,
+                # conflicting 的用例必须能看到「两个来源在哪一点上打架」
+                # （I7 判定方法）。退回区同样要带，否则信息还是消失了，
+                # 只是消失在另一个位置。
+                "conflict_details": list(
+                    getattr(getattr(check, "evidence", None), "conflict_details", ())
+                    or ()
+                ),
+            }
+        )
+    admitted.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in admitted[:MAX_PRESENTED_OPTIONS]], rejected
 
 
 def _coarse_option(

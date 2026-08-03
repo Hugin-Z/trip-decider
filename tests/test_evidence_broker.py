@@ -386,6 +386,10 @@ class EvidenceBrokerTests(unittest.TestCase):
             status=EvidenceStatus.SOURCED,
             value={
                 "marker": marker,
+                # 往返总时长：真实采集器恒产出它（intercity_rail.py:601），
+                # 候选准入要用它算净可玩时长。夹具此前没有，于是候选被准入
+                # 门槛拦下，这条用例读不到 options——夹具比真实证据缺了一块。
+                "roundtrip_duration_seconds": 21600,
                 "snapshot": {
                     "acquisition": "live_fetch",
                     "retrieved_at": collected,

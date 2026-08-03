@@ -336,6 +336,21 @@ def scan_decision_points(root: Path = SRC_ROOT) -> set[tuple[str, str]]:
                             _literal_of(node.args[0]),
                         )
                     )
+                elif name == "Reachability" and len(node.args) >= 2:
+                    # 判定点 4（准入过滤，§3.1 第 4 行）：每个
+                    # ``Reachability(admitted, reason, ...)`` 构造都是一次
+                    # 「进不进结果集」的判定。准入那一支没有 reason，用
+                    # ``admitted`` 占位，与非 blocker 输出的登记方式一致。
+                    reason = _literal_of(node.args[1])
+                    found.add(
+                        (
+                            _enclosing_function(tree, node),
+                            # 准入那一支的 reason 是 None（没有拒绝理由），
+                            # 登记为 `admitted`——与判定点 1、2 用输出变量名
+                            # 占位的方式一致。
+                            "admitted" if reason in {"None", ""} else reason,
+                        )
+                    )
                 continue
             outputs = DECISION_POINT_OUTPUTS.get(path.name, ())
             if not outputs:
