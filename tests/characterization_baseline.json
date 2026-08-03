@@ -6,7 +6,7 @@
         "往返交通时长为推算值，实际耗时可能不同"
       ],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -74,7 +74,7 @@
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -141,7 +141,7 @@
       "coarse_plan_status": "UNKNOWN",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 4,
+      "evidence_missing_count": 6,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -250,7 +250,7 @@
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -323,7 +323,7 @@
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -390,7 +390,7 @@
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -463,7 +463,7 @@
       "coarse_plan_status": "INFEASIBLE_NO_TRANSPORT",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 4,
+      "evidence_missing_count": 6,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -538,7 +538,7 @@
       "coarse_plan_status": "UNKNOWN",
       "conditions": [],
       "conflict_details_visible": true,
-      "evidence_missing_count": 4,
+      "evidence_missing_count": 6,
       "evidence_statuses": [
         {
           "conflict_details": [
@@ -621,7 +621,7 @@
         "往返交通时长为推算值，实际耗时可能不同"
       ],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -689,7 +689,7 @@
       "coarse_plan_status": "UNKNOWN",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 4,
+      "evidence_missing_count": 6,
       "evidence_statuses": [
         {
           "domain": "railway",
@@ -767,7 +767,7 @@
       "coarse_plan_status": "CONDITIONALLY_FEASIBLE",
       "conditions": [],
       "conflict_details_visible": false,
-      "evidence_missing_count": 3,
+      "evidence_missing_count": 5,
       "evidence_statuses": [
         {
           "domain": "railway",

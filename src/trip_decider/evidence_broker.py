@@ -379,8 +379,6 @@ def _stale_projection(
             train = normalized.get(direction)
             if isinstance(train, Mapping):
                 stale_train = deepcopy(dict(train))
-                stale_train["schedule_status"] = "STALE"
-                stale_train["fare_status"] = "STALE"
                 for key in tuple(stale_train):
                     if "availability" in str(key).lower():
                         stale_train[key] = "UNKNOWN"
@@ -395,7 +393,6 @@ def _stale_projection(
                     stale_routes.append(deepcopy(route))
                     continue
                 stale_route = deepcopy(dict(route))
-                stale_route["schedule_status"] = "STALE"
                 stale_route["retrieved_at"] = record.collected_at
                 if "fare" in stale_route:
                     stale_route["fare"] = {

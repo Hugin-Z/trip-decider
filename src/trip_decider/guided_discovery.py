@@ -20,6 +20,7 @@ from trip_decider.evidence_core import (
     SUPPORT_UNKNOWN,
     is_confirmed_absent,
     normalized_retrieved_at,
+    token_support,
     recovery_safe,
     token_freshness,
 )
@@ -564,9 +565,12 @@ def _coarse_option(
     ]
     if not rail_sourced:
         missing.insert(0, "可用的往返铁路时刻与票价")
-    if checks["map"].display_status == "MISSING":
+    # 这里曾拿 token 比 "MISSING"——那是 C 套词表的字面量，token 词表里
+    # 根本没有它，两个分支因此**恒假**：缺失的地图/网页核验从来没被列进去。
+    # 轴上说「没有支撑」叫 unknown。
+    if token_support(checks["map"].display_status) == SUPPORT_UNKNOWN:
         missing.append("目的地地图核验")
-    if checks["web"].display_status == "MISSING":
+    if token_support(checks["web"].display_status) == SUPPORT_UNKNOWN:
         missing.append("景点开放时间和门票网页核验")
     return {
         "destination_id": seed["id"],

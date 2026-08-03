@@ -810,7 +810,6 @@ def submit_evidence(
             details={
                 "tool": action_id,
                 "support": "sourced",
-                "snapshot_status": "STALE",
                 "availability": (
                     "UNKNOWN" if action_id == "railway" else None
                 ),
@@ -1232,8 +1231,9 @@ def _stale_railway_evidence(
         train = value.get(direction)
         if isinstance(train, Mapping):
             normalized_train = deepcopy(dict(train))
-            normalized_train["schedule_status"] = "STALE"
-            normalized_train["fare_status"] = "STALE"
+            # schedule_status / fare_status 不再写：它们落盘时按 _status
+            # 后缀被剪掉，是写了没人读的死字段。余票哨兵留着——它有真作用，
+            # 经推导变成字段级 unknown（见三段链路测试）。
             normalized_train["second_class_availability"] = "UNKNOWN"
             value[direction] = normalized_train
     value["refresh_failure"] = {
@@ -1261,8 +1261,9 @@ def _stale_generic_evidence(
             "evidence fallback requires prior sourced evidence"
         )
     value = business_view(previous)
+    # 只留采集时刻。旧代码还写 status="STALE"——freshness 是读取时刻的函数，
+    # 冻进盘里就是 I5 违反，而 freshness 键本身在 I1 的禁用集里。
     value["freshness"] = {
-        "status": "STALE",
         "retrieved_at": _latest_retrieved_at(previous.sources),
     }
     value["refresh_failure"] = {
@@ -1276,7 +1277,6 @@ def _stale_generic_evidence(
                 stale_routes.append(deepcopy(route))
                 continue
             normalized_route = deepcopy(dict(route))
-            normalized_route["schedule_status"] = "STALE"
             if "fare" in normalized_route:
                 normalized_route["fare"] = {
                     "status": "unknown",
