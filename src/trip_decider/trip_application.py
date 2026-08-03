@@ -41,6 +41,11 @@ from trip_decider.evidence_broker import (
 )
 from trip_decider.guided_discovery import build_guided_comparison
 from trip_decider.evidence_projection import business_view
+from trip_decider.destination_runtime import (
+    collect_map_evidence,
+    collect_railway_evidence,
+)
+from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.travel_agent import (
     default_agent_store,
     AgentRun,
@@ -290,6 +295,36 @@ class TripApplicationService:
             evidence_broker=self.evidence_broker,
         )
         return ApplicationOutcome(run_id, action_loop=action_state)
+
+    def live_refetcher(self, run_id: str):
+        """读时同步重采的生产采集器（`freshness-policy.md` §5.1）。
+
+        绑定到具体 run：解析步只传 ``(domain, item)``，而采集器要 intent。
+        返回 ``None`` 表示这个域没有可用的实采途径——解析步据此按失败降级，
+        不会当成「采到了空」。
+
+        采集失败**照常抛**，由解析步归入降级并写 ``refresh_failure``；
+        这里不吞异常，否则失败与「没有采集器」在解析步看来一模一样。
+        """
+
+        try:
+            intent = self.store.get_run(run_id).intent
+        except TravelAgentError:
+            return None
+
+        collectors = {
+            "railway": collect_railway_evidence,
+            "map": collect_map_evidence,
+            "web": collect_live_destination_profile,
+        }
+
+        def refetch(domain: str, item: Mapping[str, object]):
+            collector = collectors.get(domain)
+            if collector is None:
+                return None
+            return collector(intent).to_dict()
+
+        return refetch
 
     def record_refetched_evidence(
         self,

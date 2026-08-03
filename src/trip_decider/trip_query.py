@@ -59,6 +59,7 @@ class TripQueryService:
         application_service: TripApplicationService | None = None,
         clock: Clock | None = None,
         refetcher: object = None,
+        live_refetch: bool = False,
     ) -> None:
         store = store if store is not None else default_agent_store()
         if application_service is None:
@@ -79,6 +80,10 @@ class TripQueryService:
         # 采集器住在上层模块，读取层导入它们会成环，也会把只读的读取层
         # 变成能自己发网络请求的东西——与内核「策略由调用方注入」同理。
         self._refetcher = refetcher
+        # 生产路径按 run 绑定采集器（解析步只传 (domain, item)，
+        # 采集器要 intent）。测试注入的 `refetcher` 优先，便于
+        # 用假采集器观察行为。
+        self._live_refetch = live_refetch
 
     def _compile_evidence(
         self,
@@ -99,6 +104,15 @@ class TripQueryService:
         if intent is not None:
             evidence["user_input"] = user_input_evidence(intent).to_dict()
         return evidence
+
+    def _refetcher_for(self, run_id: str):
+        """本次读取要用的重采器。``None`` = 不重采。"""
+
+        if self._refetcher is not None:
+            return self._refetcher
+        if not self._live_refetch:
+            return None
+        return self.application_service.live_refetcher(run_id)
 
     def _flush_pending(
         self,
@@ -157,11 +171,12 @@ class TripQueryService:
         # 解析步的**装载点三**：evidence/current.json（动作循环维护的证据表）。
         # 它与 run.result["context"]["evidence"] 是两份独立落盘的副本，写回只对
         # 这一份生效——两份的权威归属见 freshness-policy.md §5.2.3。
-        if self._refetcher is not None:
+        trip_refetcher = self._refetcher_for(run_id)
+        if trip_refetcher is not None:
             resolved = resolve_stale_evidence(
                 dict(evidence),
                 now=read_at,
-                refetcher=self._refetcher,
+                refetcher=trip_refetcher,
             )
             evidence = resolved.items
             self._flush_pending(run_id, resolved.pending_writes)
@@ -336,7 +351,8 @@ class TripQueryService:
         #
         # 预算按整次读取算，不是按目的地：候选比较有 N 个目的地，逐个给 8 秒
         # 会把一次页面刷新拖成 N×8 秒。
-        if self._refetcher is not None:
+        candidates_refetcher = self._refetcher_for(run_id)
+        if candidates_refetcher is not None:
             deadline = time.monotonic() + REFETCH_BUDGET_SECONDS
             refreshed: dict[str, Mapping[str, object]] = {}
             pending: list[tuple[str, Mapping[str, object]]] = []
@@ -351,7 +367,7 @@ class TripQueryService:
                         if isinstance(item, Mapping)
                     },
                     now=read_at,
-                    refetcher=self._refetcher,
+                    refetcher=candidates_refetcher,
                     budget_seconds=max(0.0, deadline - time.monotonic()),
                 )
                 refreshed[destination_id] = {**dict(domains), **resolved.items}
@@ -433,7 +449,7 @@ class TripQueryService:
             run.result,
             now=read_at,
             evidence=self._compile_evidence(run_id, run),
-            refetcher=self._refetcher,
+            refetcher=self._refetcher_for(run_id),
         )
         # 读取层不落盘：待写回交给应用层——唯一的写入协调者（§5.2.2）。
         self._flush_pending(run_id, verdict.pending_writes)

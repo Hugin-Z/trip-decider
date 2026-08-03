@@ -140,6 +140,7 @@ def _query_service() -> TripQueryService:
     return TripQueryService(
         store=_active_store(),
         application_service=application,
+        live_refetch=_LIVE_REFETCH,
     )
 
 
@@ -935,6 +936,24 @@ class ProductHandler(BaseHTTPRequestHandler):
         self._send_json(response_status, result)
 
 
+#: 读时同步重采的总开关（`freshness-policy.md` §5.1）。
+#:
+#: **默认关，由进程入口 `main()` 打开。** 不在 `TripQueryService` 或
+#: `build_trip_services` 里默认开——那两个是测试也在用的构造点，默认开会让
+#: 一次普通的读取真的去打 12306 与高德。实测过：在共享工厂里开，套件从 20 秒
+#: 变成 60 秒，多出来的全是网络等待。
+#:
+#: 判据是「谁在跑」而不是「构造了什么」：真实进程要重采，测试不要。
+_LIVE_REFETCH = False
+
+
+def enable_live_refetch(enabled: bool = True) -> None:
+    """由进程入口调用。测试若要观察生产开关，显式调它并在结束时还原。"""
+
+    global _LIVE_REFETCH
+    _LIVE_REFETCH = enabled
+
+
 def make_server(host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), ProductHandler)
 
@@ -950,6 +969,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     arguments = _parser().parse_args()
+    # 真实进程才重采：读时同步重采会打 12306 与高德（freshness-policy.md §5.1）。
+    enable_live_refetch(True)
     server = make_server(arguments.host, arguments.port)
     host, port = server.server_address
     print(f"trip-decider local product: http://{host}:{port}/")

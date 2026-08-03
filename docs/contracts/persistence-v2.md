@@ -146,10 +146,10 @@
 | `result.context.evidence[]` | **改为 §1.3 的 facts 形状** |
 | `result.planning_state` | **删除**。读时重算，见 §6 |
 | `result.planning_draft.display_status` / `displayable` | **删除** |
-| `result.context.evidence` | **删除，改为 `evidence_refs`**（2026-08-03 裁决「A 收敛进 B」）。目标形状与 `plan-NNNN.json` 一致——那条路径 P4 已经这么做了（`travel_agent._plan_version_context`），本次把 `run.json` 拉齐。**规格已定，实现未落地**，改动面见 §2.1.1 |
+| `result.context.evidence` | **删除，改为 `evidence_refs`**（2026-08-03 裁决「A 收敛进 B」，**已落地**）。与 `plan-NNNN.json` 同形，两条写入路径共用 `travel_agent.trimmed_context`。证据的权威容器是 `evidence/current.json` |
 | `error_detail` | **P5 轮 2 新增顶层字段**（`str \| None`）。只存逃出来的异常类名。与 `error_code` 是两段式的两段：码收敛为有限词表（`travel_agent.RUN_ERROR_CODES`，15 个取值），类型名挪到这里，取值域因此从「每个可能的异常类名」变回可穷举。I1 白名单已登记理由（失败时刻的事实，非展示态）。**读侧兼容**：旧文件无此键，缺省 `None`；旧 `error_code`（`EXECUTOR_TRAVELAGENTERROR` 之类）照常读回，不校验——校验只在写入口 `fail()` / `block()` |
 
-### 2.1.1 A 收敛进 B 的改动面（**规格，未实现**）
+### 2.1.1 A 收敛进 B 的改动面（**已完结**，2026-08-03 轮 9）
 
 裁决：`run.result["context"]["evidence"]`（容器 A）删除，读取改经
 `evidence/current.json`（容器 B）。理由见 `freshness-policy.md` §5.2.3——
@@ -186,19 +186,20 @@ A 与 B 目前靠「都从同一个 `state.evidence` 写出」保持一致，那
 domain="user_input", value=intent.to_dict())` 现造的。重建即可，顺带再消灭一份
 副本。**此项待批**。
 
-**执行进度（2026-08-03，轮 8）**：读取侧全部完成——4 个读取点都改吃容器 B，
-`user_input` 按 `travel_agent.user_input_evidence` 重建，守卫 4 已钉住「两面读
-同一份」。**写入侧未做**：A 仍然内联证据，但**已无人读它**，是死数据。
+**完结记录（2026-08-03）**：读取侧 4 点、写入侧 3 点全部落地，`user_input`
+改为从 `run.intent` 重建。守卫：`test_read_entrances_do_not_fork`（两面读同一份）、
+`test_context_trimming_is_one_shape`（两处裁剪同形）、
+`test_revision_chain_after_convergence`（A12 链路）、
+`test_persisted_round_trip_keeps_verdicts`（往返对象改为容器 B，含恒真检查）。
 
-剩余一步是删掉这份死数据，代价是 13 条测试要跟着改（它们直接断言
-`result["context"]["evidence"]` 的旧形状，或调 `plan_verdict_from_result` /
-`recomputed_planning_state` 时不带 evidence）。其中 12 条是机械替换，
-**1 条需要判断**：`tests/test_persisted_round_trip_keeps_verdicts` 断言的是
-证据经落盘往返后 verdict 不变，而它取证据的地方正是要删的那份——改成读 B
-是对的，但「往返」的语义要重新想清楚，不能顺手替换。
+**裁剪必须幂等**：重排链路会把上一版（已裁剪的）context 再传一遍，无条件覆盖
+`evidence_refs` 会在第二次裁剪时把它清空。实现用 `setdefault`——这条是
+`test_context_trimming_is_one_shape` 第一次跑就抓到的真 bug。
 
-**表征预期**：会响。`result.context` 形状变更影响落盘快照；逐条核对必须确认
-变化只落在 context 的证据键上，判定结论零变化（D8）。
+**表征实测：零 diff。** 与预期的「会响」不同，原因是 `result.context` 不在表征
+快照的取值范围内——表征取的是判定结论（planning_state / blockers / token），
+而收敛只改证据的存放位置，不改任何结论。这正是 D7 说的「先问这类变化归哪层管」：
+形状变更归单测与往返守卫，不归表征。
 
 **当前 I1 命中：150 处**（`timing_status`×110、`schedule_status`×14、`evidence_status`×9、`snapshot_status`×8、`planning_state`×3、值类若干）。
 
