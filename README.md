@@ -134,18 +134,25 @@ status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=rep
 
 ## 验证状态
 
-当前仓库已机械复核：
+机械复核（2026-08-03，P5 轮 3）：
 
-- tests：210；
-- schemas：11；
-- fixture directories / embedded documents / dirty cases：7 / 40 / 7；
+- tests：305（1 条预期失败，登记在 `tests/invariant_ledger.json`：I4 等
+  `hotel_price` 生产者）；
+- fixture directories：9；
 - 演示 network / LLM calls：0 / 0。
+
+**本次未重新核对**：`fixtures/` 内部的 embedded documents / dirty cases 计数，
+以 [`fixtures/README.md`](fixtures/README.md) 的表为准，不在这里抄第二份（D19）。
+
+**已删除的条目**：原先此处的「schemas：11」指 `schemas/` 目录，该目录在 P4-a
+截肢（`c7cbd50`）时整档删除，这行数字自那时起就没有指代对象。原「tests：210」
+写于 `dfa6136`，之后再没跟过——这正是 D1 说的那种过期数字：没有任何东西会因为
+它错了而响。
 
 ## 项目结构
 
 - [`src/trip_decider/`](src/trip_decider/)：离线运行时与阶段边界；
-- [`schemas/`](schemas/)：artifact JSON Schema；
-- [`fixtures/`](fixtures/)：合成合同案例与真实 replay anchor；
+- [`fixtures/`](fixtures/)：合成合同案例、真实 replay anchor、宿主实测夹具；
 - [`examples/`](examples/)：可直接运行的公开输入；
 - [`scripts/`](scripts/)：演示和独立验证入口；
 - [`docs/reviews/`](docs/reviews/)：可复核的工作单元 Review 证据。

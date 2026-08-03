@@ -108,6 +108,37 @@ RUN_ERROR_CODES: frozenset[str] = frozenset(
 )
 
 
+#: 可重试的阻塞码。目前只有一个：候选比较拿不到活体证据。
+#:
+#: 单列成名单而不是在两个状态守卫里各写一次字面量，是因为「哪些阻塞态还有出路」
+#: 是一份**名单**，而名单与按名单操作的函数必须同居（D5）。下一次要放行新的阻塞
+#: 码时改这里一处，两个守卫同时跟上。
+RETRYABLE_BLOCK_CODES: frozenset[str] = frozenset(
+    {"GUIDED_COMPARISON_UNAVAILABLE"}
+)
+
+
+def _is_retryable_comparison_block(run: AgentRun) -> bool:
+    """这个 BLOCKED 还有出路吗。
+
+    宿主实测（2026-08-03）撞出的死锁：比较代理抛 ``TravelAgentError`` 之后
+    ``store.start`` 要 CONFIRMED、``continue_with_intent`` 要 COMPLETED，两个
+    守卫合起来把 BLOCKED 变成终局，run 再也出不来。用户唯一的出路是改写
+    ``destination_expression`` 触发另一条分类分支——**用话术绕过状态机**。
+
+    放行的范围刻意窄：只有 ``RETRYABLE_BLOCK_CODES`` 里的码，且必须是发现型
+    任务。别的阻塞态各有各的恢复通道（DIRECT_PLAN 走
+    ``restart_action_loop_for_intent``），不在这里一并放开。
+    """
+
+    return (
+        run.status is RunStatus.BLOCKED
+        and run.error_code in RETRYABLE_BLOCK_CODES
+        and run.intent.task_mode
+        in {TaskMode.GUIDED_DISCOVERY, TaskMode.OPEN_DISCOVERY}
+    )
+
+
 def _require_registered_error_code(code: str) -> None:
     """写入口守门：未注册的码直接抛，不静默放行。
 
@@ -1094,7 +1125,9 @@ class InMemoryAgentStore:
     def start(self, run_id: str) -> AgentRun:
         with self._condition:
             run = self._required_run(run_id)
-            if run.status is not RunStatus.CONFIRMED:
+            if run.status is not RunStatus.CONFIRMED and not (
+                _is_retryable_comparison_block(run)
+            ):
                 raise TravelAgentError("run must be confirmed before execution")
             run.status = RunStatus.RUNNING
             run.started_at = _now()
@@ -1176,7 +1209,12 @@ class InMemoryAgentStore:
 
         with self._condition:
             run = self._required_run(run_id)
-            if run.status is not RunStatus.COMPLETED:
+            # BLOCKED 曾是终局，那正是宿主实测撞上的死锁：比较失败之后没有任
+            # 何状态迁移能把 run 带出来。放行的是**一个具体的、带出路的**阻塞
+            # 态，不是所有阻塞态——见 _is_retryable_comparison_block。
+            if run.status is not RunStatus.COMPLETED and not (
+                _is_retryable_comparison_block(run)
+            ):
                 raise TravelAgentError(
                     "only a completed run can continue with a selection"
                 )

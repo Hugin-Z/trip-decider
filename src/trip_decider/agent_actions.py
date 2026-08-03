@@ -43,6 +43,7 @@ from trip_decider.evidence_broker import (
     query_for_intent_domain,
 )
 from trip_decider.itinerary_planner import (
+    RAIL_EVENT_REQUIRED_TRAIN_FIELDS,
     plan_destination_context,
     validate_destination_plan,
 )
@@ -64,6 +65,7 @@ from trip_decider.travel_agent import (
     InMemoryAgentStore,
     NON_BUSINESS_ERRORS,
     RunStatus,
+    TaskMode,
     TravelAgentError,
     TravelIntent,
     atomic_runtime_json as _atomic_runtime_json,
@@ -75,6 +77,29 @@ from trip_decider.travel_agent import (
 
 _DOMAINS = ("railway", "web", "map")
 _ACTION_ORDER = ("railway", "web", "map", "planner")
+
+#: 铁路证据里「一个方向」的两个方向名。规划器按这两个键找车次。
+_RAIL_DIRECTIONS = ("outbound", "return")
+
+#: 手工填写车次动作的必填项，**从消费端常量派生**，不手写。
+#:
+#: 宿主实测的 P0 就出在这里手写过一份：声明 ``outbound``/``return``/``fare``/
+#: ``source``，而消费端按 ``origin_station`` 等五个键直取。宿主照声明填满四个
+#: 键，四层校验全过，Planner 随即 KeyError（D2：声明点与消费点必须同一张表
+#: 核对后一起改；D20：能由数据形状保证的，不留给代码自律）。
+RAILWAY_MANUAL_REQUIRED_FIELDS: tuple[str, ...] = tuple(
+    f"{direction}.{field}"
+    for direction in _RAIL_DIRECTIONS
+    for field in RAIL_EVENT_REQUIRED_TRAIN_FIELDS
+)
+
+#: 消费端用 ``.get()`` 取的字段：缺席被容忍，落到「未知」而不是拒绝提交。
+#: 与必填项分开声明，宿主才知道哪些值得补、哪些不补也能出方案。
+RAILWAY_MANUAL_OPTIONAL_FIELDS: tuple[str, ...] = tuple(
+    f"{direction}.{field}"
+    for direction in _RAIL_DIRECTIONS
+    for field in ("second_class_fare_cny_per_person", "second_class_availability")
+)
 
 
 @dataclass
@@ -475,6 +500,7 @@ def get_next_actions(
                 _mapping_list(result, "blocked_domains")
             ),
             reason=run.error_code,
+            recovery=_blocked_recovery(run, result),
         )
     if run.status is RunStatus.FAILED:
         return _snapshot(
@@ -810,6 +836,9 @@ def submit_evidence(
         if action_id == "web":
             # 校验吃重建后的业务字段视图：落盘是 facts 数组。
             _validate_web_value(usable_fact_values(merged.facts))
+        if action_id == "railway":
+            # 同上，且必须在**投影之后**校验——见 _validate_railway_value。
+            _validate_railway_value(usable_fact_values(merged.facts))
         state.evidence[item.domain] = merged
         state.last_sourced_evidence[item.domain] = merged
         state.action_status[action_id] = "completed"
@@ -1220,12 +1249,11 @@ def _manual_railway_action(
             "earliest_departure_at": intent.earliest_departure_at,
             "latest_return_at": intent.latest_return_at,
         },
-        "required_fields": [
-            "outbound",
-            "return",
-            "fare",
-            "source",
-        ],
+        # 必填/可选都从消费端常量派生。旧版在这里手写了四个键
+        # （outbound/return/fare/source），与消费端各说各话——宿主照着填满
+        # 仍然 KeyError（D2）。
+        "required_fields": list(RAILWAY_MANUAL_REQUIRED_FIELDS),
+        "optional_fields": list(RAILWAY_MANUAL_OPTIONAL_FIELDS),
     }
 
 
@@ -2013,6 +2041,57 @@ def _plan_followup_actions(
     return actions
 
 
+def _validate_railway_value(value: Mapping[str, object]) -> None:
+    """铁路证据的提交门：**校验通过 = Planner 消费必成功**（I12）。
+
+    校验吃的是 ``usable_fact_values(item.facts)``——**与规划器读的是同一个
+    视图**，不是落盘形状也不是提交时的原始 mapping。这一点是本函数的全部要害：
+    字段级投影会把 support 不可用的字段整个丢掉，只有在投影之后才看得见规划器
+    实际拿得到什么。在原始 mapping 上校验会放行一份「投影后缺键」的证据，门就
+    又比消费松了。
+
+    放行三类，各有理由：
+
+    * **两个方向都缺席** —— 已有的 ``RAILWAY_INPUT_UNAVAILABLE`` /
+      ``RAILWAY_{}_MISSING`` 判定点负责，是规划结论不是提交错误；
+    * **单个方向整体缺席** —— 同上，该方向排不出事件，另一个方向照排；
+    * **已核实无直达**（``confirmed_absent``）—— 确定结论，本来就没有车次。
+
+    拦一类：**方向在场但排不出事件**。这类过了门只会死在屋里，且报错位置
+    （``make_rail_event`` 的 KeyError）与病因（提交少了键）隔着整条链路。
+    报错逐个点名缺哪个方向的哪个键——宿主实测时拿到的是
+    ``PLANNER_ACTION_FAILED``，从那句话推不回来该补什么。
+    """
+
+    if value.get("kind") == "confirmed_absent":
+        return
+    problems: list[str] = []
+    for direction in _RAIL_DIRECTIONS:
+        train = value.get(direction)
+        if train is None:
+            continue
+        if not isinstance(train, Mapping):
+            problems.append(f"{direction} 不是对象")
+            continue
+        missing = [
+            field
+            for field in RAIL_EVENT_REQUIRED_TRAIN_FIELDS
+            if train.get(field) is None
+        ]
+        if missing:
+            problems.append(
+                f"{direction} 缺少 "
+                + "、".join(f"{direction}.{field}" for field in missing)
+            )
+    if problems:
+        raise TravelAgentError(
+            "railway evidence cannot be scheduled: "
+            + "；".join(problems)
+            + "。必填项："
+            + "、".join(RAILWAY_MANUAL_REQUIRED_FIELDS)
+        )
+
+
 def _validate_web_value(value: object) -> None:
     if not isinstance(value, Mapping):
         raise TravelAgentError("web evidence value must be an object")
@@ -2101,6 +2180,54 @@ def _timeout_actions(
         store=store,
         stalled=True,
     )
+
+
+def _blocked_recovery(
+    run: object,
+    result: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """BLOCKED 快照上的出路清单。**空列表也是答案**——但要是真的没有出路。
+
+    宿主实测（2026-08-03）两个 P0 共用同一个体验症状：run 停了，只给一个错误码
+    （``PLANNER_ACTION_FAILED`` / ``GUIDED_COMPARISON_UNAVAILABLE``），没有任何
+    地方写着「接下来能做什么」。宿主于是靠试——试到的那条是改写
+    ``destination_expression`` 绕状态机。
+
+    出路是**代码里真有的迁移**，不是安慰话：每条都点名入口函数，与实现里的
+    状态守卫一一对应。写不出入口的就不写（D14：存在性不冒充可用性）。
+    """
+
+    declared = result.get("recovery")
+    if isinstance(declared, list) and declared:
+        # 比较失败那一支自己写好了出路（_failed_comparison_result），原样透传，
+        # 不在这里重述——两份会各改各的（D19）。
+        return [dict(item) for item in declared if isinstance(item, Mapping)]
+
+    intent = getattr(run, "intent", None)
+    task_mode = getattr(intent, "task_mode", None)
+    if task_mode is not TaskMode.DIRECT_PLAN:
+        return []
+    # DIRECT_PLAN 的阻塞有两条真出路，都在 trip_application 里：
+    # submit_run_evidence 与 execute_trip 各自在 BLOCKED 时调
+    # restart_action_loop_for_intent。
+    blocked = list(_mapping_list(result, "blocked_domains"))
+    return [
+        {
+            "kind": "resubmit_evidence",
+            "entrypoint": "submit_trip_evidence",
+            "arguments": {"run_id": "<本 run>"},
+            "detail": (
+                "重新提交修正后的证据，动作循环会就地重启并继续。"
+                + (f"当前受阻的域：{'、'.join(blocked)}。" if blocked else "")
+            ),
+        },
+        {
+            "kind": "restart_action_loop",
+            "entrypoint": "advance_trip_task",
+            "arguments": {"run_id": "<本 run>"},
+            "detail": "不改证据，直接让动作循环重跑一轮。",
+        },
+    ]
 
 
 def _snapshot(

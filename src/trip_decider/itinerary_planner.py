@@ -488,6 +488,32 @@ def make_transit_event(
     )
 
 
+#: ``make_rail_event`` 逐个**直取**的车次字段——缺任何一个都会 KeyError。
+#:
+#: 它是「一个方向排得出车次事件」的充要字段集，三个地方共用同一份：
+#:
+#: * 提交门（``agent_actions._validate_railway_value``）按它拦；
+#: * 手工填写动作的 ``required_fields`` 按它派生；
+#: * 编译器（``planning_input_compiler._compile_railway``）按它判定该方向
+#:   是否排得出事件，排不出就退回 ``RAILWAY_{}_MISSING``。
+#:
+#: 常量存在的理由是宿主实测的 P0：声明说要 ``outbound``/``return``/``fare``/
+#: ``source``，消费按 ``origin_station`` 取值，四个键全给了照样 KeyError。
+#: 两张表不是一张，就会有「过了门死在屋里」（D2）。
+#:
+#: ``.get()`` 取的字段**不进这里**（票价、余票）：它们缺席是被容忍的，
+#: 写进必填集会把可容忍的缺失升级成硬拒绝。
+#: 新增直取字段而不同步本常量会让
+#: ``test_invariant_i12_validated_evidence_never_crashes_planner`` 转红。
+RAIL_EVENT_REQUIRED_TRAIN_FIELDS: tuple[str, ...] = (
+    "train_code",
+    "departure_at",
+    "arrival_at",
+    "origin_station",
+    "destination_station",
+)
+
+
 def make_rail_event(
     *,
     event_id: str,
@@ -2510,6 +2536,7 @@ __all__ = [
     "EVENT_TYPES",
     "PACE_PROFILES",
     "PLANNER_DEFAULTS",
+    "RAIL_EVENT_REQUIRED_TRAIN_FIELDS",
     "at_date_time",
     "conditional_conflict",
     "evaluate_pace",

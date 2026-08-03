@@ -39,9 +39,10 @@
     "I8",
     "I11",
     "I1",
-    "I9"
+    "I9",
+    "I12"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。余下只有 I4，等 hotel_price 生产者（P5 轮 3）。",
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1；I12 于 P5 轮 3（增列即绿，见下）。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。余下只有 I4，等 hotel_price 生产者。",
   "lifecycle": {
     "I1": {
       "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
@@ -75,6 +76,16 @@
       "closed_by": "移目录，不放宽判定",
       "note": "转绿动作是把 destination_catalog.json 整档移到 examples/（白名单目录）。扫描范围、种子清单、白名单三者都没动——判定与 P1 写下时逐字相同。移动前实测该文件在 src/ 下零读取点：唯一读者 destination_discovery.py 早已删除，pyproject 的 package-data 只收 *.html，它从来没被打进包，因此没有读取路径要同步。转绿后按 D6 做了负向验证：往 trip_query.py 注入一个地名，扫描器如实报出文件、行号与命中的地名。",
       "ledger_note_was_stale": "本条目删除前的 failing_assertion 还写着「src/trip_decider/web/index.html 命中『武汉』」，而实测失败信息里早已只剩 catalog 一个文件——index.html 在此前某一批被顺手清掉时没有回头改这行登记。登记文本不参与断言（元测试只比 test_id 集合），所以它错了没有任何东西会响。记在这里是因为它正是 D1 说的那种过期数字。"
+    },
+    "I12": {
+      "statement": "凡通过 evidence 校验的提交，Planner 消费不得抛异常（invariants.md I12）",
+      "defined_at": "P5 轮 3",
+      "green_at": "P5 轮 3",
+      "never_red": "增列即绿——它不是「先写测试后修实现」的那类，而是首次真实宿主实测暴露出一整类此前无人守的缺陷后补上的守卫。测试先按事故形状写红（KeyError 逃逸），修完即绿，中间没有跨阶段的红期，故不入 entries。",
+      "incident": "宿主按 railway_manual 声明的 required_fields（outbound/return/fare/source）手工提交，四层校验全过、事件流写「取得有效证据」，make_rail_event 随即 KeyError: 'origin_station'，run 落 PLANNER_ACTION_FAILED 且不再派发动作。",
+      "root_cause": "声明点与消费点是两张表（D2 的变体）。声明四个键，消费按 train_code/departure_at/arrival_at/origin_station/destination_station 五个键逐个直取。",
+      "closed_by": "三个消费点共用 itinerary_planner.RAIL_EVENT_REQUIRED_TRAIN_FIELDS 一份常量：提交门、手工动作 required_fields、编译器的方向可排程判定。AST 守卫断言 make_rail_event 的直取键集合等于该常量，防将来漂移。",
+      "side_effect": "提交门落地当天就抓到仓内第二处同类形状漂移：tests/test_evidence_broker.py 的 _rail 夹具两个方向只有 schedule_status/fare_status/second_class_availability 三个键，一个可排程字段都没有，而真实采集器恒产出五个。该夹具此前已因「比真实证据少东西」修过一次（roundtrip_duration_seconds）。"
     },
     "P4c_closed": {
       "closed_at": "2026-08-03",

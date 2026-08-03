@@ -28,6 +28,8 @@ from trip_decider.travel_agent import (
     TravelIntent,
 )
 
+from tests.evidence_factory import railway_value
+
 
 class EvidenceBrokerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -394,16 +396,15 @@ class EvidenceBrokerTests(unittest.TestCase):
                     "acquisition": "live_fetch",
                     "retrieved_at": collected,
                 },
-                "outbound": {
-                    "schedule_status": "LIVE",
-                    "fare_status": "LIVE",
-                    "second_class_availability": "有",
-                },
-                "return": {
-                    "schedule_status": "LIVE",
-                    "fare_status": "LIVE",
-                    "second_class_availability": "有",
-                },
+                # 两个方向按**生产端形状**给全（persistence-v2.md §10）。
+                # 此前这里只有三个键，一个可排程字段都没有——而真实采集器
+                # （intercity_rail._train_payload）恒产出车次号、起讫站与
+                # 起讫时刻。P5 轮 3 加提交门时这条用例红了，红得对：夹具比真实
+                # 证据缺了一块，缺的正好是 Planner 逐个直取的那一块。
+                # 这已是同一个夹具第二次因为「比真实证据少东西」而出问题
+                # （上一次是 roundtrip_duration_seconds，见上面的注记）。
+                "outbound": dict(railway_value()["outbound"]),
+                "return": dict(railway_value()["return"]),
             },
             sources=(
                 {

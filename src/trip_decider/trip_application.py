@@ -33,6 +33,7 @@ from trip_decider.destination_runtime import (
     collect_railway_evidence,
     revise_destination_result,
 )
+from trip_decider.adapters.contracts import stable_identifier
 from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.evidence_core import recovery_safe
 from trip_decider.evidence_broker import (
@@ -178,6 +179,20 @@ class TripApplicationService:
                 accepted=True,
                 action_loop=action_state,
             )
+        # 比较失败的发现型 run 可以重试。旧代码在这里一路落到「未确认」，
+        # 于是 GUIDED_COMPARISON_UNAVAILABLE 是个终局：三个入口全堵，宿主只
+        # 剩改话术一条路。活体候选检索的失败常常是一次性的，重试是真出路，
+        # 也是 _failed_comparison_result 明写在 recovery 里的第一条。
+        if (
+            run.status is RunStatus.BLOCKED
+            and run.error_code == "GUIDED_COMPARISON_UNAVAILABLE"
+            and run.intent.task_mode
+            in {TaskMode.GUIDED_DISCOVERY, TaskMode.OPEN_DISCOVERY}
+        ):
+            return self._start_candidate_comparison(
+                run_id,
+                run.intent.task_mode,
+            )
         if run.status is not RunStatus.CONFIRMED:
             raise TripApplicationError(
                 "run must be confirmed before execution"
@@ -206,20 +221,36 @@ class TripApplicationService:
         )
         previous = self.store.get_run(run_id)
         result = previous.result
-        options = (
-            result.get("options")
-            if isinstance(result, Mapping)
+        is_comparison_result = (
+            isinstance(result, Mapping)
             and result.get("stage")
             in {"open_discovery", "guided_discovery"}
-            else None
         )
+        options = (
+            result.get("options") if is_comparison_result else None
+        )
+        # 比较失败的 run 是 BLOCKED 而非 COMPLETED，但它带着一张明标「未比较」
+        # 的退路卡（_failed_comparison_result）。不接这一支，run 就没有出口，
+        # 宿主只能靠改写 destination_expression 绕状态机——那正是要关掉的缺陷。
+        fallback = (
+            result.get("fallback_options") if is_comparison_result else None
+        )
+        selectable: list[object] = []
+        if isinstance(options, list):
+            selectable.extend(options)
+        if previous.status is RunStatus.BLOCKED and isinstance(fallback, list):
+            selectable.extend(fallback)
         if (
-            previous.status is not RunStatus.COMPLETED
-            or not isinstance(options, list)
+            previous.status
+            not in {RunStatus.COMPLETED, RunStatus.BLOCKED}
+            or not is_comparison_result
+            or (previous.status is RunStatus.COMPLETED
+                and not isinstance(options, list))
         ):
             raise TripApplicationError(
                 "candidate comparison must complete before selection"
             )
+        options = selectable
         selected = next(
             (
                 option
@@ -238,13 +269,24 @@ class TripApplicationService:
             raise TripApplicationError(
                 "selected option omitted destination_anchor"
             )
+        # 退路卡没有比较阶段的证据可复用——比较根本没跑完，
+        # guided-comparison.json 不存在。这不是异常，是这条路径的定义：
+        # 详细规划从零采集起步。用 is_fallback 区分，而不是靠捕获
+        # FileNotFoundError 猜——后者会把「文件真的丢了」也一并吞掉（D10）。
+        is_fallback = (
+            selected.get("comparison_status") == COMPARISON_NOT_ATTEMPTED
+        )
         intent_value = previous.intent.to_dict()
         intent_value.update(
             {
                 "task_mode": TaskMode.DIRECT_PLAN.value,
                 "destination_anchor": destination,
                 "destination_expression": f"确定{destination}",
-                "classification_basis": "guided_option_selected",
+                "classification_basis": (
+                    "comparison_unavailable_region_anchor"
+                    if is_fallback
+                    else "guided_option_selected"
+                ),
             }
         )
         continue_run_with_intent(
@@ -254,9 +296,13 @@ class TripApplicationService:
         )
         action_state = start_action_loop(
             run_id,
-            initial_evidence=self.guided_evidence_for_selection(
-                run_id,
-                destination_id,
+            initial_evidence=(
+                {}
+                if is_fallback
+                else self.guided_evidence_for_selection(
+                    run_id,
+                    destination_id,
+                )
             ),
             store=self.store,
         )
@@ -840,22 +886,7 @@ class TripApplicationService:
             if current.status is RunStatus.RUNNING:
                 self.store.block(
                     run_id,
-                    {
-                        "stage": (
-                            "open_discovery"
-                            if expected_mode is TaskMode.OPEN_DISCOVERY
-                            else "guided_discovery"
-                        ),
-                        "task_mode": current.intent.task_mode.value,
-                        "options": [],
-                        "selection_required": True,
-                        "blockers": [
-                            {
-                                "code": "GUIDED_COMPARISON_UNAVAILABLE",
-                                "reason": type(error).__name__,
-                            }
-                        ],
-                    },
+                    _failed_comparison_result(current.intent, error),
                     "GUIDED_COMPARISON_UNAVAILABLE",
                 )
         finally:
@@ -967,6 +998,102 @@ class TripApplicationService:
             daemon=True,
         )
         thread.start()
+
+
+#: 比较失败时留在 run.result 里的退路标记。候选卡带上它，读取层与宿主才分得清
+#: 「比较出来的候选」与「没比较成、但可以直接规划的区域锚点」。
+COMPARISON_NOT_ATTEMPTED = "not_compared"
+
+
+def _failed_comparison_result(
+    intent: TravelIntent,
+    error: BaseException,
+) -> dict[str, object]:
+    """比较失败时写进 ``run.result`` 的内容：**必须带出路**。
+
+    旧版只写 ``options: []`` + 一条 blocker，run 就此变成终局：``execute_trip``
+    报「未确认」、``select_candidate`` 报「比较未完成」、``confirm_trip`` 报
+    「不在待确认」——三个入口全堵。宿主实测时唯一的出路是在
+    ``destination_expression`` 里写「已承诺无需比较」改走 DIRECT_PLAN，也就是
+    **用话术绕过状态机**。那是产品缺陷，不是用法。
+
+    这里把两条出路写成数据（D20：能由形状保证的不留给自律）：
+
+    * ``retry_comparison`` —— 活体检索是可重试的，失败常常是一次性的；
+    * ``plan_region_anchor_directly`` —— 用户报的区域锚点本身就是个真目的地，
+      比较不出候选时直接规划它是诚实的降级。它作为一张 **明标「未比较」**
+      的候选卡进 ``fallback_options``，宿主走既有的 ``select_trip_candidate``
+      即可，不需要任何咒语。
+
+    开放式发现（没有区域锚点）只有第一条：没有锚点就没有可直接规划的东西，
+    编一个出来才是不诚实。
+    """
+
+    anchor = intent.destination_anchor
+    stage = (
+        "open_discovery"
+        if intent.task_mode is TaskMode.OPEN_DISCOVERY
+        else "guided_discovery"
+    )
+    fallback_options: list[dict[str, object]] = []
+    recovery: list[dict[str, object]] = [
+        {
+            "kind": "retry_comparison",
+            "entrypoint": "advance_trip_task",
+            "arguments": {"run_id": "<本 run>"},
+            "detail": "重新发起候选比较；活体检索失败常是一次性的。",
+        }
+    ]
+    if isinstance(anchor, str) and anchor:
+        destination_id = stable_identifier(
+            "destination",
+            "trip-decider:comparison-fallback",
+            anchor,
+        )
+        fallback_options.append(
+            {
+                "destination_id": destination_id,
+                "destination_anchor": anchor,
+                "name": anchor,
+                "region_label": anchor,
+                # 明说没比较过。候选卡上的其余字段一律不编——没有采集就没有
+                # 可行性结论，填一个「待核验」也比填一个假的强。
+                "comparison_status": COMPARISON_NOT_ATTEMPTED,
+                "feasibility_status": "UNKNOWN",
+                "evidence_statuses": [],
+                "evidence_missing": ["候选比较未能完成，本条未经任何采集核验"],
+            }
+        )
+        recovery.append(
+            {
+                "kind": "plan_region_anchor_directly",
+                "entrypoint": "select_trip_candidate",
+                "arguments": {
+                    "run_id": "<本 run>",
+                    "candidate_id": destination_id,
+                },
+                "detail": (
+                    f"跳过比较，直接对「{anchor}」做详细规划。"
+                    "不需要改写 destination_expression。"
+                ),
+            }
+        )
+    return {
+        "stage": stage,
+        "task_mode": intent.task_mode.value,
+        "options": [],
+        # 比较**没有**完成。读取层据此不再报 comparison_completed=True。
+        "comparison_failed": True,
+        "fallback_options": fallback_options,
+        "selection_required": bool(fallback_options),
+        "recovery": recovery,
+        "blockers": [
+            {
+                "code": "GUIDED_COMPARISON_UNAVAILABLE",
+                "reason": type(error).__name__,
+            }
+        ],
+    }
 
 
 def _audit_time(value: object) -> datetime | None:

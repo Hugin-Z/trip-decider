@@ -23,3 +23,17 @@ schema rule.
 The fixture validator checks only structure, exact bytes/hash, safe paths,
 explicit root/closure, root-reachable closure, mutation mechanics, and expected
 structural errors. `behavior_expected` remains opaque in WU1.
+
+## 其余夹具目录
+
+上表只覆盖 WU1 的六个结构夹具。同级还有三个来源不同的目录：
+
+| 目录 | 来源 | 用途 |
+|---|---|---|
+| `golden_cases/` | 构造的目的地上下文 | 端到端回放 |
+| `jiangxi_multi_identity_smoke/` | 单次获批的 Overpass POST（2026-07-28） | 字节级离线回放、复数 provider 身份 |
+| `host_mcp_smoke/` | 首次真实宿主实测（Claude Desktop MCP，2026-08-03） | D21「真实调用最小可跑」名单的两条契约测试 |
+
+`host_mcp_smoke/` 的两份夹具是**宿主真实提交的形状**，脱敏只改地名与时间窗。
+**不补键**——两个 P0 都是形状对不上而不是值不对，补一个键夹具就不再复现事故。
+详见该目录的 README 与 `docs/contracts/engineering-discipline.md` D21。

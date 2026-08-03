@@ -21,6 +21,7 @@ from trip_decider.evidence_projection import (
     usable_fact_values,
 )
 from trip_decider.itinerary_planner import (
+    RAIL_EVENT_REQUIRED_TRAIN_FIELDS,
     make_attraction_event,
     make_duration_event,
     make_event,
@@ -550,13 +551,36 @@ def _compile_railway(
         ("return", "返程"),
     ):
         train = usable.get(direction)
-        if not isinstance(train, Mapping):
+        # 「整体缺席」与「在场但排不出事件」是同一个规划后果，走同一个 blocker。
+        # 判据用 make_rail_event 自己的必填集，不在这里另抄一份键名（D2）。
+        #
+        # 第二支不是防御性冗余：字段级投影会把 support 不可用的字段**整个丢掉**
+        # （usable_fact_values 跳过 value 为 None 的 fact），所以一份形状完全
+        # 正常的采集结果，只要 origin_station 回了 None，这里拿到的就是一个缺
+        # 键的 mapping。提交门（agent_actions._validate_railway_value）现在会在
+        # 门口拦掉这种提交，但**盘上还有门之前写下的证据**——那些恢复回来时不能
+        # 让编译器崩。缺键不补默认值：车站名编不出来，编不出来就是排不出事件。
+        missing_fields = (
+            [
+                field
+                for field in RAIL_EVENT_REQUIRED_TRAIN_FIELDS
+                if train.get(field) is None
+            ]
+            if isinstance(train, Mapping)
+            else []
+        )
+        if not isinstance(train, Mapping) or missing_fields:
             # 规划后果：该方向排不出车次事件。与 LOCAL_TRANSIT_DURATION_MISSING
             # 同类——说的是「这段规划不出来」，不是在复述某个 support 取值。
             blockers.append(
                 _blocker(
                     f"RAILWAY_{direction.upper()}_MISSING",
                     "railway",
+                    reason=(
+                        "缺少排程必需字段：" + "、".join(missing_fields)
+                        if missing_fields
+                        else None
+                    ),
                     evidence_refs=[evidence_id],
                 )
             )

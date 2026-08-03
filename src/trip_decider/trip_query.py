@@ -259,7 +259,16 @@ class TripQueryService:
             if not isinstance(options, list):
                 raise TripQueryError("candidate comparison omitted options")
             stage = result.get("stage")
-            comparison_completed = True
+            # 「有比较阶段的 result」不等于「比较完成了」。旧代码在这里无条件
+            # 写 True，于是比较抛异常之后读取层仍报 comparison_completed=True
+            # + candidates=[]，宿主据此以为是「比较完了，一个都不可行」。那是
+            # 一句假话：比较根本没跑完（D14 的同类——存在性冒充可用性）。
+            comparison_completed = not bool(result.get("comparison_failed"))
+            fallback = result.get("fallback_options")
+            if isinstance(fallback, list):
+                # 退路卡自带 comparison_status=not_compared，与比较出来的候选
+                # 在同一个列表里可区分。
+                options = [*options, *fallback]
         else:
             by_id: dict[str, dict[str, object]] = {}
             candidate_events = self.events(run_id)

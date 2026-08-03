@@ -1,0 +1,38 @@
+{
+  "captured_at": "2026-08-03",
+  "captured_from": "Claude Desktop MCP / submit_trip_evidence",
+  "desensitised": "地名与时间窗已替换；键集合与嵌套层数逐字保留",
+  "declared_required_fields": [
+    "outbound",
+    "return",
+    "fare",
+    "source"
+  ],
+  "submission": {
+    "action_id": "railway",
+    "evidence_id": "railway-user-supply",
+    "domain": "railway",
+    "status": "sourced",
+    "value": {
+      "outbound": {
+        "train_code": "G1234",
+        "departure_at": "2026-08-04T13:12",
+        "arrival_at": "2026-08-04T16:28"
+      },
+      "return": {
+        "train_code": "G1235",
+        "departure_at": "2026-08-07T18:05",
+        "arrival_at": "2026-08-07T21:30"
+      },
+      "fare": 372.0,
+      "source": "12306 手动查询"
+    },
+    "sources": [
+      {
+        "provider": "中国铁路12306",
+        "url": "https://kyfw.12306.cn/otn/leftTicket/init",
+        "retrieved_at": "2026-08-03T10:20:00+08:00"
+      }
+    ]
+  }
+}

@@ -15,7 +15,7 @@ from trip_decider.trip_application import (
     TripApplicationService,
 )
 from trip_decider.trip_query import TripQueryError, TripQueryService
-from trip_decider.travel_agent import TravelAgentError
+from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
 
 
 class TripMCPError(ValueError):
@@ -95,7 +95,9 @@ class TripMCPAdapter:
         def operation() -> dict[str, object]:
             before = self._query.trip(run_id)
             status = _run_status(before)
-            if status not in self._CHECKPOINT_STATUSES:
+            if status not in self._CHECKPOINT_STATUSES or _is_retryable_block(
+                before
+            ):
                 self._application.execute_trip(run_id)
             elif status == "COMPLETED":
                 # A completed discovery run is already waiting for selection;
@@ -284,6 +286,27 @@ class TripMCPAdapter:
         if not isinstance(result, dict):
             raise TripMCPError("trip service returned a non-object result")
         return result
+
+
+def _is_retryable_block(value: Mapping[str, object]) -> bool:
+    """这个 BLOCKED 是不是「还能再推一次」的那种。
+
+    ``BLOCKED`` 一直被当作终局检查点，于是 ``advance_trip_task`` 在阻塞态直接
+    回快照、不再调 ``execute_trip``。应用层现在允许重试候选比较，宿主面却不放行
+    ——那样 ``recovery`` 里写的 ``retry_comparison`` 就是一条**声明了却调不通**
+    的出路，比不写更坏（D14：存在性不冒充可用性）。
+
+    判据取自 ``travel_agent.RETRYABLE_BLOCK_CODES``，不在这里另抄一份码字面量
+    （D5：名单与按名单操作的函数必须同居）。
+    """
+
+    run = value.get("run")
+    if not isinstance(run, Mapping):
+        return False
+    return (
+        str(run.get("status")) == "BLOCKED"
+        and str(run.get("error_code")) in RETRYABLE_BLOCK_CODES
+    )
 
 
 def _run_status(value: Mapping[str, object]) -> str:
