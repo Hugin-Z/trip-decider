@@ -38,9 +38,9 @@ class FreshnessPolicy:
 
 
 FRESHNESS_POLICIES: dict[str, FreshnessPolicy] = {
-    "seat_availability": FreshnessPolicy(
-        "seat_availability", 0, False
-    ),
+    # seat_availability 已删除（裁决 2，2026-08-02）：余票属订票域，
+    # PLAN.md v4 §2 明确「不做订票」。它不再是本产品的 data_type。
+    # 删除动作属 PLAN.md §12 P5 闸门第 5 条，2026-08-03 执行。
     "hotel_price": FreshnessPolicy("hotel_price", 0, False),
     "railway_schedule_fare": FreshnessPolicy(
         "railway_schedule_fare", 6 * 60 * 60, True

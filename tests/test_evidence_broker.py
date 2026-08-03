@@ -34,8 +34,11 @@ class EvidenceBrokerTests(unittest.TestCase):
         self.now = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 
     def test_freshness_policy_has_explicit_non_reusable_values(self) -> None:
-        self.assertFalse(FRESHNESS_POLICIES["seat_availability"].stale_allowed)
         self.assertFalse(FRESHNESS_POLICIES["hotel_price"].stale_allowed)
+        # seat_availability 已按裁决 2 删除；I8 的反向规则用例
+        # （test_invariant_i8_seat_availability_is_absent_from_the_registry）
+        # 守它不回来，这里不再重复断言。
+        self.assertNotIn("seat_availability", FRESHNESS_POLICIES)
         self.assertEqual(
             FRESHNESS_POLICIES["railway_schedule_fare"].stale_ttl_seconds,
             6 * 60 * 60,
@@ -128,7 +131,7 @@ class EvidenceBrokerTests(unittest.TestCase):
                 live_failure=self._missing(),
             )
         )
-        for data_type in ("seat_availability", "hotel_price"):
+        for data_type in ("hotel_price",):
             query = evidence_query(
                 provider="test-provider",
                 origin="A",

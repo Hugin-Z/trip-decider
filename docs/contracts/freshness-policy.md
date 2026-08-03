@@ -268,10 +268,38 @@
 正是「结论与它所依据的数据不同步」。
 
 因此重采必须发生在**证据被任何消费方读到之前**，一次替换整份证据，而不是在取
-token 的那一瞬间。这是「第二个触发点」，触及停点规则，故停下报。提议方案见轮 3
-入口讨论：在读取层入口（`trip_query.candidates` / `plan_readiness`）加一个
-**读时证据解析步**，用 `project_domain` 判定该不该重采（判定仍走唯一漏斗，I6
-不破），重采后整份替换再往下走。这样纯函数编译器不必被穿进 store。
+token 的那一瞬间。这是「第二个触发点」，触及停点规则，故停下报。
+
+### 5.3 读取入口普查（2026-08-03 实测，**未完成，不是契约**）
+
+§5.2 末尾原本提议「在读取层入口（`candidates` / `plan_readiness`）加解析步」。
+轮 3 开工前按要求做入口普查，**那个提议是错的：入口不是两个，是四个。**
+提议因此作废，清单先记在这里，等落点方案定了再契约化。
+
+| # | 入口 | 证据来源 | 消费方式 |
+|---|---|---|---|
+| 1 | `TripQueryService.trip()`（`trip_query.py:103`） | `current_run_evidence()` | → `_presentation_contract`（`trip_read_model.py:753/763`）与 `_map_payload_contract`（`:255`）。**这是主读面**，HTTP `GET /api/trips/{id}` 走它 |
+| 2 | `TripQueryService.candidates()`（`:163`） | **`evidence/guided-comparison.json`**，与其余三个入口不同源 | → `_with_recomputed_tokens`（`:285`） |
+| 3 | `TripQueryService.plan_readiness()`（`:293`） | `run.result["context"]` | → `PlanningInputCompiler.compile`（`planning_input_compiler.py:380`） |
+| 4 | `agent_actions.get_next_actions()`（`:433`） | `run.result["context"]` | → `_result_is_displayable` → `recomputed_planning_state`（`:1836`）→ 同一个 compile |
+
+`map_payload()` / `missing_information()` 委托给 `trip()`，不是独立入口；
+`product_web` 虽然 import 了读模型的几个函数，实际不调用，也不是入口。
+
+两条会影响方案的性质：
+
+- **入口 2 与其余三个不同源。** 候选卡读的是比较阶段单独落的
+  `guided-comparison.json`，不是 `run.result` 里的 context。一个「整份替换」
+  的解析步得覆盖两种证据容器，不是一种。
+- **入口 4 在 `agent_actions` 里，不在读取层。** 它是动作循环的快照接口，
+  却在内部按读取时刻重算 planning_state。要么解析步也进那里（那就不止一处
+  落点），要么承认它是一条不吃 auto_refetch 的读路径——那样同一份证据在
+  `plan_readiness` 与 `get_next_actions` 会给出不同结论，比不做更糟。
+
+**命令路径另记**：`trip_application.select_hotel`（`:322`）也直读证据业务字段
+（`hotel_candidates`），但它吃的是 `destination_profile`
+（`feasibility_critical == 否`，`on_stale == flag_for_confirmation`），
+不在 auto_refetch 的触发条件内，本轮不牵动。
 
 ---
 
