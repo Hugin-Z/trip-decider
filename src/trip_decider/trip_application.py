@@ -37,6 +37,7 @@ from trip_decider.evidence_broker import (
     EvidenceBroker,
 )
 from trip_decider.guided_discovery import build_guided_comparison
+from trip_decider.evidence_projection import business_view
 from trip_decider.travel_agent import (
     default_agent_store,
     AgentRun,
@@ -313,13 +314,10 @@ class TripApplicationService:
         previous = self.store.get_run(run_id)
         evidence = self.current_run_evidence(run_id)
         web = evidence.get("web")
-        value = (
-            deepcopy(dict(web.get("value")))
-            if isinstance(web, Mapping)
-            and isinstance(web.get("value"), Mapping)
-            else None
-        )
-        if value is None:
+        # 不是透传：下面要读 hotel_candidates 这个业务字段。v2 的落盘
+        # value 是 facts 数组，直读会静默拿到 None，然后报"没有可选住宿"。
+        value = business_view(web) if isinstance(web, Mapping) else None
+        if not value:
             raise TripApplicationError("当前没有可选住宿候选。")
         hotels = value.get("hotel_candidates")
         selected = (
