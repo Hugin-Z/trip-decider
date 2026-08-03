@@ -14,10 +14,12 @@ Nothing here asserts.  Assertions live in the individual invariant tests.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterator, Mapping
 import json
 from pathlib import Path
 import re
+from types import MappingProxyType
 
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.trip_application import TripApplicationService
@@ -224,6 +226,132 @@ _REGISTRY_ROW = re.compile(
     r"\s*\|\s*(?P<feasibility_critical>是|否)"
     r"\s*\|\s*(?P<planned_for>[^|]*?)\s*\|\s*$"
 )
+
+
+#: §3.1.1 判定点登记表的行。与 ``_REGISTRY_ROW`` 同一套路：契约的 markdown 表
+#: 是权威，测试机械解析它，而不是在测试里再抄一份。
+_DECISION_POINT_ROW = re.compile(
+    r"^\|\s*`(?P<function>[A-Za-z_][A-Za-z0-9_]*)`"
+    r"\s*\|\s*`(?P<blocker_id>[A-Za-z0-9_{}]+)`"
+    r"\s*\|\s*(?P<semantics>[^|]*?)\s*\|\s*$"
+)
+
+#: 判定点 1、2 不是 blocker，用输出变量名占 blocker_id 那一列。
+#: 它们与 blocker 同表登记，是因为 §3.1 说的「判定点」本来就包含这两类——
+#: 分两张表登记就会有人只改一张（D5）。
+DECISION_POINT_OUTPUTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "guided_discovery.py": ("feasibility_status",),
+        "planning_input_compiler.py": ("planning_state",),
+    }
+)
+
+
+_DECISION_POINT_SECTION = "### 3.1.1"
+
+
+def parse_decision_point_registry(
+    document: Path = FRESHNESS_POLICY_DOC,
+) -> set[tuple[str, str]]:
+    """Parse §3.1.1 into ``{(function, blocker_id)}``.
+
+    **按小节切片再匹配**，不是全文件扫。第一版只靠正则，结果把 §6.1 那张
+    五态映射表的行（``|`display_status`|`DISPLAYABLE_CONDITIONAL_ITINERARY`|``）
+    也收了进来——两列反引号标识符的形状在本文件里不止一处。正则挑不出语义，
+    小节边界可以。
+    """
+
+    registry: set[tuple[str, str]] = set()
+    inside = False
+    for line in document.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("###"):
+            inside = stripped.startswith(_DECISION_POINT_SECTION)
+            continue
+        if not inside:
+            continue
+        match = _DECISION_POINT_ROW.match(stripped)
+        if match is not None:
+            registry.add((match.group("function"), match.group("blocker_id")))
+    return registry
+
+
+def _enclosing_function(tree: ast.AST, node: ast.AST) -> str:
+    best: ast.AST | None = None
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = getattr(candidate, "end_lineno", None) or candidate.lineno
+        if candidate.lineno <= node.lineno <= end:
+            if best is None or candidate.lineno > best.lineno:
+                best = candidate
+    return best.name if best is not None else "<module>"
+
+
+def _literal_of(node: ast.AST) -> str:
+    """常量取其值；f-string 把插值段折成 ``{}``。
+
+    ``f"RAILWAY_{direction.upper()}_MISSING"`` → ``RAILWAY_{}_MISSING``，
+    与契约里的写法一致——插值的具体取值是域名/方向，不是新的判定语义。
+    """
+
+    if isinstance(node, ast.Constant):
+        return str(node.value)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            str(part.value) if isinstance(part, ast.Constant) else "{}"
+            for part in node.values
+        )
+    return "<dynamic>"
+
+
+def scan_decision_points(root: Path = SRC_ROOT) -> set[tuple[str, str]]:
+    """AST 枚举代码里的可行性判定点，返回 ``{(function, blocker_id)}``。
+
+    选 AST 而不是装饰器注册或命名约定，理由：
+
+    * **装饰器注册**装不上——判定点是 18 处 ``_blocker(...)`` **调用**，
+      装饰器只能挂在定义上；要注册就得逐个调用点包一层，而「逐个记得包」
+      正是这条守卫要防的失误（D20：让不小心无从发生，不是要求更小心）。
+    * **命名约定**信息量不够：``_blocker`` 已经是那个约定，AST 只是可靠地读它，
+      再加一层命名不增加任何保证。
+    * **AST 扫描**零production改动，读的是真代码，且能跟着重构走——函数改名
+      会红，那正是希望的行为。
+    """
+
+    found: set[tuple[str, str]] = set()
+    for path in sorted((root / "trip_decider").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(
+                    node.func, "attr", None
+                )
+                if name == "_blocker" and node.args:
+                    found.add(
+                        (
+                            _enclosing_function(tree, node),
+                            _literal_of(node.args[0]),
+                        )
+                    )
+                continue
+            outputs = DECISION_POINT_OUTPUTS.get(path.name, ())
+            if not outputs:
+                continue
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in outputs:
+                    found.add(
+                        (_enclosing_function(tree, node), target.id)
+                    )
+    return found
 
 
 def parse_policy_registry(

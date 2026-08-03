@@ -126,13 +126,45 @@
 
 **可行性判定点**指其输出会改变以下三者之一的代码位置：
 
-| # | 输出 | 当前位置 |
+| # | 输出 | 载体 |
 |---|---|---|
-| 1 | 候选的 `feasibility_status` | `guided_discovery.py:520-536` |
-| 2 | 计划的 `planning_state` | `planning_input_compiler.py:216-227` |
-| 3 | `conditional_blockers` 中任一 blocker 的存在与否 | `planning_input_compiler.py` 中 17 处 `_blocker(...)` 调用（`:146,273,277,283,284,298,344,356,441,512,582,682,686,1001,1004,1012`） |
+| 1 | 候选的 `feasibility_status` | `guided_discovery._coarse_option` 中对 `feasibility_status` 的赋值 |
+| 2 | 计划的 `planning_state` | `planning_input_compiler.compile` 中对 `planning_state` 的赋值 |
+| 3 | `conditional_blockers` 中任一 blocker 的存在与否 | `planning_input_compiler` 中的 `_blocker(...)` 调用，逐条见 §3.1.1 |
 
-判定点清单本身是本契约的一部分。**新增可行性判定点必须同步更新本节**，否则 §3.2 的机械核对会漏判。
+**清单以「函数名 + blocker_id」为键，行号只作参考、不作判据。** 上一版把 16 个行号写进契约，一次重构之后**无一命中**、处数也从 17 变成 18——行号是最先过期的那种数字（D1）。函数名与 blocker_id 跟着语义走，重构时要么不变，要么变了就是真的换了语义。
+
+判定点清单本身是本契约的一部分。**新增可行性判定点必须同步更新本节**——这一条现在由 `tests/test_feasibility_decision_points.py` 机械核对，清单与代码不一致即红。
+
+### 3.1.1 判定点登记表（权威）
+
+本表被 `tests/invariant_support.parse_decision_point_registry()` 机械解析，
+格式受约束：每个数据行以 `` |`<函数名>`| `` 开头，第二列是反引号包裹的
+`blocker_id`（f-string 拼接的部分写成 `{}`），第三列是语义描述。
+
+| 函数 | blocker_id | 语义 |
+|---|---|---|
+| `_coarse_option` | `feasibility_status` | 候选粗可行性结论本身（判定点 1，非 blocker） |
+| `compile` | `planning_state` | 计划准入结论本身（判定点 2，非 blocker） |
+| `compile` | `HARD_CONSTRAINT_CONFLICT_{}` | 硬约束冲突逐条转 blocker |
+| `_compile_railway` | `RAILWAY_INPUT_UNAVAILABLE` | 铁路输入不能据以推进（不可用 / 无 facts / unknown / 过期四支） |
+| `_compile_railway` | `RAILWAY_NO_DIRECT_TRAIN` | 已核实该窗内无直达车（确定结论，非「没查到」） |
+| `_compile_railway` | `RAILWAY_SEAT_NOT_GUARANTEED` | 余票不保证，指向余票字段本身 |
+| `_compile_railway` | `RAILWAY_{}_MISSING` | 该方向排不出车次事件 |
+| `_compile_local_transit` | `MAP_INPUT_UNAVAILABLE` | 当地交通输入不能据以推进 |
+| `_compile_local_transit` | `LOCAL_TRANSIT_DURATION_MISSING` | 该段路线没有可用时长 |
+| `_compile_attractions` | `WEB_INPUT_UNAVAILABLE` | 景点输入不能据以推进 |
+| `_compile_attractions` | `ATTRACTION_RETAINED_UNSCHEDULED` | 景点保留但排不进时间轴 |
+| `_compile_attractions` | `ATTRACTION_TRANSIT_MISSING` | 景点缺进出交通衔接 |
+| `_compile_defaults` | `HOTEL_SELECTION_MISSING` | 未选住宿，用片区兜底 |
+| `_compile_defaults` | `HOTEL_DETAIL_PENDING` | 已有片区但未定具体酒店 |
+| `_record_evidence_blockers` | `{}_INPUT_UNAVAILABLE` | 按域补记的输入不可用（与上面三处同 id，由 `_unique_blockers` 收敛） |
+
+**为什么不钉调用点处数**：同一个 `(函数, blocker_id)` 目前对应 1–4 个调用点
+（`_compile_railway` 的 `RAILWAY_INPUT_UNAVAILABLE` 有 4 支）。同一函数里为同一个
+blocker 多开一个分支，不改变「可能出现哪些可行性结论、从哪来」，那正是本节要
+登记的东西；把处数钉死只会让每次分支重构都产生一次假红，然后被人改数字了事
+——那就退回成一个没人看的计数。
 
 ### 3.2 机械核对程序
 
