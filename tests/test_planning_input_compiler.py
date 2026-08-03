@@ -161,6 +161,27 @@ def _web(destination: str) -> EvidenceItem:
     )
 
 
+def _loop_evidence(run_id: str, store) -> dict:
+    """容器 B（动作循环的证据表）。
+
+    A 收敛后 `result["context"]` 不再内联证据，取证据要从这里
+    （persistence-v2.md §2.1.1）。用内存态而非盘上那份，因为部分用例的 store
+    没有 runtime_root，盘上根本没有文件。
+    """
+
+    state = agent_actions._state(run_id, store)
+    return {
+        domain: item.to_dict() for domain, item in state.evidence.items()
+    }
+
+
+def _planning_state(run_id, store, result):
+    return agent_actions.recomputed_planning_state(
+        result,
+        _loop_evidence(run_id, store),
+    )
+
+
 class PlanningInputCompilerTests(unittest.TestCase):
     def test_two_destinations_use_one_generic_compiler_path(self) -> None:
         signatures = []
@@ -312,11 +333,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             store=store,
         )
         self.assertEqual(ready["status"], "READY")
-        railway = next(
-            item
-            for item in ready["result"]["context"]["evidence"]
-            if item["domain"] == "railway"
-        )
+        railway = _loop_evidence(run.run_id, store)["railway"]
         self.assertEqual(business_view(railway)["snapshot"]["acquisition"], "cache_fallback")
         # 余票 support 为 unknown 后**字段缺席**，不是留一个 "UNKNOWN"
         # 字面量——不可知的字段不得保留旧值，也不该假装有值。
@@ -345,7 +362,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
         # planning_state / displayable 不再落盘（会随 now 变，写进盘就是 I5
         # 违反）。判定改由读取时重算——同一个判定，换了产出时机。
         self.assertEqual(
-            agent_actions.recomputed_planning_state(ready["result"]),
+            _planning_state(run.run_id, store, ready["result"]),
             "PARTIAL_READY",
         )
         self.assertIn(
@@ -489,7 +506,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "NEED_USER_INPUT")
             self.assertEqual(
-                agent_actions.recomputed_planning_state(result["result"]),
+                _planning_state(run.run_id, store, result["result"]),
                 "COLLECTING_EVIDENCE",
             )
             self.assertNotIn("plan", result["result"])
@@ -594,7 +611,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
             )
             self.assertEqual(ready["status"], "READY")
             self.assertEqual(
-                agent_actions.recomputed_planning_state(ready["result"]),
+                _planning_state(run.run_id, store, ready["result"]),
                 "PLAN_READY",
             )
             self.assertEqual(
@@ -775,11 +792,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
         )
         self.assertEqual(refreshed["status"], "READY")
         self.assertEqual(refreshed["run_id"], run.run_id)
-        railway = next(
-            item
-            for item in refreshed["result"]["context"]["evidence"]
-            if item["domain"] == "railway"
-        )
+        railway = _loop_evidence(run.run_id, store)["railway"]
         self.assertEqual(
             business_view(railway)["snapshot"]["acquisition"],
             "cache_fallback",
@@ -822,7 +835,7 @@ class PlanningInputCompilerTests(unittest.TestCase):
         self.assertEqual(ready["status"], "READY")
         self.assertEqual(ready["run_id"], run.run_id)
         self.assertIn(
-            agent_actions.recomputed_planning_state(ready["result"]),
+            _planning_state(run.run_id, store, ready["result"]),
             {"PARTIAL_READY", "PLAN_READY"},
         )
 

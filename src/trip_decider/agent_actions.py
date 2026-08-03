@@ -68,6 +68,7 @@ from trip_decider.travel_agent import (
     TravelIntent,
     atomic_runtime_json as _atomic_runtime_json,
     build_destination_context,
+    trimmed_context,
     user_input_evidence,
 )
 
@@ -1121,7 +1122,10 @@ def _planner_handler(
             "READY" if installable else compiled["planning_state"]
         ),
         "task_mode": intent.task_mode.value,
-        "context": context.to_dict(),
+        # A 收敛：result 的 context 不再内联证据，只留引用
+        # （persistence-v2.md §2.1.1）。证据的权威容器是
+        # evidence/current.json，留内联副本就是 D19 的那个问题。
+        "context": trimmed_context(context.to_dict()),
         "planning_draft": deepcopy(dict(planning_draft)),
         "validation": deepcopy(dict(validation)),
         "pipeline": [

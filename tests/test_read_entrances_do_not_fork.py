@@ -99,7 +99,10 @@ class ReadEntrancesAgreeCase(unittest.TestCase):
 
         readiness = self.query.plan_readiness(run_id, now=READ_AT)
         loop_result = self.application.next_actions(run_id).get("result")
-        loop_state = agent_actions.recomputed_planning_state(loop_result)
+        loop_state = agent_actions.recomputed_planning_state(
+            loop_result,
+            self.application.current_run_evidence(run_id),
+        )
 
         self.assertIsNotNone(
             readiness["planning_state"],
@@ -134,7 +137,10 @@ class ReadEntrancesAgreeCase(unittest.TestCase):
 
         readiness = self.query.plan_readiness(run_id, now=stale_at)
         loop_result = self.application.next_actions(run_id).get("result")
-        loop_state = agent_actions.recomputed_planning_state(loop_result)
+        loop_state = agent_actions.recomputed_planning_state(
+            loop_result,
+            self.application.current_run_evidence(run_id),
+        )
 
         self.assertEqual(readiness["planning_state"], loop_state)
 
@@ -147,11 +153,17 @@ class ReadEntrancesAgreeCase(unittest.TestCase):
 
         run_id = self._ready_run()
         result = self.application.next_actions(run_id).get("result")
+        evidence = self.application.current_run_evidence(run_id)
 
-        fresh = plan_verdict_from_result(result, now=READ_AT)
+        fresh = plan_verdict_from_result(
+            result,
+            now=READ_AT,
+            evidence=evidence,
+        )
         stale = plan_verdict_from_result(
             result,
             now=READ_AT + timedelta(hours=7),
+            evidence=evidence,
         )
         self.assertNotEqual(
             (fresh.planning_state, len(fresh.blockers)),

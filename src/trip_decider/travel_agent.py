@@ -1268,15 +1268,7 @@ class InMemoryAgentStore:
         绕过，形状不会。
         """
 
-        trimmed = deepcopy(dict(context))
-        evidence = trimmed.pop("evidence", None)
-        trimmed["evidence_refs"] = [
-            str(item["evidence_id"])
-            for item in (evidence if isinstance(evidence, list) else [])
-            if isinstance(item, Mapping)
-            and isinstance(item.get("evidence_id"), str)
-        ]
-        return trimmed
+        return trimmed_context(context)
 
     def persist_plan_version(
         self,
@@ -2160,6 +2152,35 @@ def continue_run_with_intent(
 USER_INPUT_EVIDENCE_ID = "confirmed-travel-intent"
 
 
+def trimmed_context(context: Mapping[str, object]) -> dict[str, object]:
+    """去掉 context 里的内联证据，只留 ``evidence_refs``。
+
+    `persistence-v2.md` §2.1.1 的 A 收敛。与 PlanVersion 的 context 同一条规则
+    ——那是 P4 给 ``plan-NNNN.json`` 定的，本函数把 ``run.json`` 拉齐，并成为两处
+    共同的出处（D5：两份并列的名单早晚有人只改一份）。
+
+    证据的权威容器是 ``evidence/current.json``；``result`` 里留一份内联副本，
+    两份就可以不一致，而没有地方写着该信哪一份（D19）。
+    """
+
+    trimmed = deepcopy(dict(context))
+    evidence = trimmed.pop("evidence", None)
+    # **必须幂等**：重排链路会把上一版（已裁剪的）context 再传一遍。无条件
+    # 覆盖 evidence_refs 会在第二次裁剪时把它清空——那份 context 已经没有
+    # 内联证据可数了。清空表现出来是「计划突然指不到任何证据」，而根因是
+    # 裁剪被执行了两次，从现场完全看不出来。
+    trimmed.setdefault(
+        "evidence_refs",
+        [
+            str(item["evidence_id"])
+            for item in (evidence if isinstance(evidence, list) else [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("evidence_id"), str)
+        ],
+    )
+    return trimmed
+
+
 def user_input_evidence(intent: TravelIntent) -> EvidenceItem:
     """把 intent 投影成 ``user_input`` 域证据。
 
@@ -2336,7 +2357,7 @@ def execute_destination_pipeline(
         {"valid": validation.get("valid")},
     )
     return {
-        "context": context.to_dict(),
+        "context": trimmed_context(context.to_dict()),
         "plan": deepcopy(dict(plan)),
         "validation": deepcopy(dict(validation)),
         "pipeline": [
@@ -2562,6 +2583,7 @@ __all__ = [
     "revise_run",
     "run_error_code",
     "runtime_status",
+    "trimmed_context",
     "user_input_evidence",
     "USER_INPUT_EVIDENCE_ID",
 ]

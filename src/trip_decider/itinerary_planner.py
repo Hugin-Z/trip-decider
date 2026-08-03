@@ -2405,6 +2405,29 @@ def validate_destination_plan(
     }
 
 
+def _trimmed(context: Mapping[str, object]) -> dict[str, object]:
+    """重排产出的 context 同样不内联证据（persistence-v2.md §2.1.1）。
+
+    本模块在 ``travel_agent`` **下方**（后者 import 前者），不能反向 import；
+    规则只有三行，复制一次比倒转依赖方向划算。两处必须同形——
+    ``travel_agent.trimmed_context`` 是权威，分叉由
+    ``tests/test_context_trimming_is_one_shape`` 守着（D5）。
+    """
+
+    trimmed = deepcopy(dict(context))
+    evidence = trimmed.pop("evidence", None)
+    trimmed.setdefault(
+        "evidence_refs",
+        [
+            str(item["evidence_id"])
+            for item in (evidence if isinstance(evidence, list) else [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("evidence_id"), str)
+        ],
+    )
+    return trimmed
+
+
 def revise_destination_plan(
     previous_result: Mapping[str, object],
     *,
@@ -2439,7 +2462,7 @@ def revise_destination_plan(
             },
         }
         return {
-            "context": deepcopy(dict(context)),
+            "context": _trimmed(context),
             "plan": result,
             "validation": validate_destination_plan(context, result),
             "pipeline": [
@@ -2476,7 +2499,7 @@ def revise_destination_plan(
         "network_calls": 0,
     }
     return {
-        "context": deepcopy(dict(context)),
+        "context": _trimmed(context),
         "plan": result,
         "validation": validate_destination_plan(context, result),
         "pipeline": ["revise", "validate"],
