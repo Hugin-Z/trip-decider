@@ -19,7 +19,7 @@
       "blocked_on": null
     }
   ],
-  "current_phase": "P4c",
+  "current_phase": "P5",
   "phase_order": [
     "P0",
     "P1",
@@ -48,7 +48,7 @@
     "I11",
     "I1"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a。I10 已收录文档，测试随 P4-b 的 facts 形状落地。I6 的写入侧豁免仍在，到期 P4。",
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结，余下 I4、I9 属 P5。",
   "lifecycle": {
     "I1": {
       "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
@@ -73,6 +73,11 @@
       "exemption_history": "P3a 登记 → P3b/P4b/P4c 三次延期 → 2026-08-03 销",
       "closed_at": "P4-c 第 3 批收尾",
       "note": "豁免登记的是「写入侧产出 token 字面量」，前提已清空。剩余 6 处逐类过：2 处是 planning_input_compiler 自己的可展示性开关（独立小词表，内存计算不落盘）、2 处是 support 轴判定的比较字符串（合法消费不是产出）、2 处在注释里。没有一处在豁免语义内。"
+    },
+    "P4c_closed": {
+      "closed_at": "2026-08-03",
+      "batches": "第 1-6 批（第 4+6 合并执行）",
+      "note": "收口产出 docs/contracts/engineering-discipline.md——纪律的单一出处，20 条各带一次真实事故，作业单按编号引用。"
     }
   }
 }

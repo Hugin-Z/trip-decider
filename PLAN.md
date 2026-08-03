@@ -408,5 +408,6 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 3. `docs/contracts/evidence-axes.md` — 证据模型的权威定义。
 4. `docs/contracts/freshness-policy.md` — 新鲜度策略与 PlanVersion 性质。
 5. `docs/contracts/invariants.md` — 必须始终成立的性质，以及它们各自的测试在哪。
+6. `docs/contracts/engineering-discipline.md` — 作业纪律的单一出处，每条带一次真实事故。作业单按编号引用（「按 D5 处理」），不再逐条展开。
 
 `PRODUCT.md` 与 `README.md` 的多处计数与实际不符（基线报告 §4 列出 5 处），在 §9.2 A8 转绿前不应作为核对依据。
