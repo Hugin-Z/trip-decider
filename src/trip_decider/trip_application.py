@@ -58,6 +58,10 @@ from trip_decider.travel_agent import (
 )
 
 
+# 编程错误：它们不是业务失败，不该被翻译成运行状态。
+_PROGRAMMING_ERRORS = (NameError, AttributeError, TypeError, ImportError)
+
+
 class TripApplicationError(ValueError):
     """A caller supplied an invalid application command."""
 
@@ -766,6 +770,12 @@ class TripApplicationService:
                 },
             )
             self.store.complete(run_id, result)
+        except _PROGRAMMING_ERRORS:
+            # 编程错误不穿业务外衣。这个 except 曾把一个 NameError 报成
+            # 「真实证据不足」——同一个叙述覆盖了「采集器没拿到数据」和
+            # 「这段代码有 bug」，两者在可观测层面无法区分，归因因此走了
+            # 一整轮弯路。业务失败保留原叙述，编程错误原样抛出。
+            raise
         except Exception as error:
             current = self.store.get_run(run_id)
             if current.status is RunStatus.RUNNING:
