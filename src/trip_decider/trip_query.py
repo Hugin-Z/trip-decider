@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import time
 
 from trip_decider.trip_application import (
     default_trip_application_service,
@@ -25,7 +26,12 @@ from trip_decider.planning_input_compiler import (
     PlanningInputCompiler,
     plan_verdict_from_result,
 )
-from trip_decider.evidence_projection import project_domain, verdict_payload
+from trip_decider.evidence_projection import (
+    REFETCH_BUDGET_SECONDS,
+    project_domain,
+    resolve_stale_evidence,
+    verdict_payload,
+)
 from trip_decider.travel_agent import (
     default_agent_store,
     InMemoryAgentStore,
@@ -51,6 +57,7 @@ class TripQueryService:
         store: InMemoryAgentStore | None = None,
         application_service: TripApplicationService | None = None,
         clock: Clock | None = None,
+        refetcher: object = None,
     ) -> None:
         store = store if store is not None else default_agent_store()
         if application_service is None:
@@ -67,6 +74,10 @@ class TripQueryService:
         # Read time drives the freshness axis, so it has to be substitutable
         # for a test to observe two different instants (invariants.md I5).
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # 读时同步重采的采集器，由调用方注入（默认 None = 不重采）。
+        # 采集器住在上层模块，读取层导入它们会成环，也会把只读的读取层
+        # 变成能自己发网络请求的东西——与内核「策略由调用方注入」同理。
+        self._refetcher = refetcher
 
     def now(self) -> datetime:
         """Return the instant this read is evaluated against."""
@@ -259,6 +270,32 @@ class TripQueryService:
 
         read_at = now if now is not None else datetime.now(timezone.utc)
         by_destination = self._comparison_evidence(run_id)
+        # 解析步的**装载点二**：guided-comparison 容器（按目的地、再按域的
+        # mapping）。与装载点一走**同一个** resolve_stale_evidence——容器有两种
+        # 是落盘历史造成的事实，逻辑必须只有一份（D5/D20）。这里只有容器形状
+        # 和写回位置是本地知识。
+        #
+        # 预算按整次读取算，不是按目的地：候选比较有 N 个目的地，逐个给 8 秒
+        # 会把一次页面刷新拖成 N×8 秒。
+        if self._refetcher is not None:
+            deadline = time.monotonic() + REFETCH_BUDGET_SECONDS
+            refreshed: dict[str, Mapping[str, object]] = {}
+            for destination_id, domains in by_destination.items():
+                if not isinstance(domains, Mapping):
+                    refreshed[destination_id] = domains
+                    continue
+                resolved = resolve_stale_evidence(
+                    {
+                        domain: item
+                        for domain, item in domains.items()
+                        if isinstance(item, Mapping)
+                    },
+                    now=read_at,
+                    refetcher=self._refetcher,
+                    budget_seconds=max(0.0, deadline - time.monotonic()),
+                )
+                refreshed[destination_id] = {**dict(domains), **resolved.items}
+            by_destination = refreshed
         enriched: list = []
         for option in deepcopy(options if isinstance(options, list) else []):
             if not isinstance(option, Mapping):

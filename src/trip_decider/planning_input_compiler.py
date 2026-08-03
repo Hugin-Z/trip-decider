@@ -17,6 +17,7 @@ from trip_decider.evidence_core import (
 from trip_decider.evidence_projection import (
     item_facts,
     project_domain,
+    resolve_stale_evidence,
     usable_fact_values,
 )
 from trip_decider.itinerary_planner import (
@@ -59,10 +60,54 @@ class PlanVerdict(NamedTuple):
 _ABSENT_VERDICT = PlanVerdict(planning_state=None, usable_now=False, blockers=())
 
 
+def _resolved_context(
+    context: Mapping[str, object],
+    *,
+    now: datetime,
+    refetcher: object,
+) -> Mapping[str, object]:
+    """解析步的**装载点一**：``run.result["context"]["evidence"]``（列表容器）。
+
+    容器形状是这里唯一的本地知识——转成按域的 mapping 交给唯一实现
+    ``resolve_stale_evidence``，再按原形状写回。逻辑一份，装载点两个
+    （另一个是 ``trip_query`` 的 guided-comparison 容器）。
+    """
+
+    if refetcher is None:
+        return context
+    raw = context.get("evidence")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return context
+    by_domain: dict[str, Mapping[str, object]] = {}
+    for item in raw:
+        if isinstance(item, Mapping) and isinstance(item.get("domain"), str):
+            by_domain[str(item["domain"])] = item
+    if not by_domain:
+        return context
+    resolved = resolve_stale_evidence(
+        by_domain,
+        now=now,
+        refetcher=refetcher,
+    )
+    if not resolved.refetched:
+        return context
+    # 整份替换：同一次读取里，token 的依据与 fact_values 的依据必须是同一个
+    # 实例。只换 token 不换值，就是这条解析步存在的理由所要防的那件事。
+    replaced = [
+        resolved.items.get(str(item["domain"]), item)
+        if isinstance(item, Mapping)
+        and isinstance(item.get("domain"), str)
+        else item
+        for item in raw
+    ]
+    return {**dict(context), "evidence": replaced}
+
+
 def plan_verdict_from_result(
     result: Mapping[str, object] | None,
     *,
     now: datetime,
+    refetcher: object = None,
 ) -> PlanVerdict:
     """从 ``run.result`` 取 context，按读取时刻编译出计划准入结论。
 
@@ -83,6 +128,7 @@ def plan_verdict_from_result(
     context = result.get("context")
     if not isinstance(context, Mapping):
         return _ABSENT_VERDICT
+    context = _resolved_context(context, now=now, refetcher=refetcher)
     try:
         compiled = PlanningInputCompiler().compile(context, now=now)
     except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉

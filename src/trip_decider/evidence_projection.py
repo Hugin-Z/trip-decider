@@ -17,10 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 import re
+import time
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
+from trip_decider.travel_agent import NON_BUSINESS_ERRORS
 from trip_decider.evidence_core import (
     FactInput,
     FactVerdict,
@@ -32,8 +34,10 @@ from trip_decider.evidence_core import (
     evaluate_fact,
     collection_metadata,
     normalized_retrieved_at,
+    parse_timestamp,
     support_from_legacy_name,
     token_support,
+    token_freshness,
 )
 
 __all__ = [
@@ -44,6 +48,10 @@ __all__ = [
     "usable_fact_values",
     "INTERNAL_CONTRACT_VIOLATION_EVENT",
     "READ_POLICIES",
+    "REFETCH_BUDGET_SECONDS",
+    "REFETCH_THROTTLE_SECONDS",
+    "needs_refetch",
+    "resolve_stale_evidence",
     "internal_contract_violation_event",
     "is_supported",
     "project_domain",
@@ -405,6 +413,154 @@ def project_domain(
     else:
         fact = _fact_from_item(item, domain=domain, fact_id=reference)
     return evaluate_fact(fact, READ_POLICIES[fact.data_type], now=now)
+
+
+# ---------------------------------------------------------------------------
+# 读时同步重采（freshness-policy.md §5.1，2026-08-03 裁决）
+# ---------------------------------------------------------------------------
+#
+# 触发时机取「读取时同步」而非排队/下次推进：本地单进程产品没有可靠的「之后」，
+# 用户关掉进程就没有之后了，那两档会退化成「永远不重查」而看起来像做了。
+
+#: 单次读取的重采总预算。超预算的域按现有 stale 降级，**不阻塞读取**。
+#: 8 秒是提案值（已批，标可调）：读取路径不该按写入路径的耐心来——单个注册
+#: 动作的超时是 30 秒，那是用户主动等一次采集；读取是页面刷新，等 30 秒等于挂死。
+REFETCH_BUDGET_SECONDS = 8.0
+
+#: 节流窗。一次失败的重采在这段时间内不再重试。
+#:
+#: 节流状态存在**已持久化的** ``refresh_failure.attempted_at`` 上，不是
+#: ``next_action.retry_after_at``——后者是读取时算出来的，不落盘，下次读取就没了，
+#: 拿它做节流等于没有节流。``retry_after_at`` 的角色是把这个截止时刻**报出去**
+#: （`evidence-axes.md` §5.2 的语义变更），不是存它。
+REFETCH_THROTTLE_SECONDS = 300.0
+
+#: ``(domain, 陈旧的证据 item) -> 新 item 或 None``。由调用方注入。
+#:
+#: 采集器住在 ``destination_runtime`` / ``agent_actions``，都在本模块**上层**；
+#: 本模块导入它们会成环，也会把读取层变成能自己发网络请求的东西。注入保持
+#: 依赖单向，与内核「策略由调用方注入」同一个理由。
+Refetcher = Any
+
+
+class ResolvedEvidence(NamedTuple):
+    """解析步的产出。``items`` 是**整份替换后**的证据表。"""
+
+    items: dict[str, Mapping[str, object]]
+    refetched: tuple[str, ...]
+    failed: tuple[str, ...]
+    skipped_over_budget: tuple[str, ...]
+
+
+def needs_refetch(
+    item: Mapping[str, object] | None,
+    domain: str,
+    *,
+    now: datetime,
+) -> bool:
+    """该域此刻是否该触发一次同步重采。
+
+    判定**仍走 ``project_domain``**——「算不算 stale」全仓只有那一处答案
+    （I6 不因本函数多一份实现而破）。本函数只在它之上加策略侧的两个条件。
+    """
+
+    if not isinstance(item, Mapping):
+        return False
+    data_type = _data_type_for(domain, item_facts(item))
+    policy = READ_POLICIES.get(data_type)
+    if policy is None or not policy.feasibility_critical:
+        return False
+    if policy.on_stale != "auto_refetch":
+        return False
+    verdict = project_domain({domain: item}, domain, now=now)
+    if token_freshness(verdict.token) != "stale":
+        return False
+    return not _is_throttled(item, now=now)
+
+
+def _is_throttled(item: Mapping[str, object], *, now: datetime) -> bool:
+    """上一次重采失败得太近就不再试。
+
+    没有 ``attempted_at`` 的失败记录**不节流**：拿不到截止时刻就算不出窗口，
+    而放行至多多打一次——那一次会写下正经的 ``attempted_at``，之后就正常节流了。
+    反过来「无时间戳即永久节流」会让这条证据再也不重查，比多打一次糟得多。
+    """
+
+    _, attempted_at = _refresh_failure(_mapping(item.get("value")))
+    if attempted_at is None:
+        return False
+    # 这里要的是「把一个裸时间戳解析成 datetime」。``normalized_retrieved_at``
+    # 干的是另一件事——从 v1 的三种放法里**找**采集时刻，入参是 value mapping，
+    # 喂它一个字符串会静默返回 None，于是节流恒不生效。
+    moment = parse_timestamp(attempted_at)
+    if moment is None:
+        return False
+    return (now - moment).total_seconds() < REFETCH_THROTTLE_SECONDS
+
+
+def resolve_stale_evidence(
+    items: Mapping[str, Mapping[str, object]],
+    *,
+    now: datetime,
+    refetcher: Refetcher | None = None,
+    budget_seconds: float = REFETCH_BUDGET_SECONDS,
+    monotonic: Any = None,
+) -> ResolvedEvidence:
+    """读时解析步：陈旧且关键的域同步重采一次，**整份替换**后返回。
+
+    **为什么必须整份替换、而不是在取 token 的那一瞬间重采**：
+    ``project_domain`` 的调用方拿同一份证据 mapping 做的事远不止取 token——
+    编译器取完 token 之后用**同一个对象**建全部车次、票价与 fact_refs。在
+    ``project_domain`` 内部重采会让 token 反映新数据而下游字段全是旧的，
+    计划一边宣称 verified 一边用过期车次拼出来。那比不重查更坏，正是 I5 与 R2
+    要防的「结论与它所依据的数据不同步」（`freshness-policy.md` §5.2）。
+
+    **这是唯一实现，两个装载点**：``run.result["context"]["evidence"]``（列表）
+    与 ``evidence/guided-comparison.json``（按域的 mapping）。容器有两种是落盘
+    历史造成的事实，逻辑必须只有一份（D5/D20）。调用方各自负责写回。
+
+    预算耗尽或重采失败都**不阻塞读取**：那一域保持原样，照常按 stale 投影，
+    该有的 ``next_action`` 一条不少。
+    """
+
+    resolved = {domain: item for domain, item in items.items()}
+    if refetcher is None:
+        return ResolvedEvidence(resolved, (), (), ())
+
+    clock = monotonic or time.monotonic
+    deadline = clock() + budget_seconds
+    refetched: list[str] = []
+    failed: list[str] = []
+    over_budget: list[str] = []
+
+    for domain in sorted(resolved):
+        item = resolved[domain]
+        if not needs_refetch(item, domain, now=now):
+            continue
+        if clock() >= deadline:
+            over_budget.append(domain)
+            continue
+        try:
+            fresh = refetcher(domain, item)
+        except NON_BUSINESS_ERRORS:
+            # 编程错误不穿业务外衣：重采路径里的 NameError 不是「数据源不可用」
+            # （D12）。让它照常抛出去，别混进降级统计。
+            raise
+        except Exception:  # noqa: BLE001 - 采集失败是业务结果，不是异常路径
+            failed.append(domain)
+            continue
+        if not isinstance(fresh, Mapping):
+            failed.append(domain)
+            continue
+        resolved[domain] = fresh
+        refetched.append(domain)
+
+    return ResolvedEvidence(
+        resolved,
+        tuple(refetched),
+        tuple(failed),
+        tuple(over_budget),
+    )
 
 
 def is_supported(verdict: FactVerdict) -> bool:
