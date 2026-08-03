@@ -21,7 +21,10 @@ from trip_decider.trip_read_model import (
     _planning_draft_read_model,
     _presentation_contract,
 )
-from trip_decider.planning_input_compiler import PlanningInputCompiler
+from trip_decider.planning_input_compiler import (
+    PlanningInputCompiler,
+    plan_verdict_from_result,
+)
 from trip_decider.evidence_projection import project_domain, verdict_payload
 from trip_decider.travel_agent import (
     default_agent_store,
@@ -322,28 +325,15 @@ class TripQueryService:
         if not written:
             return readiness
         run = self.store.get_run(run_id)
-        result = run.result if isinstance(run.result, Mapping) else None
-        context = (
-            result.get("context")
-            if isinstance(result, Mapping)
-            and isinstance(result.get("context"), Mapping)
-            else None
-        )
-        if context is None:
-            return readiness
         read_at = now if now is not None else datetime.now(timezone.utc)
-        try:
-            compiled = PlanningInputCompiler().compile(context, now=read_at)
-        except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
-            return readiness
-        state = str(compiled.get("planning_state") or "") or None
-        readiness["planning_state"] = state
-        readiness["usable_now"] = state in _USABLE_PLAN_STATES
-        readiness["blockers"] = [
-            deepcopy(dict(item))
-            for item in compiled.get("conditional_blockers", [])
-            if isinstance(item, Mapping)
-        ]
+        # 与 agent_actions.get_next_actions 走**同一个**判定实现。此前两边各
+        # compile 一次、各判一次 PARTIAL_READY/PLAN_READY，没有任何东西保证
+        # 它们给同一个答案——同一份证据在两个读取面分叉，与「结论和数据不
+        # 同步」同族（2026-08-03 裁决：四入口收敛，不分叉）。
+        verdict = plan_verdict_from_result(run.result, now=read_at)
+        readiness["planning_state"] = verdict.planning_state
+        readiness["usable_now"] = verdict.usable_now
+        readiness["blockers"] = [dict(item) for item in verdict.blockers]
         return readiness
 
     def current_plan(self, run_id: str) -> dict[str, object]:
@@ -472,8 +462,10 @@ class TripQueryService:
         return deepcopy(dict(value))
 
 
-# 「当前可用」的判据。与写入侧的结构校验分开——写入只保证结构完整。
-_USABLE_PLAN_STATES = frozenset({"PARTIAL_READY", "PLAN_READY"})
+# 「当前可用」的判据已收敛到
+# `planning_input_compiler.INSTALLABLE_STATES`（单一出处）。本模块此前在这里
+# 留了一份同值的副本，`agent_actions` 里还有第三份内联字面量——三份都写着同两
+# 个取值，但没有任何东西保证它们一起改（D5）。
 
 
 _DEFAULT_QUERY: TripQueryService | None = None

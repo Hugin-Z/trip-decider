@@ -48,7 +48,10 @@ from trip_decider.itinerary_planner import (
 )
 from trip_decider.evidence_core import aggregate_support
 from trip_decider.intercity_rail import rail_snapshot_metadata
-from trip_decider.planning_input_compiler import PlanningInputCompiler
+from trip_decider.planning_input_compiler import (
+    PlanningInputCompiler,
+    plan_verdict_from_result,
+)
 from trip_decider.simple_live import (
     _LiveFailure,
     estimate_public_transport_from_points,
@@ -485,7 +488,13 @@ def get_next_actions(
     if state.action_status["planner"] == "completed":
         if _result_is_displayable(state.result):
             return _snapshot(run_id, "READY", [], result=state.result)
-        if _result_planning_state(state.result) == "BLOCKED":
+        # 读时重算，不读盘上的副本。此前这里是
+        # `_result_planning_state(state.result)`，读 `result["planning_state"]`
+        # ——那个键在 P4 已从落盘契约删除（I1 禁用键），于是这一支**恒不成立**：
+        # 硬约束冲突的 run 拿不到 BLOCKED 快照，只会落到下面那句
+        # 「缺展示要件」，叙述与真实原因无关。删掉读盘的那个 helper，接上
+        # 与 _result_is_displayable 同一个读时结论。
+        if recomputed_planning_state(state.result) == "BLOCKED":
             return _snapshot(
                 run_id,
                 "BLOCKED",
@@ -1844,41 +1853,33 @@ def recomputed_planning_state(
 
     判定本身不是新建的——读取层一直有这个能力（`p4b-plan-readiness-sample.json`
     就是它的产物），这里只是把已存在的判定接上。
+
+    **本函数不再自己碰证据 mapping**（2026-08-03 裁决：四入口收敛，不分叉）。
+    它此前自己 compile 一次，而 ``trip_query.plan_readiness`` 又 compile 一次
+    ——两份并列的实现读同一份 context、判同一件事，却没有任何东西保证它们
+    给同一个答案。现在两边都走
+    ``planning_input_compiler.plan_verdict_from_result``。
     """
 
-    if not isinstance(result, Mapping):
-        return None
-    context = result.get("context")
-    if not isinstance(context, Mapping):
-        return None
-    try:
-        compiled = PlanningInputCompiler().compile(context, now=_READ_CLOCK())
-    except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
-        return None
-    return str(compiled.get("planning_state") or "") or None
+    return plan_verdict_from_result(result, now=_READ_CLOCK()).planning_state
 
 
 def _result_is_displayable(
     result: Mapping[str, object] | None,
 ) -> bool:
     """写入侧只验结构完整，「够不够格显示」是读取时的问题
-    （persistence-v2.md §6.2）。"""
+    （persistence-v2.md §6.2）。
+
+    两半各管各（`e579b28` 拆的那两个词）：``plan.artifact_kind`` 是**已写入**
+    的结构判据，``usable_now`` 是**当前可用**的读取时刻结论。
+    """
 
     if not isinstance(result, Mapping):
         return False
     plan = result.get("plan")
     if not (isinstance(plan, Mapping) and plan.get("artifact_kind") == "PlanVersion"):
         return False
-    return recomputed_planning_state(result) in {"PARTIAL_READY", "PLAN_READY"}
-
-
-def _result_planning_state(
-    result: Mapping[str, object] | None,
-) -> str | None:
-    if not isinstance(result, Mapping):
-        return None
-    value = result.get("planning_state")
-    return str(value) if isinstance(value, str) else None
+    return plan_verdict_from_result(result, now=_READ_CLOCK()).usable_now
 
 
 def _missing_display_requirements(

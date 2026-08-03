@@ -31,7 +31,72 @@ from trip_decider.itinerary_planner import (
 from trip_decider.travel_agent import DestinationContext
 
 
-_INSTALLABLE_STATES = {"PARTIAL_READY", "PLAN_READY"}
+#: 「当前可用」的 planning_state 集合——**单一出处**。
+#:
+#: 此前有三份并列：本模块的 ``_INSTALLABLE_STATES``、``trip_query`` 的
+#: ``_USABLE_PLAN_STATES``、``agent_actions._result_is_displayable`` 里的一个
+#: 内联字面量。三份都写着同两个取值，但没有任何东西保证它们一起改（D5：
+#: 成对操作必须引用同一份粒度定义，两份并列的名单早晚有人只改一份）。
+INSTALLABLE_STATES: frozenset[str] = frozenset(
+    {"PARTIAL_READY", "PLAN_READY"}
+)
+
+_INSTALLABLE_STATES = INSTALLABLE_STATES
+
+
+class PlanVerdict(NamedTuple):
+    """「这份计划**当前**够不够格呈现」的读取时刻结论。
+
+    与「已写入」是两件事（`persistence-v2.md` §6.2/6.3）：版本号写下就不变，
+    而可用性是 ``now`` 的函数——同一份 PlanVersion 在容差窗内外给出不同答案。
+    """
+
+    planning_state: str | None
+    usable_now: bool
+    blockers: tuple[Mapping[str, object], ...]
+
+
+_ABSENT_VERDICT = PlanVerdict(planning_state=None, usable_now=False, blockers=())
+
+
+def plan_verdict_from_result(
+    result: Mapping[str, object] | None,
+    *,
+    now: datetime,
+) -> PlanVerdict:
+    """从 ``run.result`` 取 context，按读取时刻编译出计划准入结论。
+
+    **这是该判定的唯一实现。** 此前有两份：``trip_query.plan_readiness`` 自己
+    compile 一次，``agent_actions.recomputed_planning_state`` 又 compile 一次。
+    两份各自读 ``result["context"]``、各自判 ``PARTIAL_READY/PLAN_READY``，
+    于是同一份证据在两个读取面可能给出不同结论——那与「结论和数据不同步」
+    同族，只是错位发生在同一时刻的两次读取之间。收敛到这里之后，
+    ``agent_actions`` 拿结论，不再自己碰证据 mapping。
+
+    这里也是 auto_refetch 读时解析步的装载点：证据在这一层被解析成结论，
+    重采若要发生，必须发生在 compile **之前**，一次替换整份
+    （`freshness-policy.md` §5.2）。
+    """
+
+    if not isinstance(result, Mapping):
+        return _ABSENT_VERDICT
+    context = result.get("context")
+    if not isinstance(context, Mapping):
+        return _ABSENT_VERDICT
+    try:
+        compiled = PlanningInputCompiler().compile(context, now=now)
+    except Exception:  # noqa: BLE001 - 结构不完整的历史数据不该让读取崩掉
+        return _ABSENT_VERDICT
+    state = str(compiled.get("planning_state") or "") or None
+    return PlanVerdict(
+        planning_state=state,
+        usable_now=state in INSTALLABLE_STATES,
+        blockers=tuple(
+            deepcopy(dict(item))
+            for item in compiled.get("conditional_blockers", ())
+            if isinstance(item, Mapping)
+        ),
+    )
 
 
 class _PlanRefs(NamedTuple):

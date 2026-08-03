@@ -342,7 +342,11 @@ def scan_decision_points(root: Path = SRC_ROOT) -> set[tuple[str, str]]:
                 continue
             if isinstance(node, ast.Assign):
                 targets = node.targets
-            elif isinstance(node, ast.AnnAssign):
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                # 只收**真的赋了值**的注解赋值。纯注解声明不是判定点——
+                # `PlanVerdict` 的 NamedTuple 字段 `planning_state: str | None`
+                # 就是一条无值 AnnAssign，第一版把它当成了模块级判定点。
+                # 判据是「哪里给输出赋了值」，不是「哪里出现过这个名字」。
                 targets = [node.target]
             else:
                 continue
