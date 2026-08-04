@@ -713,10 +713,17 @@ def _compile_local_transit(
                 # 用户实测点名过：行程说「30 分钟到」，但没说坐几路、在哪上车。
                 # 数据一直在 map 证据里，缺的是这三行。
                 "services": deepcopy(_usable_services(route)),
+                "legs": deepcopy(route.get("legs")),
                 "transfers": _transfer_points(route),
                 "walking_distance_meters": route.get(
                     "walking_distance_meters"
                 ),
+                # 「多久一班」。景区班车与摆渡车最要紧的就是这个——宿主第三次
+                # 实测手写的班车证据里带了它（首班 06:30、每 25 分钟一班），
+                # 此前编译器不抄，于是写了也白写。
+                "headway_minutes": route.get("headway_minutes"),
+                "first_departure": route.get("first_departure"),
+                "last_departure": route.get("last_departure"),
                 "from_location": deepcopy(route.get("from_location")),
                 "to_location": deepcopy(route.get("to_location")),
                 "polyline": deepcopy(route.get("polyline")),

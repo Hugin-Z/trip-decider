@@ -320,6 +320,8 @@ commit message 能回答。
 | 4 | 工具描述里的选用钩子与参数示例 | `tests/test_tool_descriptions_help_the_host_choose.py` | 无需夹具（读的是 `list_tools()` 的真实产出） |
 | 5 | 单次 MCP 调用有上界 + 循环必须能到检查点（I13） | `tests/test_invariant_i13_mcp_calls_are_bounded.py` | sleep 注入，无需网络 |
 | 6 | 核实模式逐条核验与三档结论 | `tests/test_itinerary_verification.py` | 夹具用宿主那份 web search 行程的断言形状 |
+| 7 | 比较阶段轮询（异步化引入的中间态） | `tests/test_host_call_protocol_relief.py::NoUninitialisedMiddleStateCase` | 无需网络 |
+| 8 | 手工提交班车证据（线路措辞） | `tests/test_invariant_i12_all_domains.py` | 夹具 `HOST_SHUTTLE_SUBMISSION`，取自宿主第三次实测的真实提交形状 |
 
 第 3、4 条来自实测的**另一半**：不是「调用崩了」，是「宿主没选用 / 选用了也
 要试十几次」。第 4 条守的东西不在代码行为里而在**描述文本**里——它照样能机械

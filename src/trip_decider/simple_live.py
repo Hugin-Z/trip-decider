@@ -85,6 +85,9 @@ class _TransitRoute:
     fare_cny: float | None
     services: tuple[dict[str, object], ...]
     attempts: int
+    #: 按响应原顺序交织的「走一段 / 坐一段」。`services` 是它的乘车子集，
+    #: 保留是因为读取层与界面都按线路列表在用。
+    legs: tuple[dict[str, object], ...] = ()
     polyline: tuple[tuple[float, float], ...] = ()
 
 
@@ -1132,6 +1135,7 @@ def _transit_route_value(
                 int,
                 float | None,
                 tuple[dict[str, object], ...],
+                tuple[dict[str, object], ...],
                 tuple[tuple[float, float], ...],
             ]
         ] = []
@@ -1148,6 +1152,12 @@ def _transit_route_value(
                 raise ValueError("negative transit metric")
             fare = _optional_nonnegative_number(cost.get("transit_fee"))
             services: list[dict[str, object]] = []
+            # 按响应里的原顺序把「走一段、坐一段」交织起来。此前只挑 bus 段，
+            # `segments[].walking` 整段跳过——于是「先走 840 米到某站上车」这种
+            # 最要紧的一句无从说起。2026-08-04 实测确认：walking 的 distance 与
+            # cost.duration **本来就在响应里**，不需要多要任何字段、不多一次请求，
+            # 纯粹是此前没解析（见 local-transit-coverage.md §2.1 缺口 1）。
+            legs: list[dict[str, object]] = []
             polyline = _nested_polyline(transit)
             segments = transit.get("segments")
             if not isinstance(segments, list):
@@ -1155,6 +1165,29 @@ def _transit_route_value(
             for segment in segments:
                 if not isinstance(segment, Mapping):
                     raise TypeError("transit segment must be an object")
+                walking = segment.get("walking")
+                if isinstance(walking, Mapping) and walking:
+                    walk_distance = _optional_nonnegative_number(
+                        walking.get("distance")
+                    )
+                    walk_cost = walking.get("cost")
+                    walk_duration = (
+                        _optional_nonnegative_number(walk_cost.get("duration"))
+                        if isinstance(walk_cost, Mapping)
+                        else None
+                    )
+                    if walk_distance:
+                        legs.append(
+                            {
+                                "mode": "walk",
+                                "distance_meters": int(walk_distance),
+                                "duration_seconds": (
+                                    int(walk_duration)
+                                    if walk_duration is not None
+                                    else None
+                                ),
+                            }
+                        )
                 bus = segment.get("bus")
                 if not isinstance(bus, Mapping):
                     continue
@@ -1180,19 +1213,39 @@ def _transit_route_value(
                         for value in (name, boarding, alighting)
                     ):
                         raise TypeError("bus service identity is missing")
-                    services.append(
-                        {
-                            "service": name,
-                            "board_at": boarding,
-                            "alight_at": alighting,
-                            "operating_start": _service_clock(
-                                line.get("start_time")
-                            ),
-                            "operating_end": _service_clock(
-                                line.get("end_time")
-                            ),
-                        }
+                    line_cost = line.get("cost")
+                    ride_duration = (
+                        _optional_nonnegative_number(line_cost.get("duration"))
+                        if isinstance(line_cost, Mapping)
+                        else None
                     )
+                    stop_count = _optional_nonnegative_number(
+                        line.get("via_num")
+                    )
+                    service = {
+                        "service": name,
+                        "board_at": boarding,
+                        "alight_at": alighting,
+                        "operating_start": _service_clock(
+                            line.get("start_time")
+                        ),
+                        "operating_end": _service_clock(
+                            line.get("end_time")
+                        ),
+                        # 「坐多久、坐几站」。两者都在响应里，此前没取。
+                        # 运营时刻常常是空字符串（实测如此），这两个通常有值，
+                        # 对「几点能到」的判断比首末班车更实用。
+                        "ride_duration_seconds": (
+                            int(ride_duration)
+                            if ride_duration is not None
+                            else None
+                        ),
+                        "stop_count": (
+                            int(stop_count) if stop_count is not None else None
+                        ),
+                    }
+                    services.append(service)
+                    legs.append({"mode": "ride", **service})
             fare_sort = fare if fare is not None else float("inf")
             parsed.append(
                 (
@@ -1202,6 +1255,7 @@ def _transit_route_value(
                     walking_distance,
                     fare,
                     tuple(services),
+                    tuple(legs),
                     polyline,
                 )
             )
@@ -1212,6 +1266,7 @@ def _transit_route_value(
             walking_distance,
             fare,
             services,
+            legs,
             polyline,
         ) = min(parsed, key=lambda item: item[0])
     except (
@@ -1236,6 +1291,7 @@ def _transit_route_value(
         walking_distance_meters=walking_distance,
         fare_cny=fare,
         services=services,
+        legs=legs,
         attempts=response.attempts,
         polyline=polyline,
     )
@@ -2262,6 +2318,7 @@ def estimate_live_public_transport_segments(
                         ),
                         "fare_cny": transit.fare_cny,
                         "services": list(transit.services),
+                        "legs": [dict(leg) for leg in transit.legs],
                         "polyline": [
                             [longitude, latitude]
                             for longitude, latitude in transit.polyline
@@ -2514,6 +2571,7 @@ def estimate_public_transport_from_points(
                         ),
                         "fare_cny": transit.fare_cny,
                         "services": list(transit.services),
+                        "legs": [dict(leg) for leg in transit.legs],
                         "polyline": [
                             [longitude, latitude]
                             for longitude, latitude in transit.polyline

@@ -303,3 +303,85 @@ class CompiledEventCarriesRidingDetailCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrderedLegsCase(unittest.TestCase):
+    """「先走多远、坐哪条线几站、再走多远」——顺序信息只有 legs 说得出。
+
+    第三次实测（2026-08-04）用户第三次点名当地交通粒度。本轮把采集层的解析
+    补齐：`segments[].walking` 与 `buslines[].cost/via_num` **本来就在响应里**，
+    此前解析循环只挑 bus 段、其余整段跳过。
+
+    实测确认（2026-08-04，真高德）：给 `show_fields` 加 `steps` **没有任何区别**
+    ——transit 端点不认这个值，walking.distance 与 cost.duration 无需额外声明
+    就在响应里。所以本轮的增量是纯解析，零请求变更、零额外网络往返。
+    """
+
+    def _route(self, **overrides: object) -> dict[str, object]:
+        segment = collector_segment(**overrides)
+        return _normalize_local_transit(segment)[0]
+
+    def test_walk_and_ride_keep_their_original_order(self) -> None:
+        route = self._route(
+            legs=[
+                {"mode": "walk", "distance_meters": 840,
+                 "duration_seconds": 720},
+                {"mode": "ride", "service": "2号线", "board_at": "甲站",
+                 "alight_at": "乙站", "ride_duration_seconds": 1920,
+                 "stop_count": 9},
+                {"mode": "walk", "distance_meters": 100,
+                 "duration_seconds": 85},
+            ]
+        )
+
+        self.assertEqual(
+            ["walk", "ride", "walk"],
+            [leg["mode"] for leg in route["legs"]],
+        )
+        self.assertEqual(840, route["legs"][0]["distance_meters"])
+        self.assertEqual(9, route["legs"][1]["stop_count"])
+        self.assertEqual(1920, route["legs"][1]["ride_duration_seconds"])
+
+    def test_walk_leg_without_distance_is_dropped(self) -> None:
+        """说不出走多远的步行段留着只是界面上一个空行。"""
+
+        route = self._route(
+            legs=[
+                {"mode": "walk", "duration_seconds": 60},
+                {"mode": "walk", "distance_meters": 100},
+            ]
+        )
+
+        self.assertEqual(1, len(route["legs"]))
+
+    def test_ride_leg_without_identity_is_dropped(self) -> None:
+        route = self._route(
+            legs=[
+                {"mode": "ride", "service": "2号线", "board_at": "甲站"},
+                {"mode": "ride", "service": "3号线", "board_at": "甲站",
+                 "alight_at": "乙站"},
+            ]
+        )
+
+        self.assertEqual(
+            ["3号线"],
+            [leg["service"] for leg in route["legs"]],
+        )
+
+    def test_missing_ride_metrics_do_not_drop_the_leg(self) -> None:
+        """坐几站/多久是补充信息，缺了不影响「乘什么、在哪上下」。"""
+
+        route = self._route(
+            legs=[
+                {"mode": "ride", "service": "2号线", "board_at": "甲站",
+                 "alight_at": "乙站"},
+            ]
+        )
+
+        self.assertEqual(1, len(route["legs"]))
+        self.assertIsNone(route["legs"][0]["ride_duration_seconds"])
+
+    def test_absent_legs_degrade_to_an_empty_list(self) -> None:
+        route = self._route()
+
+        self.assertEqual([], route["legs"])

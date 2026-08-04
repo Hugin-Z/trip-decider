@@ -484,6 +484,20 @@ run 落 `PLANNER_ACTION_FAILED` 且不再派发动作。
 凡通过 evidence 校验被接受（`submit_evidence` 返回而未抛异常）的证据提交，
 规划器消费它时不得抛异常。校验通过是消费成功的**充分条件**。
 
+**2026-08-04 扩展到全部可提交域。** 原条只落了 railway。第三次实测在 map 域
+撞出同一形状：宿主提交「线路」措辞的班车证据（`line` / `board_at` /
+`alight_at` / `fare`，无 `from` / `to` / `duration_seconds`），而 map 域
+**根本没有提交门**——提交被静默接受、事件流写下「取得有效证据」，编译器随后
+产出 0 个事件加一个 `MAP_INPUT_UNAVAILABLE`，需求仍缺、动作重派，宿主眼中
+就是「反复被拒」且拿不到任何说明，最终只能手排时间轴。
+
+「消费失败」不限于抛异常：**产出 0 个事件加一个 blocker，与抛异常是同一件事的
+两种表现**——都是「门放行了、屋里没成」。判定按后果，不按异常类型。
+
+覆盖状态：railway ✅（`_validate_railway_value`）、web ✅（`_validate_web_value`）、
+map ✅（`_validate_map_value`，2026-08-04 补）。新增可提交域**必须同时补门**，
+由 `test_invariant_i12_all_domains.py` 的矩阵守。
+
 推论：校验必须吃**与规划器同一个视图**。字段级投影（`usable_fact_values`）会把
 support 不可用的字段整个丢掉，在投影之前的原始 mapping 上校验，会放行一份投影后
 缺键的证据——门就又比消费松了。

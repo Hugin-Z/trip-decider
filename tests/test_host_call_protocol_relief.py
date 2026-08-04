@@ -272,3 +272,77 @@ class HostCallProtocolCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoUninitialisedMiddleStateCase(unittest.TestCase):
+    """「已 RUNNING 但循环还没建」不许作为错误暴露给宿主。
+
+    事故（第三次实测，2026-08-04）：宿主在候选比较阶段调 `advance_trip_task`，
+    收到 "action loop was not started" 并盲试多次。
+
+    这个中间态是**异步化引入的**：比较在后台跑，run 已经是 RUNNING，但动作
+    循环要等选定候选之后才建。宿主什么都没做错——它就是在按提示轮询。
+    启动循环是实现细节，不是宿主的义务，所以这个状态不该对外存在；对外只有
+    「还在比较，进度 n/m」。
+    """
+
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        root = Path(self._temporary.name) / "sessions"
+        self.store = InMemoryAgentStore(root)
+        self.application = _NoBackgroundApplication(
+            store=self.store,
+            evidence_broker=EvidenceBroker(root.parent / "cache"),
+            railway_collector=noop_collector,
+            map_collector=noop_collector,
+            web_collector=noop_collector,
+        )
+        self.query = TripQueryService(
+            store=self.store,
+            application_service=self.application,
+        )
+        self.adapter = TripMCPAdapter(self.application, self.query)
+        self.run_id = str(
+            self.adapter.create_trip_task(
+                {**_INTENT,
+                 "task_mode": "GUIDED_DISCOVERY",
+                 "destination_anchor": "某区域",
+                 "destination_expression": "某区域那一带，还没定具体哪个"}
+            )["run"]["run_id"]
+        )
+        self.adapter.confirm_trip_intent(self.run_id)
+        self.adapter.advance_trip_task(self.run_id, wait_seconds=0)
+
+    def test_advancing_during_comparison_does_not_raise(self) -> None:
+        for attempt in range(3):
+            with self.subTest(attempt=attempt):
+                response = self.adapter.advance_trip_task(
+                    self.run_id,
+                    wait_seconds=0,
+                )
+                self.assertIn("checkpoint", response)
+
+    def test_comparison_phase_has_its_own_checkpoint(self) -> None:
+        """报「比较中」而不是光秃秃的 RUNNING——后者宿主分不清是不是卡住了。"""
+
+        response = self.adapter.advance_trip_task(self.run_id, wait_seconds=0)
+
+        self.assertEqual("COMPARING_CANDIDATES", response["checkpoint"])
+
+    def test_comparison_checkpoint_reports_real_progress(self) -> None:
+        """进度取自真实发生过的事件，不是估的。"""
+
+        response = self.adapter.advance_trip_task(self.run_id, wait_seconds=0)
+        progress = response["progress"]
+
+        self.assertEqual("COMPARING", progress["status"])
+        self.assertIsInstance(progress["compared_count"], int)
+
+    def test_comparison_checkpoint_tells_the_host_to_keep_going(self) -> None:
+        response = self.adapter.advance_trip_task(self.run_id, wait_seconds=0)
+
+        self.assertEqual(
+            "advance_trip_task",
+            response["next_call"]["options"][0]["entrypoint"],
+        )

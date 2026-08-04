@@ -1089,14 +1089,42 @@ function eventDescription(event) {
   }
   // 「乘什么、在哪上下、走多远」。此前这一段只显示时长和距离，用户实测点名过。
   // 数据一直在 map 证据里，缺的只是这几行渲染。
+  // legs 按原顺序说「先走多远、坐哪条线几站、再走多远」；没有 legs 的证据
+  // （手工提交、或旧数据）退回只列线路。
+  const legs = Array.isArray(event.legs) ? event.legs : [];
   const services = Array.isArray(event.services) ? event.services : [];
-  if (services.length) {
+  if (legs.length) {
+    details.push(legs.map(legLabel).join(" → "));
+  } else if (services.length) {
     details.push(services.map(serviceLabel).join(" → "));
   }
   if (Number.isFinite(event.walking_distance_meters)) {
-    details.push(`步行 ${event.walking_distance_meters} 米`);
+    details.push(`全程步行 ${event.walking_distance_meters} 米`);
+  }
+  if (Number.isFinite(event.headway_minutes)) {
+    const first = event.first_departure ? `${event.first_departure} 起，` : "";
+    details.push(`${first}每 ${event.headway_minutes} 分钟一班`);
   }
   return details.join(" · ");
+}
+
+function legLabel(leg) {
+  if (leg?.mode === "walk") {
+    const minutes = Number(leg.duration_seconds);
+    const spent = Number.isFinite(minutes)
+      ? `（约 ${Math.round(minutes / 60)} 分钟）`
+      : "";
+    return `步行 ${leg.distance_meters} 米${spent}`;
+  }
+  const detail = [];
+  if (Number.isFinite(Number(leg?.stop_count))) {
+    detail.push(`${leg.stop_count} 站`);
+  }
+  if (Number.isFinite(Number(leg?.ride_duration_seconds))) {
+    detail.push(`约 ${Math.round(leg.ride_duration_seconds / 60)} 分钟`);
+  }
+  const tail = detail.length ? `（${detail.join("、")}）` : "";
+  return `${serviceLabel(leg)}${tail}`;
 }
 
 function serviceLabel(service) {

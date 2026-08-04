@@ -839,6 +839,10 @@ def submit_evidence(
         if action_id == "railway":
             # 同上，且必须在**投影之后**校验——见 _validate_railway_value。
             _validate_railway_value(usable_fact_values(merged.facts))
+        if action_id == "map":
+            # I12 第三个域。此前 map 没有门，形状不合的提交会静默通过、
+            # 死在编译器里（宿主第三次实测的班车证据就是这么丢的）。
+            _validate_map_value(usable_fact_values(merged.facts))
         state.evidence[item.domain] = merged
         state.last_sourced_evidence[item.domain] = merged
         state.action_status[action_id] = "completed"
@@ -1738,6 +1742,9 @@ def _normalize_local_transit(
                 # transfer 列表——那会变成第二份可以和 services 不一致的数据
                 # （D19）。
                 "services": _normalized_services(selected.get("services")),
+                # 「先走 840 米到某站，坐 9 站，再走 100 米」——顺序信息只有
+                # legs 说得出，services 只是它的乘车子集。
+                "legs": _normalized_legs(selected.get("legs")),
                 "walking_distance_meters": _nonnegative_int(
                     selected.get("walking_distance_meters")
                 ),
@@ -1795,6 +1802,52 @@ def _normalized_services(value: object) -> list[dict[str, object]]:
             continue
         services.append({key: item.get(key) for key in _SERVICE_FIELDS})
     return services
+
+
+def _normalized_legs(value: object) -> list[dict[str, object]]:
+    """按原顺序保留「走一段 / 坐一段」。
+
+    只收说得出话的段：步行段要有距离，乘车段要有线路身份。缺了的段留着只会在
+    界面上显示一个空行。
+    """
+
+    if not isinstance(value, list):
+        return []
+    legs: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        mode = item.get("mode")
+        if mode == "walk":
+            distance = _nonnegative_int(item.get("distance_meters"))
+            if distance is None:
+                continue
+            legs.append(
+                {
+                    "mode": "walk",
+                    "distance_meters": distance,
+                    "duration_seconds": _nonnegative_int(
+                        item.get("duration_seconds")
+                    ),
+                }
+            )
+        elif mode == "ride":
+            if not all(
+                isinstance(item.get(key), str) and str(item.get(key)).strip()
+                for key in ("service", "board_at", "alight_at")
+            ):
+                continue
+            legs.append(
+                {
+                    "mode": "ride",
+                    **{key: item.get(key) for key in _SERVICE_FIELDS},
+                    "ride_duration_seconds": _nonnegative_int(
+                        item.get("ride_duration_seconds")
+                    ),
+                    "stop_count": _nonnegative_int(item.get("stop_count")),
+                }
+            )
+    return legs
 
 
 def _nonnegative_int(value: object) -> int | None:
@@ -2089,10 +2142,14 @@ def _plan_followup_actions(
                 "title": "补充至少一段当地交通",
                 "submit_action_id": "map",
                 "required_fields": [
-                    "local_transit[].from",
-                    "local_transit[].to",
-                    "local_transit[].duration_seconds",
+                    f"local_transit[].{field}"
+                    for field in MAP_SEGMENT_REQUIRED_FIELDS
                 ],
+                "optional_fields": [
+                    f"local_transit[].{field}"
+                    for field in MAP_SEGMENT_OPTIONAL_FIELDS
+                ],
+                "example": MAP_SEGMENT_EXAMPLE,
             }
         )
     return actions
@@ -2146,6 +2203,92 @@ def _validate_railway_value(value: Mapping[str, object]) -> None:
             + "；".join(problems)
             + "。必填项："
             + "、".join(RAILWAY_MANUAL_REQUIRED_FIELDS)
+        )
+
+
+#: 一段当地交通被规划器消费所必需的键。与 `local_transit_manual` 声明的
+#: `required_fields` 是**同一张表**（D2）——那边由这里派生，不另抄一份。
+MAP_SEGMENT_REQUIRED_FIELDS = ("from", "to", "duration_seconds")
+
+#: 可选的线路级信息。给了就进事件 detail（「乘什么、在哪上下、多少钱」），
+#: 不给不影响这一段可用。宿主第三次实测提交的正是这一组，此前无处安放。
+MAP_SEGMENT_OPTIONAL_FIELDS = (
+    "services",
+    "fare",
+    "walking_distance_meters",
+    "headway_minutes",
+    "first_departure",
+    "last_departure",
+)
+
+#: 报错时给宿主看的「最近的合法形状」。只用于提示，不参与校验。
+MAP_SEGMENT_EXAMPLE = (
+    '{"local_transit": [{"from": "<起点>", "to": "<终点>", '
+    '"duration_seconds": 1800, '
+    '"services": [{"service": "<线路名>", "board_at": "<上车站>", '
+    '"alight_at": "<下车站>"}], '
+    '"fare": {"status": "sourced", "amount_cny": 15.0}, '
+    '"headway_minutes": 25, "first_departure": "06:30"}]}'
+)
+
+
+def _validate_map_value(value: object) -> None:
+    """当地交通证据的提交门：**校验通过 = 规划器消费必成功**（I12）。
+
+    此前 map 域**根本没有门**。宿主第三次实测提交了一份「线路」形状的班车证据
+    （line / board_at / alight_at / fare，没有 from/to/duration_seconds），
+    提交被静默接受、事件流写下「取得有效证据」，然后编译器产出 0 个事件加一个
+    `MAP_INPUT_UNAVAILABLE`——需求仍然缺，动作被重新派发，宿主眼中就是
+    「反复被拒」，却始终拿不到一句说明缺什么。
+
+    这正是 I12 当初为 railway 立下的形状，只是当时只落了 railway 一个域。
+
+    与 railway 那道门一样，吃的是 `usable_fact_values(item.facts)`——**与规划器
+    同一个视图**。在提交时的原始 mapping 上校验会放行投影后缺键的证据。
+    """
+
+    if not isinstance(value, Mapping):
+        raise TravelAgentError("map evidence value must be an object")
+    routes = value.get("local_transit")
+    if routes is None:
+        # 只报了目的地识别、没带当地交通的 map 证据是合法的——采集器就这么产。
+        return
+    if not isinstance(routes, list) or not routes:
+        raise TravelAgentError(
+            "local_transit 必须是非空数组；"
+            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
+        )
+    problems: list[str] = []
+    for index, route in enumerate(routes):
+        if not isinstance(route, Mapping):
+            problems.append(f"local_transit[{index}] 不是对象")
+            continue
+        absent = [
+            field
+            for field in MAP_SEGMENT_REQUIRED_FIELDS
+            if route.get(field) in (None, "")
+        ]
+        if absent:
+            problems.append(
+                f"local_transit[{index}] 缺 " + "、".join(absent)
+            )
+            continue
+        duration = route.get("duration_seconds")
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or duration <= 0
+        ):
+            problems.append(
+                f"local_transit[{index}].duration_seconds 必须是正整数秒，"
+                f"收到 {duration!r}"
+            )
+    if problems:
+        raise TravelAgentError(
+            "；".join(problems)
+            + f"。每一段都要能回答「从哪到哪、要多久」——"
+            f"线路名、上下车站、票价是可选的补充。"
+            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
         )
 
 
@@ -2389,6 +2532,26 @@ def _persist_loop_state(
     )
 
 
+def action_loop_started(
+    run_id: str,
+    *,
+    store: InMemoryAgentStore | None = None,
+) -> bool:
+    """这个 run 有没有动作循环可推。
+
+    候选比较阶段的 run 是 RUNNING 但**还没有动作循环**——循环要等选定候选之后
+    才建。调用方需要在「推循环」之前问这一句，而不是靠捕获
+    ``action loop was not started`` 来猜（D10：捕获式判断会把「文件真的丢了」
+    一并吞掉）。
+    """
+
+    store = store if store is not None else default_agent_store()
+    with _LOCK:
+        if _STATES.get(run_id) is not None:
+            return True
+        return _load_loop_state(run_id, store) is not None
+
+
 def _load_loop_state(
     run_id: str,
     store: InMemoryAgentStore,
@@ -2555,6 +2718,7 @@ def _runtime_json_object(path: Path) -> dict[str, object]:
 
 __all__ = [
     "execute_registered_action",
+    "action_loop_started",
     "get_next_actions",
     "restart_action_loop_for_intent",
     "run_until_blocked",

@@ -15,9 +15,15 @@ from trip_decider.trip_application import (
     TripApplicationError,
     TripApplicationService,
 )
+from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE
 from trip_decider.itinerary_verification import verify_railway_assertions
 from trip_decider.trip_query import TripQueryError, TripQueryService
 from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
+
+
+#: 显式表示「这条错误确实没有下一步可给」。传它是一个决定，会被守卫看见；
+#: 省略 `next_call` 则是语法错误。两者的区别就是 D20 的全部意思。
+NO_NEXT_CALL = "no_further_action"
 
 
 class TripMCPError(ValueError):
@@ -30,15 +36,27 @@ class TripMCPError(ValueError):
     只放字段宿主看不见。
     """
 
+    #: ``next_call`` **没有默认值**，这是有意的（D20：把纪律做成形状）。
+    #: 上一轮的守卫按「当时的错误清单」逐条核对，于是新增的错误类型漏网——
+    #: 宿主拿到一句没有下一步的 "action loop was not started"，盲试了好几次。
+    #: 按清单核对的守卫总会漏掉清单之后新增的东西；让**省略在语法上不可能**
+    #: 才是真的守住。确实无路可走时显式传 ``NO_NEXT_CALL``，那是一个决定，
+    #: 不是一次遗忘。
     def __init__(
         self,
         message: str,
         *,
-        next_call: str | None = None,
+        next_call: str,
     ) -> None:
+        if not isinstance(next_call, str) or not next_call.strip():
+            raise ValueError(
+                "TripMCPError 必须带 next_call；真的无路可走就传 NO_NEXT_CALL"
+            )
         self.next_call = next_call
         super().__init__(
-            f"{message}｜下一步：{next_call}" if next_call else message
+            message
+            if next_call == NO_NEXT_CALL
+            else f"{message}｜下一步：{next_call}"
         )
 
 
@@ -67,11 +85,47 @@ _SYNCHRONOUS_DRIVE_BUDGET_SECONDS = 5.0
 #: 出处是 `agent_actions` 的提交门（railway 的必填集又从
 #: `itinerary_planner.RAIL_EVENT_REQUIRED_TRAIN_FIELDS` 派生）。这里再抄一份
 #: 校验逻辑就又是两张表（D2）。
+_EVIDENCE_HINT_BY_DOMAIN = {
+    "railway": (
+        'submit_trip_evidence(run_id, evidence={"action_id": "railway", '
+        '"value": {"outbound": {...五个字段...}, "return": {...}}, '
+        '"sources": [{"provider": "中国铁路12306", '
+        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+    ),
+    "map": (
+        'submit_trip_evidence(run_id, evidence={"action_id": "map", '
+        f'"value": {MAP_SEGMENT_EXAMPLE}, '
+        '"sources": [{"provider": "<出处>", '
+        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+    ),
+    "web": (
+        'submit_trip_evidence(run_id, evidence={"action_id": "web", '
+        '"value": {"destination_official_name": "<行政区全称>", '
+        '"verified_facts": [{...}]}, '
+        '"sources": [{"provider": "<出处>", '
+        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+    ),
+}
+
+#: 不知道宿主想提交哪个域时的通用提示。**先看 missing** 比猜一个域有用。
 _EVIDENCE_HINT = (
-    'submit_trip_evidence(run_id, evidence={"action_id": "railway", '
-    '"value": {...}, "sources": [{"provider": "中国铁路12306", '
-    '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+    'read_trip(run_id, view="missing") 看当前待补的动作与它的 '
+    "required_fields / optional_fields，再按那份清单提交"
 )
+
+
+def _evidence_hint(action_id: object) -> str:
+    """按宿主**实际在提交的那个域**给示例。
+
+    此前不论提交什么域，报错都贴一条 railway 的示例——宿主提交班车证据被拒后
+    拿到的是「铁路怎么填」，等于没提示。
+    """
+
+    if isinstance(action_id, str):
+        specific = _EVIDENCE_HINT_BY_DOMAIN.get(action_id.strip())
+        if specific is not None:
+            return specific
+    return _EVIDENCE_HINT
 
 
 def _normalize_host_evidence(evidence: Mapping[str, object]) -> dict[str, object]:
@@ -109,7 +163,7 @@ def _normalize_host_evidence(evidence: Mapping[str, object]) -> dict[str, object
         raise TripMCPError(
             f"domain={declared_domain!r} 与 action_id={action_id!r} 不一致。"
             "domain 可以不填，它总是等于 action_id",
-            next_call=_EVIDENCE_HINT,
+            next_call=_evidence_hint(action_id),
         )
     value["domain"] = action_id
     if not isinstance(value.get("evidence_id"), str) or not str(
@@ -124,9 +178,60 @@ def _normalize_host_evidence(evidence: Mapping[str, object]) -> dict[str, object
         raise TripMCPError(
             "sourced 证据必须带 sources（至少一条 provider + retrieved_at）。"
             "这一项不会自动补——来源是证据之所以成立的理由，不能由服务端代填",
-            next_call=_EVIDENCE_HINT,
+            next_call=_evidence_hint(action_id),
         )
+    if action_id == "map":
+        value["value"] = _sweeten_local_transit(value.get("value"))
     return value
+
+
+def _sweeten_local_transit(value: object) -> object:
+    """接住宿主更自然的写法，**只做形状搬运，不补任何事实**。
+
+    宿主第三次实测手写班车证据时用的是「线路」词汇——``line`` / ``board_at`` /
+    ``alight_at`` 直接摊在段上，``fare`` 是个裸数字。采集器产出的却是嵌套的
+    ``services[]`` 加 ``fare.{status,amount_cny}``。两种写法说的是同一件事，
+    要求宿主背下后者没有任何收益。
+
+    **不补 from/to/duration_seconds**：那三个是「这一段到底是从哪到哪、要多久」，
+    编不出来也不该编——缺了就让提交门如实拒绝并说明（I12）。这里只翻译措辞，
+    不制造事实。
+    """
+
+    if not isinstance(value, Mapping):
+        return value
+    routes = value.get("local_transit")
+    if not isinstance(routes, list):
+        return value
+    sweetened: list[object] = []
+    for route in routes:
+        if not isinstance(route, Mapping):
+            sweetened.append(route)
+            continue
+        item = dict(route)
+        # 摊平的线路字段 → services[0]
+        inline = {
+            key: item.pop(key)
+            for key in ("line", "service", "board_at", "alight_at")
+            if key in item
+        }
+        if inline and not item.get("services"):
+            service = {
+                "service": inline.get("line") or inline.get("service"),
+                "board_at": inline.get("board_at"),
+                "alight_at": inline.get("alight_at"),
+                "operating_start": item.get("first_departure"),
+                "operating_end": item.get("last_departure"),
+            }
+            if service["service"]:
+                item["services"] = [service]
+        # 裸票价 → {status, amount_cny}。status 用 sourced：宿主是带着
+        # sources 提交的，这是它查到的值，不是我们估的。
+        fare = item.get("fare")
+        if isinstance(fare, (int, float)) and not isinstance(fare, bool):
+            item["fare"] = {"status": "sourced", "amount_cny": float(fare)}
+        sweetened.append(item)
+    return {**value, "local_transit": sweetened}
 
 
 class TripMCPAdapter:
@@ -168,7 +273,12 @@ class TripMCPAdapter:
         return self._guard(
             lambda: self._query.trip(
                 self._application.create_trip(intent).run_id
-            )
+            ),
+            next_call=(
+                "被拒多半是 intent 字段问题：时间要用不带时区的本地 ISO"
+                "（2026-08-11T12:00），pace 与 transport_preferences 必填。"
+                "改好后重新调 create_trip_task(intent={...})"
+            ),
         )
 
     def confirm_trip_intent(
@@ -214,7 +324,13 @@ class TripMCPAdapter:
             or isinstance(wait_seconds, bool)
             or not 0 <= float(wait_seconds) <= 30
         ):
-            raise TripMCPError("wait_seconds must be between 0 and 30")
+            raise TripMCPError(
+                "wait_seconds 要在 0 到 30 之间",
+                next_call=(
+                    "advance_trip_task(run_id, wait_seconds=10) —— "
+                    "10 秒是常用值；只想立刻拿状态就传 0"
+                ),
+            )
 
         def operation() -> dict[str, object]:
             before = self._query.trip(run_id)
@@ -226,10 +342,11 @@ class TripMCPAdapter:
                 # 只负责「踢一脚 + 在 wait_seconds 内看看到没到检查点」。
                 # 不限的话这里能自己跑满 30 秒，再叠上下面的轮询等待，
                 # 一次工具调用就逼近宿主的超时线（I13）。
-                self._application.execute_trip(
+                outcome = self._application.execute_trip(
                     run_id,
                     drive_budget_seconds=_SYNCHRONOUS_DRIVE_BUDGET_SECONDS,
                 )
+                progress = outcome.action_loop
             elif status == "COMPLETED":
                 # A completed discovery run is already waiting for selection;
                 # a completed plan/audit run is already a stable checkpoint.
@@ -247,9 +364,15 @@ class TripMCPAdapter:
             ):
                 time.sleep(0.05)
                 current = self._query.trip(run_id)
-            return self._checkpoint(run_id, current)
+            return self._checkpoint(run_id, current, progress=progress)
 
-        return self._guard(operation)
+        return self._guard(
+            operation,
+            next_call=(
+                "advance_trip_task(run_id) 再推一次；"
+                "想只看状态不推进用 read_trip(run_id)"
+            ),
+        )
 
     def read_trip(
         self,
@@ -261,7 +384,11 @@ class TripMCPAdapter:
 
         if view not in self._READ_VIEWS:
             raise TripMCPError(
-                "view must be overview, candidates, plan, missing, map, or audit"
+                f"view={view!r} 不是可读视图",
+                next_call=(
+                    'read_trip(run_id, view="overview")｜可选值：'
+                    "overview、candidates、plan、missing、map、audit"
+                ),
             )
         readers = {
             "overview": self._query.trip,
@@ -271,7 +398,13 @@ class TripMCPAdapter:
             "map": self._query.map_payload,
             "audit": self._query.audit_result,
         }
-        return self._guard(lambda: readers[view](run_id))
+        return self._guard(
+            lambda: readers[view](run_id),
+            next_call=(
+                f'这个视图现在读不出来。先用 read_trip(run_id, view="overview") '
+                "看任务整体状态，overview 里的 checkpoint 会说明当前该做什么"
+            ),
+        )
 
     def render_trip_candidates(
         self,
@@ -285,7 +418,11 @@ class TripMCPAdapter:
                 "run_id": run_id,
                 "current_version": None,
                 "candidates": self._query.candidates(run_id),
-            }
+            },
+            next_call=(
+                "候选还没准备好。advance_trip_task(run_id) 推到 "
+                "CANDIDATES_READY 再来"
+            ),
         )
 
     def render_trip_plan(
@@ -305,7 +442,13 @@ class TripMCPAdapter:
                 "plan": plan,
             }
 
-        return self._guard(operation)
+        return self._guard(
+            operation,
+            next_call=(
+                "行程还没装上。advance_trip_task(run_id) 推到 "
+                "PLAN_OR_PARTIAL_RESULT_READY；缺证据就按 next_call 去补"
+            ),
+        )
 
     def select_trip_candidate(
         self,
@@ -321,7 +464,14 @@ class TripMCPAdapter:
             )
             return _with_outcome(self._query.trip(run_id), outcome)
 
-        return self._guard(operation)
+        return self._guard(
+            operation,
+            next_call=(
+                "candidate_id 要用 show_trip_candidates 返回的 destination_id "
+                "原样传回，不要自己拼。先 read_trip(run_id, view=\"candidates\") "
+                "看有哪些可选"
+            ),
+        )
 
     def submit_trip_evidence(
         self,
@@ -339,7 +489,10 @@ class TripMCPAdapter:
             )
             return _with_outcome(self._query.trip(run_id), outcome)
 
-        return self._guard(operation, next_call=_EVIDENCE_HINT)
+        return self._guard(
+            operation,
+            next_call=_evidence_hint(normalized.get("action_id")),
+        )
 
     def revise_trip_plan(
         self,
@@ -358,7 +511,13 @@ class TripMCPAdapter:
                 "plan": self._query.current_plan(outcome.run_id),
             }
 
-        return self._guard(operation)
+        return self._guard(
+            operation,
+            next_call=(
+                'revise_trip_plan(run_id, revision={"pace": "relaxed", '
+                '"user_message": "第二天太赶"}) —— 给的是约束不是时间轴'
+            ),
+        )
 
     def audit_trip_plan(
         self,
@@ -386,15 +545,31 @@ class TripMCPAdapter:
                 "audit": self._query.audit_result(active_run_id),
             }
 
-        return self._guard(operation)
+        return self._guard(
+            operation,
+            next_call=(
+                "audit_trip_plan(plan={...}) 或 audit_trip_plan(content=\"攻略原文\")"
+                "——两者给其一"
+            ),
+        )
 
     def _checkpoint(
         self,
         run_id: str,
         trip: Mapping[str, object],
+        *,
+        progress: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         status = _run_status(trip)
         checkpoint = _checkpoint_name(trip)
+        # 候选比较进行中：报「比较中 + 进度」而不是光秃秃的 RUNNING。宿主拿到
+        # 2/3 知道再等值得，拿到 RUNNING 只能猜——上一轮的 4 分钟就是这么熬掉的。
+        if (
+            checkpoint == "RUNNING"
+            and isinstance(progress, Mapping)
+            and str(progress.get("status")) == "COMPARING"
+        ):
+            checkpoint = "COMPARING_CANDIDATES"
         response: dict[str, object] = {
             "trip": dict(trip),
             "checkpoint": checkpoint,
@@ -412,6 +587,10 @@ class TripMCPAdapter:
         # 每个检查点都自带下一步。宿主实测的试错有一半是在猜「下一步调什么」：
         # checkpoint 名（NEED_INTENT_CONFIRMATION 之类）说的是**现在在哪**，
         # 不是**接下来做什么**，两者之间的映射此前只存在于代码里。
+        if checkpoint == "COMPARING_CANDIDATES" and isinstance(
+            progress, Mapping
+        ):
+            response["progress"] = dict(progress)
         response["next_call"] = _next_call(
             checkpoint,
             run_id,
@@ -468,14 +647,20 @@ class TripMCPAdapter:
     def _guard(
         operation: object,
         *,
-        next_call: str | None = None,
+        next_call: str,
     ) -> dict[str, object]:
         try:
             result = operation()
         except (TripApplicationError, TripQueryError, TravelAgentError) as error:
             raise TripMCPError(str(error), next_call=next_call) from None
         if not isinstance(result, dict):
-            raise TripMCPError("trip service returned a non-object result")
+            raise TripMCPError(
+                "trip service returned a non-object result",
+                next_call=(
+                    "这是服务端内部错误，不是调用姿势问题。"
+                    "用 read_trip(run_id) 看当前状态，并把这条报错反馈给维护者"
+                ),
+            )
         return result
 
 
@@ -567,6 +752,11 @@ def _next_call(
         "RUNNING": (
             "advance_trip_task",
             "继续推进，直到下一个检查点。",
+        ),
+        "COMPARING_CANDIDATES": (
+            "advance_trip_task",
+            "候选还在逐个实查往返车次（本响应的 progress 里有进度）。"
+            "再调一次即可，通常 20–40 秒内出结果。",
         ),
         "CANDIDATES_READY": (
             "select_trip_candidate",

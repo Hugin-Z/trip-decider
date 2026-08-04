@@ -20,6 +20,7 @@ import threading
 from typing import Any
 
 from trip_decider.agent_actions import (
+    action_loop_started,
     execute_registered_action,
     get_next_actions,
     restart_action_loop_for_intent,
@@ -151,6 +152,19 @@ class TripApplicationService:
 
         run = self.store.get_run(run_id)
         if run.status is RunStatus.RUNNING:
+            if action_id is None and not action_loop_started(
+                run_id,
+                store=self.store,
+            ):
+                # 候选比较阶段：run 是 RUNNING，但动作循环要等选定候选之后才建。
+                # 此前这里一头扎进 run_until_blocked，撞上
+                # 「action loop was not started」抛给宿主——而宿主什么都没做错，
+                # 它只是在按提示轮询。**这不是错误状态，是「还在比较」**，
+                # 如实回当前进度即可。
+                return ApplicationOutcome(
+                    run_id,
+                    action_loop=comparison_progress(run_id, store=self.store),
+                )
             if action_id is not None:
                 action_state = execute_registered_action(
                     run_id,
@@ -1027,6 +1041,49 @@ class TripApplicationService:
             daemon=True,
         )
         thread.start()
+
+
+def comparison_progress(
+    run_id: str,
+    *,
+    store: InMemoryAgentStore,
+) -> dict[str, object]:
+    """候选比较进行中的进度快照。
+
+    这个阶段 run 是 RUNNING 但**还没有动作循环**——循环要等选定候选之后才建。
+    宿主在这里轮询是完全正确的行为，此前却会收到
+    「action loop was not started」，于是开始盲试别的调用。
+
+    进度用**已完成的候选数**报，而不是只回一句「还在跑」：宿主拿到 2/3 就知道
+    再等一会儿是值得的，拿到一句「还在跑」只能猜。数字取自事件流里真实发生过
+    的 `guided.candidate.completed`，不是估的。
+    """
+
+    completed = 0
+    expected: int | None = None
+    try:
+        run = store.get_run(run_id)
+        events = store.events_after(run.session_id, 0)
+    except TravelAgentError:
+        events = []
+    # 按**后缀**匹配：事件前缀随任务模式变（guided / open），写死一个就会在另一
+    # 种模式下静默数出 0（D3：比较字面量也是消费点）。
+    for event in events:
+        if event.event_type.endswith(".candidate.completed"):
+            completed += 1
+        elif event.event_type.endswith(".comparison.started"):
+            details = event.details if isinstance(event.details, Mapping) else {}
+            count = details.get("candidate_count")
+            if isinstance(count, int) and not isinstance(count, bool):
+                expected = count
+    return {
+        "run_id": run_id,
+        "status": "COMPARING",
+        "actions": [],
+        "reason": "candidate_comparison_in_progress",
+        "compared_count": completed,
+        "expected_count": expected,
+    }
 
 
 #: 比较失败时留在 run.result 里的退路标记。候选卡带上它，读取层与宿主才分得清
