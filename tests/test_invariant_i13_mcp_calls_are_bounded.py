@@ -322,6 +322,10 @@ class SingleSettlementEntrypointCase(unittest.TestCase):
             # 阶段的事，此时动作循环还没开始，不可能与 settle_action_loop
             # 抢同一个结论。
             "_candidate_comparison_background",
+            # 进程重启后候选 worker 已丢失。这里落
+            # INTERNAL_ERROR_WORKER_LOST；同样发生在动作循环创建之前，且只由
+            # execute_trip 的“RUNNING 但本进程无 worker”判据调用。
+            "_settle_lost_candidate_worker",
         }
     )
 

@@ -36,7 +36,9 @@ from tests.invariant_support import WEB_APP_JS, offline_intent
 
 #: 前端对它做前缀匹配而不是整键匹配，因此不出现在键表里。理由见 app.js 注释：
 #: 盘上还有收敛前的 ``INTERNAL_ERROR_NAMEERROR`` 这类旧码。
-_PREFIX_MATCHED = frozenset({"INTERNAL_ERROR"})
+_PREFIX_MATCHED = frozenset(
+    {"INTERNAL_ERROR", "INTERNAL_ERROR_WORKER_LOST"}
+)
 
 
 def _app_js_reason_keys() -> set[str]:

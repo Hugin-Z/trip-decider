@@ -51,6 +51,7 @@ from trip_decider.travel_agent import (
     EvidenceStatus,
     InMemoryAgentStore,
     Revision,
+    RETRYABLE_BLOCK_CODES,
     RunStatus,
     TaskMode,
     TravelAgentError,
@@ -156,8 +157,9 @@ class TripApplicationService:
                 # 「action loop was not started」抛给宿主——而宿主什么都没做错，
                 # 它只是在按提示轮询。**这不是错误状态，是「还在比较」**，
                 # 如实回当前进度即可。若本进程没有对应 worker（典型场景是服务
-                # 重启后从盘上恢复到 RUNNING），原线程已经不可能回来；这里原子
-                # 地补起一个。否则这个 run 会永久显示 COMPARING。
+                # 重启后从盘上恢复到 RUNNING），原线程已经不可能回来。候选比较
+                # 有外部请求与事件写入，不能假定幂等后静默重跑；如实落阻塞，等
+                # 宿主明确选择 recovery 里的重试入口（B2）。
                 if run.intent.task_mode is TaskMode.DIRECT_PLAN:
                     action_state = resume_missing_action_loop(
                         run_id,
@@ -176,21 +178,25 @@ class TripApplicationService:
                     raise TripApplicationError(
                         "running task has no resumable action loop"
                     )
-                worker_restarted = self._ensure_candidate_comparison_worker(
-                    run_id,
-                    run.intent.task_mode,
-                )
-                if self.store.get_run(run_id).status is not RunStatus.RUNNING:
+                with self._cancellations_lock:
+                    worker_present = run_id in self._cancellations
+                if not worker_present:
+                    result = self._settle_lost_candidate_worker(
+                        run_id,
+                        run.intent,
+                    )
                     return ApplicationOutcome(
                         run_id,
-                        accepted=worker_restarted,
+                        action_loop={
+                            "run_id": run_id,
+                            "status": "WORKER_LOST",
+                            "reason": "INTERNAL_ERROR_WORKER_LOST",
+                            "recovery": deepcopy(result["recovery"]),
+                        },
                     )
                 progress = comparison_progress(run_id, store=self.store)
-                if worker_restarted:
-                    progress["worker_restarted"] = True
                 return ApplicationOutcome(
                     run_id,
-                    accepted=worker_restarted,
                     action_loop=progress,
                 )
             if action_id is not None:
@@ -236,7 +242,7 @@ class TripApplicationService:
         # 也是 _failed_comparison_result 明写在 recovery 里的第一条。
         if (
             run.status is RunStatus.BLOCKED
-            and run.error_code == "GUIDED_COMPARISON_UNAVAILABLE"
+            and run.error_code in RETRYABLE_BLOCK_CODES
             and run.intent.task_mode
             in {TaskMode.GUIDED_DISCOVERY, TaskMode.OPEN_DISCOVERY}
         ):
@@ -766,6 +772,22 @@ class TripApplicationService:
             TaskMode.OPEN_DISCOVERY,
         )
 
+    def _settle_lost_candidate_worker(
+        self,
+        run_id: str,
+        intent: TravelIntent,
+    ) -> dict[str, object]:
+        """把进程重启造成的候选 worker 丢失落成一个明确、可重试的阻塞。"""
+
+        result = _lost_comparison_result(run_id, intent)
+        self.store.block(
+            run_id,
+            result,
+            "INTERNAL_ERROR_WORKER_LOST",
+            error_detail="candidate_worker_not_present",
+        )
+        return result
+
     def execute_guided_discovery(
         self,
         run_id: str,
@@ -1147,6 +1169,44 @@ def comparison_progress(
 #: 比较失败时留在 run.result 里的退路标记。候选卡带上它，读取层与宿主才分得清
 #: 「比较出来的候选」与「没比较成、但可以直接规划的区域锚点」。
 COMPARISON_NOT_ATTEMPTED = "not_compared"
+
+
+def _lost_comparison_result(
+    run_id: str,
+    intent: TravelIntent,
+) -> dict[str, object]:
+    """进程重启丢失候选 worker：报告事实，只有宿主主动调用才重跑。"""
+
+    stage = (
+        "open_discovery"
+        if intent.task_mode is TaskMode.OPEN_DISCOVERY
+        else "guided_discovery"
+    )
+    return {
+        "stage": stage,
+        "task_mode": intent.task_mode.value,
+        "options": [],
+        "comparison_failed": True,
+        "fallback_options": [],
+        "selection_required": False,
+        "recovery": [
+            {
+                "kind": "retry_comparison",
+                "entrypoint": "advance_trip_task",
+                "arguments": {"run_id": run_id},
+                "detail": (
+                    "服务重启后原候选比较线程已丢失。"
+                    "确认后调用本入口，才会重新发起候选比较。"
+                ),
+            }
+        ],
+        "blockers": [
+            {
+                "code": "INTERNAL_ERROR_WORKER_LOST",
+                "reason": "candidate_worker_not_present",
+            }
+        ],
+    }
 
 
 def _failed_comparison_result(

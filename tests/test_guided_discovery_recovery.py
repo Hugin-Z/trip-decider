@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
+import time
 import unittest
 
 from trip_decider.evidence_broker import EvidenceBroker
@@ -77,6 +80,7 @@ class GuidedDiscoveryRecoveryCase(unittest.TestCase):
         self._temporary = TemporaryDirectory()
         self.addCleanup(self._temporary.cleanup)
         root = Path(self._temporary.name) / "sessions"
+        self.runtime_root = root
         self.store = InMemoryAgentStore(root)
         self.application = _NoBackgroundApplication(
             store=self.store,
@@ -316,26 +320,134 @@ class GuidedDiscoveryRecoveryCase(unittest.TestCase):
         self.assertEqual("INTERNAL_ERROR", current.error_code)
         self.assertEqual("NameError", current.error_detail)
 
-    def test_a_restarted_service_resumes_a_lost_comparison_worker(self) -> None:
-        """盘上 RUNNING、本进程却没有 worker 时，下一次轮询要补起它。"""
+    def test_a_restarted_service_reports_a_lost_worker_before_retry(self) -> None:
+        """丢失 worker 要先如实阻断；只有宿主再调 recovery 才能重跑。"""
 
         run = self.application.create_trip(self.intent)
         self.application.confirm_trip(run.run_id)
         self.application.execute_trip(run.run_id)
         self.assertIs(RunStatus.RUNNING, self.store.get_run(run.run_id).status)
 
+        comparison_calls: list[object] = []
+
+        def succeeding(intent: object, **arguments: object):
+            comparison_calls.append(intent)
+            return _succeeding_comparison(intent, **arguments)
+
+        restarted_store = InMemoryAgentStore(self.runtime_root)
         restarted = _ImmediateBackgroundApplication(
-            store=self.store,
+            store=restarted_store,
             evidence_broker=self.application.evidence_broker,
             railway_collector=noop_collector,
             map_collector=noop_collector,
             web_collector=noop_collector,
+            comparison_builder=succeeding,
+        )
+        restarted_query = TripQueryService(
+            store=restarted_store,
+            application_service=restarted,
+        )
+        from trip_decider.mcp_adapter import TripMCPAdapter
+
+        adapter = TripMCPAdapter(restarted, restarted_query)
+        detected = adapter.advance_trip_task(run.run_id, wait_seconds=0)
+
+        blocked = restarted_store.get_run(run.run_id)
+        self.assertIs(RunStatus.BLOCKED, blocked.status)
+        self.assertEqual("INTERNAL_ERROR_WORKER_LOST", blocked.error_code)
+        self.assertEqual([], comparison_calls, "检测丢失时不应静默重跑")
+        self.assertNotEqual("COMPARING_CANDIDATES", detected["checkpoint"])
+        option = detected["next_call"]["options"][0]
+        self.assertEqual("advance_trip_task", option["entrypoint"])
+        self.assertEqual({"run_id": run.run_id}, option["arguments"])
+
+        retried = adapter.advance_trip_task(run.run_id, wait_seconds=0)
+
+        self.assertEqual(1, len(comparison_calls))
+        self.assertIs(
+            RunStatus.COMPLETED,
+            restarted_store.get_run(run.run_id).status,
+        )
+        self.assertEqual("CANDIDATES_READY", retried["checkpoint"])
+
+    def test_killed_process_is_reported_as_worker_lost(self) -> None:
+        """真实杀掉持有 worker 的进程，再从同一 runtime 恢复（B2 D6）。"""
+
+        marker = Path(self._temporary.name) / "child-run-id.txt"
+        script = r'''
+import json
+from pathlib import Path
+import sys
+import threading
+
+from trip_decider.evidence_broker import EvidenceBroker
+from trip_decider.travel_agent import InMemoryAgentStore
+from trip_decider.trip_application import TripApplicationService
+
+runtime_root = Path(sys.argv[1])
+fixture = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+intent = json.loads(fixture.read_text(encoding="utf-8"))["intent"]
+
+def hold_comparison(*args, **kwargs):
+    threading.Event().wait(600)
+
+store = InMemoryAgentStore(runtime_root)
+application = TripApplicationService(
+    store=store,
+    evidence_broker=EvidenceBroker(runtime_root.parent / "child-cache"),
+    comparison_builder=hold_comparison,
+)
+run = application.create_trip(intent)
+application.confirm_trip(run.run_id)
+application.execute_trip(run.run_id)
+marker.write_text(run.run_id, encoding="ascii")
+threading.Event().wait(600)
+'''
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(self.runtime_root),
+                str(FIXTURE),
+                str(marker),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+        )
+
+        def stop_child() -> None:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5.0)
+
+        self.addCleanup(stop_child)
+        deadline = time.monotonic() + 10.0
+        while not marker.is_file() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail(f"子进程提前退出：{process.returncode}")
+            time.sleep(0.05)
+        self.assertTrue(marker.is_file(), "子进程没有进入候选比较阶段")
+        run_id = marker.read_text(encoding="ascii")
+        process.kill()
+        process.wait(timeout=5.0)
+
+        restarted_store = InMemoryAgentStore(self.runtime_root)
+        restarted = _NoBackgroundApplication(
+            store=restarted_store,
+            evidence_broker=EvidenceBroker(
+                self.runtime_root.parent / "restart-cache"
+            ),
             comparison_builder=_succeeding_comparison,
         )
-        outcome = restarted.execute_trip(run.run_id)
 
-        self.assertTrue(outcome.accepted)
-        self.assertIs(RunStatus.COMPLETED, self.store.get_run(run.run_id).status)
+        outcome = restarted.execute_trip(run_id)
+        current = restarted_store.get_run(run_id)
+
+        self.assertFalse(outcome.accepted)
+        self.assertEqual("WORKER_LOST", outcome.action_loop["status"])
+        self.assertIs(RunStatus.BLOCKED, current.status)
+        self.assertEqual("INTERNAL_ERROR_WORKER_LOST", current.error_code)
 
 
 def _succeeding_comparison(intent: object, **arguments: object) -> dict[str, object]:

@@ -104,17 +104,22 @@ RUN_ERROR_CODES: frozenset[str] = frozenset(
         "GUIDED_COMPARISON_UNAVAILABLE",
         # 我们自己的代码坏了（D12：非业务异常必须自报家门，不穿业务外衣）
         "INTERNAL_ERROR",
+        # 进程重启后，盘上仍是 RUNNING，但原候选 worker 已不可能回来。
+        "INTERNAL_ERROR_WORKER_LOST",
     }
 )
 
 
-#: 可重试的阻塞码。目前只有一个：候选比较拿不到活体证据。
+#: 可重试的阻塞码：候选比较拿不到活体证据，或宿主明确选择重启已丢失的 worker。
 #:
 #: 单列成名单而不是在两个状态守卫里各写一次字面量，是因为「哪些阻塞态还有出路」
 #: 是一份**名单**，而名单与按名单操作的函数必须同居（D5）。下一次要放行新的阻塞
 #: 码时改这里一处，两个守卫同时跟上。
 RETRYABLE_BLOCK_CODES: frozenset[str] = frozenset(
-    {"GUIDED_COMPARISON_UNAVAILABLE"}
+    {
+        "GUIDED_COMPARISON_UNAVAILABLE",
+        "INTERNAL_ERROR_WORKER_LOST",
+    }
 )
 
 
@@ -1405,7 +1410,7 @@ class InMemoryAgentStore:
                 status="failed",
                 message=(
                     "服务内部错误，当前运行已停止。"
-                    if reason_code == "INTERNAL_ERROR"
+                    if reason_code.startswith("INTERNAL_ERROR")
                     else "真实证据不足，当前运行已停止。"
                 ),
                 details={
