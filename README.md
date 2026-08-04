@@ -55,36 +55,29 @@ flowchart LR
 - Windows PowerShell；
 - Python `>=3.11,<3.12`；
 - 从仓库根目录执行命令；
-- 项目 `.venv` 按 `requirements.lock` 准备。
+- 项目 `.venv` 按锁文件准备。
 
 首次准备环境：
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --requirement .\requirements.lock
+.\.venv\Scripts\python.exe -m pip install --requirement .\requirements-dev.lock
 ```
 
-运行婺源两日演示：
+启动当前网页产品：
 
 ```powershell
-$demoRoot = Join-Path $env:TEMP 'trip-decider-wuyuan-demo'
-
-if (Test-Path -LiteralPath $demoRoot) {
-    Remove-Item -LiteralPath $demoRoot -Recurse -Force
-}
-
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\run_wuyuan_demo.ps1 `
-  -OutputRoot $demoRoot `
-  -OpenReport
+.\scripts\run_product.ps1
 ```
 
-演示脚本本身不会删除或覆盖已有输出目录。上面的清理命令只删除用户可见、明确指定的系统临时演示目录。
+浏览器打开 `http://127.0.0.1:8765/`。接入 Claude Desktop/MCP 的配置与真实
+冒烟方法见 [docs/usage.md](docs/usage.md)。
 
-成功时 CLI 输出：
+运行完整离线测试：
 
-```text
-status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=report/index.html
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## 输出

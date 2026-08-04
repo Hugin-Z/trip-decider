@@ -72,9 +72,14 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
   "mcpServers": {
     "trip-decider": {
       "command": "<repo>\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "trip_decider.mcp_server"],
+      "args": [
+        "-m", "trip_decider.mcp_server",
+        "--runtime-root", "<repo>\\runtime\\sessions",
+        "--with-web"
+      ],
       "env": {
         "PYTHONPATH": "<repo>\\src",
+        "TRIP_DECIDER_RUNTIME_ROOT": "<repo>\\runtime\\sessions",
         "AMAP_WEB_SERVICE_KEY": "你的 key"
       }
     }
@@ -83,8 +88,14 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
 ```
 
 **2026-08-03 首次实机跑通**。挂上之后可以用自然语言建任务、看行程、改行程。
-两种用法**共用同一份运行时数据**（`runtime/sessions/`）——网页里建的任务在
-Claude 里看得到，反之亦然。
+上面的 `--with-web` 会由**同一个 MCP 进程**同时提供网页
+`http://127.0.0.1:8765/`；MCP 与网页因此共享同一份内存状态和运行时数据。
+
+不要同时另开 `run_product.ps1` 指向同一个 `runtime/sessions/`。当前 store 的事务
+边界是单进程；两个进程各持一份内存快照会互相覆盖。进程入口现在会对 runtime
+加独占锁：重复启动会立即明确报“runtime 已被另一个进程占用”，不会再让两个
+实例表面都活着、实际一直读旧状态。确实要同时开两套时，给它们配置不同的
+`TRIP_DECIDER_RUNTIME_ROOT`。只使用 Claude、不需要网页时可以删掉 `--with-web`。
 
 首次实测撞出两个会让任务卡死的缺陷，均已修复（P5 轮 3）：手工填写车次时按
 提示填完仍然规划失败；目的地说得含糊时候选比较失败后任务无法继续。症状与现在

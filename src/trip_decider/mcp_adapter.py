@@ -8,6 +8,8 @@ helpers, planners, or provider tools.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+import json
 import time
 from uuid import uuid4
 
@@ -19,9 +21,13 @@ from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
 from trip_decider.itinerary_verification import (
     split_by_shape,
     summarize_dicts,
+    verification_token,
     verify_checkable_incrementally,
 )
-from trip_decider.verification_registry import VerificationRegistry
+from trip_decider.verification_registry import (
+    VerificationCapacityError,
+    VerificationRegistry,
+)
 from trip_decider.trip_query import TripQueryError, TripQueryService
 from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
 
@@ -649,14 +655,29 @@ class TripMCPAdapter:
         # 收下活，立刻回执。实采在后台——同步核会把这次调用拖到分钟级，
         # 那正是第四次实测宿主放弃的原因（I14）。
         immediate, checkable = split_by_shape(assertions)
-        started = self._verifications.start_background(
-            total=len(assertions),
-            immediate=immediate,
-            collect=lambda report: verify_checkable_incrementally(
-                checkable,
-                report=report,
-            ),
-        )
+        canonical = json.dumps(
+            assertions,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=repr,
+        ).encode("utf-8")
+        try:
+            started = self._verifications.start_background(
+                total=len(assertions),
+                immediate=immediate,
+                collect=lambda report: verify_checkable_incrementally(
+                    checkable,
+                    report=report,
+                ),
+                dedupe_key=hashlib.sha256(canonical).hexdigest(),
+                retry_items=assertions,
+            )
+        except VerificationCapacityError as error:
+            raise TripMCPError(
+                str(error),
+                next_call="等待几秒后用相同 assertions 重试 verify_itinerary",
+            ) from None
         return self._verification_view(started)
 
     def read_verification(self, verify_id: str) -> dict[str, object]:
@@ -675,6 +696,23 @@ class TripMCPAdapter:
     def _verification_view(snapshot: Mapping[str, object]) -> dict[str, object]:
         findings = snapshot.get("findings")
         findings = findings if isinstance(findings, list) else []
+        # 登记处保存的是采集事实，不保存一个永远不变的展示 token。每次读取都按
+        # retrieved_at 重算，长时间轮询也不能把旧数据继续叫作 verified。
+        refreshed_findings: list[dict[str, object]] = []
+        for raw_finding in findings:
+            if not isinstance(raw_finding, Mapping):
+                continue
+            finding = dict(raw_finding)
+            verdict = str(finding.get("verdict"))
+            try:
+                finding["token"] = verification_token(
+                    verdict,
+                    finding.get("retrieved_at"),
+                )
+            except KeyError:
+                pass
+            refreshed_findings.append(finding)
+        findings = refreshed_findings
         status = str(snapshot.get("status"))
         # FINALIZING = 结论已到齐、后台还没宣告收工。对宿主而言仍要再取一次，
         # 所以和 RUNNING 同样处理，但状态名如实区分（R1）。
@@ -683,6 +721,7 @@ class TripMCPAdapter:
             "artifact_kind": "ItineraryVerification",
             "domain": "railway",
             **dict(snapshot),
+            "findings": findings,
             # 总评按**已核出的**算，并明说还剩几条——不把未核的算成有据。
             "summary": summarize_dicts(findings),
             "scope_note": (
@@ -691,6 +730,17 @@ class TripMCPAdapter:
             ),
         }
         if running:
+            if status == "FINALIZING":
+                detail = (
+                    "全部结论已经到齐，后台正在提交终态。"
+                    "再取一次即可；不要用 pending 判断是否收工。"
+                )
+            else:
+                detail = (
+                    f"还有 {snapshot.get('pending')} 条在实查 12306。"
+                    "每条约 2 秒，隔几秒再取一次即可。"
+                    "本响应里已核出的部分是最终结论，不会再变。"
+                )
             view["next_call"] = {
                 "reason": "VERIFICATION_IN_PROGRESS",
                 "options": [
@@ -698,11 +748,7 @@ class TripMCPAdapter:
                         "kind": "poll",
                         "entrypoint": "read_verification",
                         "arguments": {"verify_id": snapshot.get("verify_id")},
-                        "detail": (
-                            f"还有 {snapshot.get('pending')} 条在实查 12306。"
-                            "每条约 2 秒，隔几秒再取一次即可。"
-                            "本响应里已核出的部分是最终结论，不会再变。"
-                        ),
+                        "detail": detail,
                     }
                 ],
             }
@@ -711,7 +757,8 @@ class TripMCPAdapter:
             summary = view["summary"]
             flagged = summary.get("needs_confirmation") or []
             view["status"] = "completed" if status == "COMPLETE" else "failed"
-            view["complete"] = True
+            view["terminal"] = True
+            view["complete"] = status == "COMPLETE"
             if status == "COMPLETE":
                 detail = (
                     f"核验完成：{summary.get('sentence')}。"
@@ -720,25 +767,38 @@ class TripMCPAdapter:
                         "——conflicting 附了两边的值，unknown 请注意它表示"
                         "「查无实据」而不是「假」。"
                         if flagged
-                        else "全部对得上，可以照此出行。"
+                        else "已提交的铁路断言全部对得上；其他出行域仍未核验。"
                     )
                 )
+                options: list[dict[str, object]] = []
             else:
+                retry_assertions = snapshot.get("retry_assertions")
+                retry_assertions = (
+                    retry_assertions
+                    if isinstance(retry_assertions, list)
+                    else []
+                )
                 detail = (
                     f"核验中断：{snapshot.get('error')}。"
                     f"已核出的 {summary.get('total')} 条仍然有效；"
-                    "余下的可以重新提交一次 verify_itinerary。"
+                    f"余下 {len(retry_assertions)} 条可以重新提交。"
+                )
+                options = (
+                    [
+                        {
+                            "kind": "retry",
+                            "entrypoint": "verify_itinerary",
+                            "arguments": {"assertions": retry_assertions},
+                            "detail": "只重试尚未得到结论的断言。",
+                        }
+                    ]
+                    if retry_assertions
+                    else []
                 )
             view["next_call"] = {
                 "reason": view["status"].upper(),
-                "options": [
-                    {
-                        "kind": "done",
-                        "entrypoint": "verify_itinerary",
-                        "arguments": {},
-                        "detail": detail,
-                    }
-                ],
+                "options": options,
+                "detail": detail,
             }
         return view
 

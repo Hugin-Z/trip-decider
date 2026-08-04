@@ -47,6 +47,13 @@ _ADVANCING = ToolAnnotations(
     idempotent_hint=False,
     open_world_hint=True,
 )
+from trip_decider.runtime_owner import RuntimeOwner
+_VERIFYING = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
 
 _APP_CALLABLE_META = {
     "ui": {"visibility": ["model", "app"]},
@@ -408,9 +415,10 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             "【立刻返回，不要等】本工具**秒回**一个 verify_id 加首批结论"
             "（形状问题当场就能判）。实查 12306 在后台跑，用 "
             "read_verification(verify_id) 取增量——返回体的 next_call 会告诉你"
-            "还剩几条。已核出的部分是最终结论，不会再变。"
+            "还剩几条。相同 assertions 在结果保留期内会复用同一 verify_id，"
+            "不会重复打 12306。已核出的部分是最终结论，不会再变。"
         ),
-        annotations=_READ_ONLY,
+        annotations=_VERIFYING,
         structured_output=True,
     )
     def verify_itinerary(
@@ -425,10 +433,13 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             "取一份进行中或已完成的核验结果。verify_itinerary 立刻返回 "
             "verify_id，实查 12306 在后台推进，用这个取增量。\n"
             "【什么时候用】verify_itinerary 或上一次 read_verification 的返回体里 "
-            "status 还是 RUNNING。\n"
+            "status 是 RUNNING 或 FINALIZING。FINALIZING 表示结论已经到齐、"
+            "后台正在提交终态，再取一次即可。\n"
             "【怎么用】read_verification(verify_id=\"verify-…\")，"
             "把上一次返回的 verify_id 原样传回。每条断言约 2 秒，"
             "隔几秒取一次即可。\n"
+            "【收工只看 status】completed/failed 才是终态；不要用 pending==0 "
+            "判断收工，pending 只表示尚未得到结论的条数。\n"
             "【已核出的不会变】增量只增不改，可以在部分结果上先下判断。\n"
             "【结果保留一小时】服务重启或超时后 verify_id 失效，"
             "会明确报「这个 id 不存在」而不是假装还在跑。"
@@ -473,35 +484,40 @@ def _services_for(arguments: argparse.Namespace) -> TripServices:
 def main() -> int:
     arguments = _parser().parse_args()
     services = _services_for(arguments)
+    runtime_root = services.application.store.runtime_root
+    if runtime_root is None:
+        raise RuntimeError("MCP runtime root is not configured")
+    owner = RuntimeOwner(runtime_root)
+    owner.acquire()
     web_server = None
     web_thread = None
-    if arguments.with_web:
-        from trip_decider import product_web
-
-        product_web.configure_services(
-            services.application,
-            services.query,
-        )
-        web_server = product_web.make_server(
-            arguments.web_host,
-            arguments.web_port,
-        )
-        web_thread = threading.Thread(
-            target=web_server.serve_forever,
-            name="trip-decider-shared-web",
-            daemon=True,
-        )
-        web_thread.start()
-        host, port = web_server.server_address
-        print(
-            f"trip-decider shared web: http://{host}:{port}/",
-            file=sys.stderr,
-            flush=True,
-        )
-    server = build_mcp_server(
-        TripMCPAdapter(services.application, services.query)
-    )
     try:
+        if arguments.with_web:
+            from trip_decider import product_web
+
+            product_web.configure_services(
+                services.application,
+                services.query,
+            )
+            web_server = product_web.make_server(
+                arguments.web_host,
+                arguments.web_port,
+            )
+            web_thread = threading.Thread(
+                target=web_server.serve_forever,
+                name="trip-decider-shared-web",
+                daemon=True,
+            )
+            web_thread.start()
+            host, port = web_server.server_address
+            print(
+                f"trip-decider shared web: http://{host}:{port}/",
+                file=sys.stderr,
+                flush=True,
+            )
+        server = build_mcp_server(
+            TripMCPAdapter(services.application, services.query)
+        )
         server.run("stdio")
     finally:
         if web_server is not None:
@@ -509,6 +525,7 @@ def main() -> int:
             web_server.server_close()
         if web_thread is not None:
             web_thread.join(timeout=5)
+        owner.release()
     return 0
 
 
