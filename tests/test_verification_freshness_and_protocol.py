@@ -20,7 +20,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import unittest
+from unittest import mock
 
 from trip_decider.evidence_broker import FRESHNESS_POLICIES
 from trip_decider.evidence_core import (
@@ -299,6 +301,33 @@ class CompletedPollingProtocolCase(unittest.TestCase):
         )
 
         self.assertEqual("sourced_stale", view["findings"][0]["token"])
+
+    def test_freshness_recomputation_happens_after_registry_unlocks(self) -> None:
+        """B1：重算期间再次读取登记处也必须返回，不能自死锁。"""
+
+        registry = VerificationRegistry(spawn=lambda worker, name: worker())
+        self.adapter._verifications = registry
+        started = self.adapter.verify_itinerary([{"origin_station": "甲站"}])
+        verify_id = str(started["verify_id"])
+        completed: list[dict[str, object]] = []
+
+        def reentrant_read_token(*_args: object, **_kwargs: object) -> str:
+            self.assertIsNotNone(registry.read(verify_id))
+            return "unknown"
+
+        def read_view() -> None:
+            completed.append(self.adapter.read_verification(verify_id))
+
+        with mock.patch(
+            "trip_decider.mcp_adapter.verification_token",
+            side_effect=reentrant_read_token,
+        ):
+            thread = threading.Thread(target=read_view, daemon=True)
+            thread.start()
+            thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive(), "freshness 重算仍发生在登记锁内")
+        self.assertEqual(1, len(completed))
 
 
 if __name__ == "__main__":

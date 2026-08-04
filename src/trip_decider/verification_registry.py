@@ -104,7 +104,10 @@ class VerificationRegistry:
         spawn: Callable[[Callable[[], None], str], None] | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        self._lock = threading.RLock()
+        # 不需要重入。登记处的临界区只排空消息、维护条目并复制快照；展示层的
+        # freshness 重算发生在 read() 返回之后。用普通 Lock 让今后任何“持锁
+        # 回调再读登记处”的改动直接暴露，而不是被 RLock 悄悄合法化（B1）。
+        self._lock = threading.Lock()
         self._entries: dict[str, _Verification] = {}
         self._spawn = spawn if spawn is not None else _default_spawn
         self._clock = clock if clock is not None else time.monotonic
