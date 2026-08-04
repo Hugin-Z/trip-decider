@@ -1,0 +1,2194 @@
+﻿diff --git a/README.md b/README.md
+index 09897bd..bc24d6c 100644
+--- a/README.md
++++ b/README.md
+@@ -55,36 +55,29 @@ flowchart LR
+ - Windows PowerShell；
+ - Python `>=3.11,<3.12`；
+ - 从仓库根目录执行命令；
+-- 项目 `.venv` 按 `requirements.lock` 准备。
++- 项目 `.venv` 按锁文件准备。
+ 
+ 首次准备环境：
+ 
+ ```powershell
+ py -3.11 -m venv .venv
+-.\.venv\Scripts\python.exe -m pip install --requirement .\requirements.lock
++.\.venv\Scripts\python.exe -m pip install --requirement .\requirements-dev.lock
+ ```
+ 
+-运行婺源两日演示：
++启动当前网页产品：
+ 
+ ```powershell
+-$demoRoot = Join-Path $env:TEMP 'trip-decider-wuyuan-demo'
+-
+-if (Test-Path -LiteralPath $demoRoot) {
+-    Remove-Item -LiteralPath $demoRoot -Recurse -Force
+-}
+-
+-powershell -NoProfile -ExecutionPolicy Bypass `
+-  -File .\scripts\run_wuyuan_demo.ps1 `
+-  -OutputRoot $demoRoot `
+-  -OpenReport
++.\scripts\run_product.ps1
+ ```
+ 
+-演示脚本本身不会删除或覆盖已有输出目录。上面的清理命令只删除用户可见、明确指定的系统临时演示目录。
++浏览器打开 `http://127.0.0.1:8765/`。接入 Claude Desktop/MCP 的配置与真实
++冒烟方法见 [docs/usage.md](docs/usage.md)。
+ 
+-成功时 CLI 输出：
++运行完整离线测试：
+ 
+-```text
+-status=conditionally_feasible scheduled=2 blocked=2 publishable=false report=report/index.html
++```powershell
++$env:PYTHONPATH = "$PWD\src"
++.\.venv\Scripts\python.exe -m pytest -q
+ ```
+ 
+ ## 输出
+diff --git a/docs/usage.md b/docs/usage.md
+index b5224bd..0f9f26a 100644
+--- a/docs/usage.md
++++ b/docs/usage.md
+@@ -72,9 +72,14 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
+   "mcpServers": {
+     "trip-decider": {
+       "command": "<repo>\\.venv\\Scripts\\python.exe",
+-      "args": ["-m", "trip_decider.mcp_server"],
++      "args": [
++        "-m", "trip_decider.mcp_server",
++        "--runtime-root", "<repo>\\runtime\\sessions",
++        "--with-web"
++      ],
+       "env": {
+         "PYTHONPATH": "<repo>\\src",
++        "TRIP_DECIDER_RUNTIME_ROOT": "<repo>\\runtime\\sessions",
+         "AMAP_WEB_SERVICE_KEY": "你的 key"
+       }
+     }
+@@ -83,8 +88,14 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
+ ```
+ 
+ **2026-08-03 首次实机跑通**。挂上之后可以用自然语言建任务、看行程、改行程。
+-两种用法**共用同一份运行时数据**（`runtime/sessions/`）——网页里建的任务在
+-Claude 里看得到，反之亦然。
++上面的 `--with-web` 会由**同一个 MCP 进程**同时提供网页
++`http://127.0.0.1:8765/`；MCP 与网页因此共享同一份内存状态和运行时数据。
++
++不要同时另开 `run_product.ps1` 指向同一个 `runtime/sessions/`。当前 store 的事务
++边界是单进程；两个进程各持一份内存快照会互相覆盖。进程入口现在会对 runtime
++加独占锁：重复启动会立即明确报“runtime 已被另一个进程占用”，不会再让两个
++实例表面都活着、实际一直读旧状态。确实要同时开两套时，给它们配置不同的
++`TRIP_DECIDER_RUNTIME_ROOT`。只使用 Claude、不需要网页时可以删掉 `--with-web`。
+ 
+ 首次实测撞出两个会让任务卡死的缺陷，均已修复（P5 轮 3）：手工填写车次时按
+ 提示填完仍然规划失败；目的地说得含糊时候选比较失败后任务无法继续。症状与现在
+diff --git a/pyproject.toml b/pyproject.toml
+index 1cb3105..bac67a9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,6 +13,9 @@ dependencies = [
+     "jsonschema[format-nongpl]==4.26.0",
+ ]
+ 
++[project.optional-dependencies]
++dev = ["pytest==9.0.2"]
++
+ [tool.setuptools.packages.find]
+ where = ["src"]
+ 
+diff --git a/scripts/smoke_action_loop.py b/scripts/smoke_action_loop.py
+index 77c5197..80de6c3 100644
+--- a/scripts/smoke_action_loop.py
++++ b/scripts/smoke_action_loop.py
+@@ -1,4 +1,4 @@
+-"""动作循环全链路真实数据冒烟：GUIDED_DISCOVERY → 候选 → 选择 → PlanVersion → 重排。
++"""动作循环全链路真实数据冒烟：OPEN_DISCOVERY → 候选 → 选择 → PlanVersion → 重排。
+ 
+ 与 `smoke_live.py` 的分工：那个直调采集器，验的是「采集器与编译器能吃真实数据」；
+ **本脚本走动作循环本体**，验的是「产品的那条链路真的能跑通」。上一轮的冒烟绕过了
+@@ -67,7 +67,7 @@ def _intent() -> dict:
+     start = datetime.now(timezone.utc) + timedelta(days=11)
+     end = start + timedelta(days=2)
+     return {
+-        "task_mode": "GUIDED_DISCOVERY",
++        "task_mode": "OPEN_DISCOVERY",
+         "origin": "武汉",
+         "destination_expression": "想找个山里安静的地方待两天",
+         "earliest_departure_at": start.strftime("%Y-%m-%dT08:00"),
+@@ -124,7 +124,7 @@ def main() -> int:
+     status = store.get_run(run_id).status
+     ok(f"run_id={run_id} status={status.value}")
+ 
+-    step("2", "执行引导式发现（真实采集）", "产出候选，stage=guided_discovery")
++    step("2", "执行开放式发现（真实采集）", "产出候选，stage=open_discovery")
+     try:
+         application.execute_trip(run_id)
+     except Exception as error:  # noqa: BLE001
+@@ -151,7 +151,11 @@ def main() -> int:
+     try:
+         payload = query.candidates(run_id)
+         options = payload.get("candidates") or []
+-        ok(f"候选 {len(options)} 个，stage={payload.get('stage')}")
++        stage = payload.get("stage")
++        if stage == "open_discovery":
++            ok(f"候选 {len(options)} 个，stage={stage}")
++        else:
++            bad(f"任务声明 OPEN_DISCOVERY，实际 stage={stage}")
+         for option in options[:3]:
+             print(
+                 f"      - {option.get('destination_id')} "
+@@ -222,7 +226,7 @@ def main() -> int:
+         try:
+             application.revise_trip(
+                 run_id,
+-                {"note": "第二天别排那么满"},
++                revision={"note": "第二天别排那么满"},
+             )
+             after = query.plan_readiness(run_id).get("plan_version")
+             if after != before:
+diff --git a/src/trip_decider/agent_actions.py b/src/trip_decider/agent_actions.py
+index 5fdbf89..4947c49 100644
+--- a/src/trip_decider/agent_actions.py
++++ b/src/trip_decider/agent_actions.py
+@@ -154,8 +154,11 @@ class _LoopState:
+ 
+ 
+ _LOCK = RLock()
++#: 并发：`_LOCK` 锁保护，锁对象表的全部读写都在锁内。
++_RUN_LOCKS: dict[str, RLock] = {}
+ 
+-#: 并发：`_LOCK` 保护，全部读写都在锁内。
++#: 并发：`_LOCK` 只保护两个模块级字典本身；每个 `_LoopState` 的字段以及对应
++#: 的两个落盘文件由 `_run_lock(run_id)` 保护。
+ #:
+ #: 这是一份**跨调用共享的可变状态**——动作循环的内存缓存，键是 run_id。写它的
+ #: 有两类线程：工具调用线程（同步推进）与后台动作循环线程。两者都必须先取
+@@ -164,8 +167,16 @@ _LOCK = RLock()
+ #:
+ #: 落盘那一份（`action-loop.json`）与本表的关系见 persistence-v2.md §13.1：
+ #: 权威在 `run.json`，本表是它的内存视图，缺失时可重建。
++#: 并发：`_run_lock(run_id)` 锁保护每个值的字段读写，`_LOCK` 保护表本身。
+ _STATES: dict[str, _LoopState] = {}
+ 
++
++def _run_lock(run_id: str) -> RLock:
++    """同一 run 串行提交状态；不同 run 互不阻塞，也不把网络 I/O 锁进去。"""
++
++    with _LOCK:
++        return _RUN_LOCKS.setdefault(run_id, RLock())
++
+ # 读取时刻的注入点。产品默认是墙钟——判定"这份证据现在还新鲜吗"本来就该问
+ # 现在几点。表征需要它固定，否则同一份夹具隔天读会得到不同的 freshness，
+ # 基线会在没有代码改动的情况下自行翻面。
+@@ -198,11 +209,11 @@ def start_action_loop(
+     """Move a confirmed run into its action-driven execution state."""
+     store = store if store is not None else default_agent_store()
+ 
+-    run = store.get_run(run_id)
+-    if run.status is not RunStatus.CONFIRMED:
+-        raise TravelAgentError("run must be confirmed before action execution")
+-    store.start(run_id)
+-    with _LOCK:
++    with _run_lock(run_id):
++        run = store.get_run(run_id)
++        if run.status is not RunStatus.CONFIRMED:
++            raise TravelAgentError("run must be confirmed before action execution")
++        store.start(run_id)
+         state = _LoopState(
+             fallback_result=(
+                 recovery_safe(deepcopy(dict(run.result)))
+@@ -235,7 +246,8 @@ def start_action_loop(
+             else:
+                 state.action_status[domain] = "waiting"
+                 unavailable.append(domain)
+-        _STATES[run_id] = state
++        with _LOCK:
++            _STATES[run_id] = state
+         _persist_loop_state(run_id, state, store)
+     store.append_event(
+         run_id,
+@@ -277,36 +289,74 @@ def restart_action_loop_for_intent(
+     """Start a same-run revision while reusing still-applicable evidence."""
+     store = store if store is not None else default_agent_store()
+ 
+-    previous = store.get_run(run_id)
+-    contract = (
+-        intent
+-        if isinstance(intent, TravelIntent)
+-        else TravelIntent.from_mapping(intent)
+-    )
+-    state = _state(run_id, store)
+-    reusable = dict(state.evidence)
+-    previous_intent = previous.intent
+-    if contract.destination_anchor != previous_intent.destination_anchor:
+-        reusable.clear()
+-    else:
+-        rail_inputs = (
+-            "origin",
+-            "earliest_departure_at",
+-            "latest_return_at",
+-            "transport_preferences",
++    with _run_lock(run_id):
++        previous = store.get_run(run_id)
++        contract = (
++            intent
++            if isinstance(intent, TravelIntent)
++            else TravelIntent.from_mapping(intent)
+         )
+-        if any(
+-            getattr(contract, field_name)
+-            != getattr(previous_intent, field_name)
+-            for field_name in rail_inputs
+-        ):
+-            reusable.pop("railway", None)
+-    store.prepare_revision(run_id, intent=contract)
+-    return start_action_loop(
+-        run_id,
+-        initial_evidence=reusable,
+-        store=store,
+-    )
++        state = _state(run_id, store)
++        reusable = dict(state.evidence)
++        previous_intent = previous.intent
++        if contract.destination_anchor != previous_intent.destination_anchor:
++            reusable.clear()
++        else:
++            rail_inputs = (
++                "origin",
++                "earliest_departure_at",
++                "latest_return_at",
++                "transport_preferences",
++            )
++            if any(
++                getattr(contract, field_name)
++                != getattr(previous_intent, field_name)
++                for field_name in rail_inputs
++            ):
++                reusable.pop("railway", None)
++        store.prepare_revision(run_id, intent=contract)
++        return start_action_loop(
++            run_id,
++            initial_evidence=reusable,
++            store=store,
++        )
++
++
++def resume_missing_action_loop(
++    run_id: str,
++    *,
++    store: InMemoryAgentStore | None = None,
++) -> dict[str, object]:
++    """恢复 ``store.start`` 后、动作循环首次落盘前崩溃的 DIRECT_PLAN。"""
++
++    store = store if store is not None else default_agent_store()
++    with _run_lock(run_id):
++        run = store.get_run(run_id)
++        if run.status is not RunStatus.RUNNING:
++            raise TravelAgentError("run is not executing actions")
++        loaded = _load_loop_state(run_id, store)
++        if loaded is not None:
++            with _LOCK:
++                _STATES[run_id] = loaded
++            return get_next_actions(run_id, store=store)
++        state = _LoopState(
++            fallback_result=(
++                recovery_safe(deepcopy(dict(run.result)))
++                if isinstance(run.result, Mapping)
++                else None
++            )
++        )
++        with _LOCK:
++            _STATES[run_id] = state
++        _persist_loop_state(run_id, state, store)
++        store.append_event(
++            run_id,
++            event_type="planning.actions.recovered",
++            status="running",
++            message="服务重启后已恢复未落盘的动作循环。",
++            details={"tool": "destination_context"},
++        )
++        return get_next_actions(run_id, store=store)
+ 
+ 
+ def run_until_blocked(
+@@ -477,6 +527,15 @@ def get_next_actions(
+ ) -> dict[str, object]:
+     """Return the next honest state and executable actions for Codex."""
+     store = store if store is not None else default_agent_store()
++    with _run_lock(run_id):
++        return _get_next_actions_unlocked(run_id, store=store)
++
++
++def _get_next_actions_unlocked(
++    run_id: str,
++    *,
++    store: InMemoryAgentStore,
++) -> dict[str, object]:
+ 
+     run = store.get_run(run_id)
+     if run.status is RunStatus.AWAITING_CONFIRMATION:
+@@ -621,38 +680,46 @@ def execute_registered_action(
+     )
+     store = store if store is not None else default_agent_store()
+ 
+-    run = store.get_run(run_id)
+-    if (
+-        run.status is RunStatus.COMPLETED
+-        and action_id in {"railway", "map", "planner"}
+-    ):
+-        run = store.resume(run_id)
+-    if run.status is not RunStatus.RUNNING:
+-        raise TravelAgentError("run is not executing actions")
+-    state = _state(run_id, store)
+-    if action_id not in _TOOL_REGISTRY:
+-        raise TravelAgentError("action is not a registered runtime tool")
+-    is_refresh = state.action_status[action_id] in {"completed", "failed"}
+-    if state.action_status[action_id] != "waiting" and not is_refresh:
+-        raise TravelAgentError("action is not waiting")
+-    if not is_refresh:
+-        available = {
+-            action["action_id"] for action in get_next_actions(
+-                run_id,
+-                store=store,
+-            )["actions"]
++    run_lock = _run_lock(run_id)
++    with run_lock:
++        run = store.get_run(run_id)
++        if (
++            run.status is RunStatus.COMPLETED
++            and action_id in {"railway", "map", "planner"}
++        ):
++            run = store.resume(run_id)
++        if run.status is not RunStatus.RUNNING:
++            raise TravelAgentError("run is not executing actions")
++        live_state = _state(run_id, store)
++        if action_id not in _TOOL_REGISTRY:
++            raise TravelAgentError("action is not a registered runtime tool")
++        is_refresh = live_state.action_status[action_id] in {
++            "completed",
++            "failed",
+         }
+-        if action_id not in available:
+-            raise TravelAgentError("action prerequisites are not satisfied")
+-    state.action_status[action_id] = "running"
+-    _persist_loop_state(run_id, state, store)
+-    store.append_event(
+-        run_id,
+-        event_type="tool.started",
+-        status="started",
+-        message=f"{_TOOL_REGISTRY[action_id]['title']}开始执行。",
+-        details={"tool": action_id},
+-    )
++        if live_state.action_status[action_id] != "waiting" and not is_refresh:
++            raise TravelAgentError("action is not waiting")
++        if not is_refresh:
++            available = {
++                action["action_id"] for action in get_next_actions(
++                    run_id,
++                    store=store,
++                )["actions"]
++            }
++            if action_id not in available:
++                raise TravelAgentError("action prerequisites are not satisfied")
++        live_state.action_status[action_id] = "running"
++        _persist_loop_state(run_id, live_state, store)
++        store.append_event(
++            run_id,
++            event_type="tool.started",
++            status="started",
++            message=f"{_TOOL_REGISTRY[action_id]['title']}开始执行。",
++            details={"tool": action_id},
++        )
++        # handler 可能做网络 I/O，绝不带锁。给它不可共享的快照，避免另一域
++        # 同时提交结果时改动 handler 正在读取的 dict。
++        state = deepcopy(live_state)
+     action_started = time.monotonic()
+     try:
+         outcome = _TOOL_REGISTRY[action_id]["handler"](
+@@ -664,75 +731,82 @@ def execute_registered_action(
+         # 「{域}_ACTION_FAILED」+「该域缺证据」，那句叙述与事故原因毫无
+         # 关系，只会把归因引向采集器和数据源。这里是同步调用，重抛能让它
+         # 原样浮到调用方，栈也留得住。
+-        state.action_status[action_id] = "blocked"
+-        _persist_loop_state(run_id, state, store)
++        with run_lock:
++            live_state = _state(run_id, store)
++            live_state.action_status[action_id] = "blocked"
++            _persist_loop_state(run_id, live_state, store)
+         raise
+     except Exception as error:
+-        state.action_status[action_id] = "blocked"
+-        _persist_loop_state(run_id, state, store)
+-        store.append_event(
+-            run_id,
+-            event_type="tool.failed",
+-            status="failed",
+-            message=f"{_TOOL_REGISTRY[action_id]['title']}执行失败。",
+-            details={
+-                "tool": action_id,
+-                "error_type": type(error).__name__,
+-                "duration_ms": round(
+-                    (time.monotonic() - action_started) * 1000,
+-                    3,
+-                ),
+-            },
+-        )
+-        _block_run(run_id, action_id, store=store)
+-        return get_next_actions(run_id, store=store)
++        with run_lock:
++            live_state = _state(run_id, store)
++            live_state.action_status[action_id] = "blocked"
++            _persist_loop_state(run_id, live_state, store)
++            store.append_event(
++                run_id,
++                event_type="tool.failed",
++                status="failed",
++                message=f"{_TOOL_REGISTRY[action_id]['title']}执行失败。",
++                details={
++                    "tool": action_id,
++                    "error_type": type(error).__name__,
++                    "duration_ms": round(
++                        (time.monotonic() - action_started) * 1000,
++                        3,
++                    ),
++                },
++            )
++            _block_run(run_id, action_id, store=store)
++            return get_next_actions(run_id, store=store)
+ 
+     if action_id == "planner":
+         if not isinstance(outcome, Mapping):
+             raise TravelAgentError("planner action returned a non-object")
+-        result = deepcopy(dict(outcome))
+-        state.result = result
+-        state.action_status[action_id] = "completed"
+-        # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
+-        # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
+-        # run.json 里却还没有 result，重启后状态自相矛盾。
+-        store.record_result(run_id, result)
+-        _persist_loop_state(run_id, state, store)
+-        planner_evidence = _loop_evidence(state, run.intent)
+-        if _result_is_displayable(result, planner_evidence):
+-            store.persist_plan_version(run_id, result)
+-        store.append_event(
+-            run_id,
+-            event_type="tool.completed",
+-            status="completed",
+-            message=(
+-                "计划版本已通过证据门并安装。"
+-                if _result_is_displayable(result, planner_evidence)
+-                else "规划草稿已生成，仍在补充最低真实证据。"
+-            ),
+-            details={
+-                "tool": "planner",
+-                "duration_ms": round(
+-                    (time.monotonic() - action_started) * 1000,
+-                    3,
+-                ),
+-            },
+-        )
+-        if _result_is_displayable(result, planner_evidence):
+-            store.complete(run_id, result)
+-        else:
++        with run_lock:
++            live_state = _state(run_id, store)
++            result = deepcopy(dict(outcome))
++            live_state.result = result
++            live_state.action_status[action_id] = "completed"
++            # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
++            # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
++            # run.json 里却还没有 result，重启后状态自相矛盾。
++            store.record_result(run_id, result)
++            _persist_loop_state(run_id, live_state, store)
++            planner_evidence = _loop_evidence(live_state, run.intent)
++            displayable = _result_is_displayable(result, planner_evidence)
++            if displayable:
++                store.persist_plan_version(run_id, result)
+             store.append_event(
+                 run_id,
+-                event_type="plan.supplementing",
+-                status="waiting",
+-                message="尚未满足可展示行程最低条件，继续补充真实数据。",
++                event_type="tool.completed",
++                status="completed",
++                message=(
++                    "计划版本已通过证据门并安装。"
++                    if displayable
++                    else "规划草稿已生成，仍在补充最低真实证据。"
++                ),
+                 details={
+-                    "missing_requirements": (
+-                        _missing_display_requirements(result)
++                    "tool": "planner",
++                    "duration_ms": round(
++                        (time.monotonic() - action_started) * 1000,
++                        3,
+                     ),
+                 },
+             )
+-        return get_next_actions(run_id, store=store)
++            if displayable:
++                store.complete(run_id, result)
++            else:
++                store.append_event(
++                    run_id,
++                    event_type="plan.supplementing",
++                    status="waiting",
++                    message="尚未满足可展示行程最低条件，继续补充真实数据。",
++                    details={
++                        "missing_requirements": (
++                            _missing_display_requirements(result)
++                        ),
++                    },
++                )
++            return get_next_actions(run_id, store=store)
+ 
+     if not isinstance(outcome, EvidenceItem):
+         raise TravelAgentError("evidence action returned an invalid value")
+@@ -802,6 +876,16 @@ def submit_evidence(
+ ) -> dict[str, object]:
+     """Validate and attach one action-owned evidence item."""
+     store = store if store is not None else default_agent_store()
++    with _run_lock(run_id):
++        return _submit_evidence_unlocked(run_id, evidence, store=store)
++
++
++def _submit_evidence_unlocked(
++    run_id: str,
++    evidence: EvidenceItem | Mapping[str, object],
++    *,
++    store: InMemoryAgentStore,
++) -> dict[str, object]:
+ 
+     run = store.get_run(run_id)
+     if run.status is not RunStatus.RUNNING:
+@@ -2364,39 +2448,40 @@ def _block_run(
+     store: InMemoryAgentStore,
+     stalled: bool = False,
+ ) -> None:
+-    state = _state(run_id, store)
+-    item = state.evidence.get(domain)
+-    retained = (
+-        deepcopy(state.fallback_result)
+-        if isinstance(state.fallback_result, Mapping)
+-        else None
+-    )
+-    blocked_result = retained or {
+-        "action_loop_status": "BLOCKED",
+-        "blocked_domains": [domain],
+-        "context": {
+-            "missing_domains": (
+-                [domain]
+-                if item is None or item.status is EvidenceStatus.MISSING
+-                else []
+-            ),
+-            "conflicting_domains": (
+-                [domain]
+-                if item is not None
+-                and item.status is EvidenceStatus.CONFLICTING
+-                else []
++    with _run_lock(run_id):
++        state = _state(run_id, store)
++        item = state.evidence.get(domain)
++        retained = (
++            deepcopy(state.fallback_result)
++            if isinstance(state.fallback_result, Mapping)
++            else None
++        )
++        blocked_result = retained or {
++            "action_loop_status": "BLOCKED",
++            "blocked_domains": [domain],
++            "context": {
++                "missing_domains": (
++                    [domain]
++                    if item is None or item.status is EvidenceStatus.MISSING
++                    else []
++                ),
++                "conflicting_domains": (
++                    [domain]
++                    if item is not None
++                    and item.status is EvidenceStatus.CONFLICTING
++                    else []
++                ),
++            },
++        }
++        store.block(
++            run_id,
++            blocked_result,
++            (
++                f"{domain.upper()}_ACTION_STALLED"
++                if stalled
++                else f"{domain.upper()}_ACTION_FAILED"
+             ),
+-        },
+-    }
+-    store.block(
+-        run_id,
+-        blocked_result,
+-        (
+-            f"{domain.upper()}_ACTION_STALLED"
+-            if stalled
+-            else f"{domain.upper()}_ACTION_FAILED"
+-        ),
+-    )
++        )
+ 
+ 
+ def _timeout_actions(
+@@ -2407,27 +2492,28 @@ def _timeout_actions(
+ ) -> None:
+     """Close actions that made no observable progress for 30 seconds."""
+ 
+-    state = _state(run_id, store)
+-    for action_id in action_ids:
+-        if action_id in state.action_status:
+-            state.action_status[action_id] = "blocked"
+-        store.append_event(
++    with _run_lock(run_id):
++        state = _state(run_id, store)
++        for action_id in action_ids:
++            if action_id in state.action_status:
++                state.action_status[action_id] = "blocked"
++            store.append_event(
++                run_id,
++                event_type="tool.timeout",
++                status="failed",
++                message=f"{_action_title(action_id)}超过30秒没有新进展。",
++                details={
++                    "tool": action_id,
++                    "timeout_seconds": 30,
++                },
++            )
++        _persist_loop_state(run_id, state, store)
++        _block_run(
+             run_id,
+-            event_type="tool.timeout",
+-            status="failed",
+-            message=f"{_action_title(action_id)}超过30秒没有新进展。",
+-            details={
+-                "tool": action_id,
+-                "timeout_seconds": 30,
+-            },
++            action_ids[0],
++            store=store,
++            stalled=True,
+         )
+-    _persist_loop_state(run_id, state, store)
+-    _block_run(
+-        run_id,
+-        action_ids[0],
+-        store=store,
+-        stalled=True,
+-    )
+ 
+ 
+ def _blocked_recovery(
+@@ -2543,23 +2629,29 @@ def record_refetched_evidence(
+     store = store if store is not None else default_agent_store()
+     if not items:
+         return ()
+-    state = _load_loop_state(run_id, store)
+-    if state is None:
+-        return ()
+-    written: list[str] = []
+-    for domain, item in items:
+-        if domain not in state.evidence:
+-            continue
+-        try:
+-            state.evidence[domain] = EvidenceItem.from_mapping(dict(item))
+-        except TravelAgentError:
+-            # 重采回来的形状不合契约时不写回，也不让读取崩——本次读取照常
+-            # 用内存里的那份，下次读取会重试。
+-            continue
+-        written.append(domain)
+-    if written:
+-        _persist_loop_state(run_id, state, store)
+-    return tuple(written)
++    with _run_lock(run_id):
++        with _LOCK:
++            state = _STATES.get(run_id)
++        if state is None:
++            state = _load_loop_state(run_id, store)
++        if state is None:
++            return ()
++        written: list[str] = []
++        for domain, item in items:
++            if domain not in state.evidence:
++                continue
++            try:
++                state.evidence[domain] = EvidenceItem.from_mapping(dict(item))
++            except TravelAgentError:
++                # 重采回来的形状不合契约时不写回，也不让读取崩——本次读取照常
++                # 用内存里的那份，下次读取会重试。
++                continue
++            written.append(domain)
++        if written:
++            with _LOCK:
++                _STATES[run_id] = state
++            _persist_loop_state(run_id, state, store)
++        return tuple(written)
+ 
+ 
+ def _persist_loop_state(
+@@ -2567,17 +2659,18 @@ def _persist_loop_state(
+     state: _LoopState,
+     store: InMemoryAgentStore,
+ ) -> None:
+-    run_directory = store.run_directory(run_id)
+-    if run_directory is None:
+-        return
+-    _atomic_runtime_json(
+-        run_directory / "action-loop.json",
+-        state.to_dict(),
+-    )
+-    _atomic_runtime_json(
+-        run_directory / "evidence" / "current.json",
+-        state.evidence_dict(run_id),
+-    )
++    with _run_lock(run_id):
++        run_directory = store.run_directory(run_id)
++        if run_directory is None:
++            return
++        _atomic_runtime_json(
++            run_directory / "action-loop.json",
++            state.to_dict(),
++        )
++        _atomic_runtime_json(
++            run_directory / "evidence" / "current.json",
++            state.evidence_dict(run_id),
++        )
+ 
+ 
+ def action_loop_started(
+@@ -2594,9 +2687,10 @@ def action_loop_started(
+     """
+ 
+     store = store if store is not None else default_agent_store()
+-    with _LOCK:
+-        if _STATES.get(run_id) is not None:
+-            return True
++    with _run_lock(run_id):
++        with _LOCK:
++            if _STATES.get(run_id) is not None:
++                return True
+         return _load_loop_state(run_id, store) is not None
+ 
+ 
+@@ -2769,6 +2863,7 @@ __all__ = [
+     "action_loop_started",
+     "get_next_actions",
+     "restart_action_loop_for_intent",
++    "resume_missing_action_loop",
+     "run_until_blocked",
+     "start_action_loop",
+     "record_refetched_evidence",
+diff --git a/src/trip_decider/itinerary_verification.py b/src/trip_decider/itinerary_verification.py
+index d956612..75ea389 100644
+--- a/src/trip_decider/itinerary_verification.py
++++ b/src/trip_decider/itinerary_verification.py
+@@ -84,18 +84,11 @@ class VerifiedFinding:
+         计算走 `evidence_core` 的同一套实现，不在这里另写一份判定（D19）。
+         """
+ 
+-        support = _VERDICT_SUPPORT[self.verdict]
+-        if support in {SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}:
+-            # 这两个吸收 freshness——查不到/对不上，谈不上新不新鲜。
+-            return combine_token(support, FRESHNESS_FRESH)
+-        freshness = resolve_freshness(
++        return verification_token(
++            self.verdict,
+             self.retrieved_at,
+-            now=now or datetime.now().astimezone(),
+-            tolerance_seconds=FRESHNESS_POLICIES[
+-                RAILWAY_DATA_TYPE
+-            ].stale_ttl_seconds,
++            now=now,
+         )
+-        return combine_token(support, freshness.value)
+ 
+     def to_dict(self, *, now: datetime | None = None) -> dict[str, object]:
+         return {
+@@ -123,6 +116,28 @@ _VERDICT_SUPPORT = {
+ }
+ 
+ 
++def verification_token(
++    verdict: str,
++    retrieved_at: object,
++    *,
++    now: datetime | None = None,
++) -> str:
++    """按读取时刻重算核验 token，避免登记处缓存把新鲜度冻住。"""
++
++    support = _VERDICT_SUPPORT[verdict]
++    if support in {SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}:
++        # 这两个吸收 freshness——查不到/对不上，谈不上新不新鲜。
++        return combine_token(support, FRESHNESS_FRESH)
++    freshness = resolve_freshness(
++        retrieved_at,
++        now=now or datetime.now().astimezone(),
++        tolerance_seconds=FRESHNESS_POLICIES[
++            RAILWAY_DATA_TYPE
++        ].stale_ttl_seconds,
++    )
++    return combine_token(support, freshness.value)
++
++
+ def verify_railway_assertions(
+     assertions: Sequence[Mapping[str, object]],
+     *,
+@@ -237,7 +252,7 @@ def verify_checkable_incrementally(
+     一条查不到不影响其余各条——这一点与同步版一致。
+     """
+ 
+-    for finding in _verify_against_live_rail(
++    for finding in _iter_verify_against_live_rail(
+         list(checkable),
+         client_factory=client_factory,
+     ):
+@@ -353,35 +368,48 @@ def _verify_against_live_rail(
+     *,
+     client_factory,
+ ) -> list[VerifiedFinding]:
++    return list(
++        _iter_verify_against_live_rail(
++            checkable,
++            client_factory=client_factory,
++        )
++    )
++
++
++def _iter_verify_against_live_rail(
++    checkable: Sequence[tuple[int, Mapping[str, object]]],
++    *,
++    client_factory,
++):
++    """逐条产出结论；同步入口仅负责把这个迭代器收集成列表。"""
++
+     client = client_factory()
+     try:
+-        client.initialize_web_session()
+-        name_to_code, code_to_name = client.station_codes()
+-    except (_RailFailure, OSError, ValueError) as error:
+-        # 会话建不起来，全部条目都是 unknown——**不是 conflicting**。
+-        # 我们没查到，不代表用户写错了。
+-        return [
+-            VerifiedFinding(
+-                index=index,
+-                verdict="unknown",
+-                claim=_claim_view(claim),
+-                observed=None,
+-                mismatches=(),
+-                reason=f"rail_session_unavailable:{type(error).__name__}",
+-                retrieved_at=None,
+-                suggested_action="12306 连不上，稍后重试本次核验",
+-            )
+-            for index, claim in checkable
+-        ]
+-
+-    findings: list[VerifiedFinding] = []
+-    # 值是 (车次列表, 那一次的采集时刻)——时刻与数据同生共死（R2）。
+-    schedule_cache: dict[
+-        tuple[str, str, date], tuple[list[_Train], str]
+-    ] = {}
+-    for index, claim in checkable:
+-        findings.append(
+-            _verify_one(
++        try:
++            client.initialize_web_session()
++            name_to_code, code_to_name = client.station_codes()
++        except (_RailFailure, OSError, ValueError) as error:
++            # 会话建不起来，全部条目都是 unknown——**不是 conflicting**。
++            # 逐条 yield 同样重要：即使失败结论很多，宿主也能看到进度。
++            for index, claim in checkable:
++                yield VerifiedFinding(
++                    index=index,
++                    verdict="unknown",
++                    claim=_claim_view(claim),
++                    observed=None,
++                    mismatches=(),
++                    reason=f"rail_session_unavailable:{type(error).__name__}",
++                    retrieved_at=None,
++                    suggested_action="12306 连不上，稍后重试本次核验",
++                )
++            return
++
++        # 值是 (车次列表, 那一次的采集时刻)——时刻与数据同生共死（R2）。
++        schedule_cache: dict[
++            tuple[str, str, date], tuple[list[_Train], str]
++        ] = {}
++        for index, claim in checkable:
++            yield _verify_one(
+                 index,
+                 claim,
+                 client=client,
+@@ -389,8 +417,14 @@ def _verify_against_live_rail(
+                 code_to_name=code_to_name,
+                 schedule_cache=schedule_cache,
+             )
+-        )
+-    return findings
++    finally:
++        close = getattr(client, "close", None)
++        if callable(close):
++            try:
++                close()
++            except (OSError, ValueError):
++                # 结果已经采到；关闭会话失败不应把整份核验改判成失败。
++                pass
+ 
+ 
+ def _verify_one(
+@@ -641,6 +675,7 @@ __all__ = [
+     "RAILWAY_ASSERTION_REQUIRED_FIELDS",
+     "RAILWAY_ASSERTION_OPTIONAL_FIELDS",
+     "VerifiedFinding",
++    "verification_token",
+     "summarize",
+     "verify_railway_assertions",
+     "split_by_shape",
+diff --git a/src/trip_decider/mcp_adapter.py b/src/trip_decider/mcp_adapter.py
+index 8a7c2d9..7852ed8 100644
+--- a/src/trip_decider/mcp_adapter.py
++++ b/src/trip_decider/mcp_adapter.py
+@@ -8,6 +8,8 @@ helpers, planners, or provider tools.
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping
++import hashlib
++import json
+ import time
+ from uuid import uuid4
+ 
+@@ -19,9 +21,13 @@ from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
+ from trip_decider.itinerary_verification import (
+     split_by_shape,
+     summarize_dicts,
++    verification_token,
+     verify_checkable_incrementally,
+ )
+-from trip_decider.verification_registry import VerificationRegistry
++from trip_decider.verification_registry import (
++    VerificationCapacityError,
++    VerificationRegistry,
++)
+ from trip_decider.trip_query import TripQueryError, TripQueryService
+ from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
+ 
+@@ -649,14 +655,29 @@ class TripMCPAdapter:
+         # 收下活，立刻回执。实采在后台——同步核会把这次调用拖到分钟级，
+         # 那正是第四次实测宿主放弃的原因（I14）。
+         immediate, checkable = split_by_shape(assertions)
+-        started = self._verifications.start_background(
+-            total=len(assertions),
+-            immediate=immediate,
+-            collect=lambda report: verify_checkable_incrementally(
+-                checkable,
+-                report=report,
+-            ),
+-        )
++        canonical = json.dumps(
++            assertions,
++            ensure_ascii=False,
++            sort_keys=True,
++            separators=(",", ":"),
++            default=repr,
++        ).encode("utf-8")
++        try:
++            started = self._verifications.start_background(
++                total=len(assertions),
++                immediate=immediate,
++                collect=lambda report: verify_checkable_incrementally(
++                    checkable,
++                    report=report,
++                ),
++                dedupe_key=hashlib.sha256(canonical).hexdigest(),
++                retry_items=assertions,
++            )
++        except VerificationCapacityError as error:
++            raise TripMCPError(
++                str(error),
++                next_call="等待几秒后用相同 assertions 重试 verify_itinerary",
++            ) from None
+         return self._verification_view(started)
+ 
+     def read_verification(self, verify_id: str) -> dict[str, object]:
+@@ -675,6 +696,23 @@ class TripMCPAdapter:
+     def _verification_view(snapshot: Mapping[str, object]) -> dict[str, object]:
+         findings = snapshot.get("findings")
+         findings = findings if isinstance(findings, list) else []
++        # 登记处保存的是采集事实，不保存一个永远不变的展示 token。每次读取都按
++        # retrieved_at 重算，长时间轮询也不能把旧数据继续叫作 verified。
++        refreshed_findings: list[dict[str, object]] = []
++        for raw_finding in findings:
++            if not isinstance(raw_finding, Mapping):
++                continue
++            finding = dict(raw_finding)
++            verdict = str(finding.get("verdict"))
++            try:
++                finding["token"] = verification_token(
++                    verdict,
++                    finding.get("retrieved_at"),
++                )
++            except KeyError:
++                pass
++            refreshed_findings.append(finding)
++        findings = refreshed_findings
+         status = str(snapshot.get("status"))
+         # FINALIZING = 结论已到齐、后台还没宣告收工。对宿主而言仍要再取一次，
+         # 所以和 RUNNING 同样处理，但状态名如实区分（R1）。
+@@ -683,6 +721,7 @@ class TripMCPAdapter:
+             "artifact_kind": "ItineraryVerification",
+             "domain": "railway",
+             **dict(snapshot),
++            "findings": findings,
+             # 总评按**已核出的**算，并明说还剩几条——不把未核的算成有据。
+             "summary": summarize_dicts(findings),
+             "scope_note": (
+@@ -691,6 +730,17 @@ class TripMCPAdapter:
+             ),
+         }
+         if running:
++            if status == "FINALIZING":
++                detail = (
++                    "全部结论已经到齐，后台正在提交终态。"
++                    "再取一次即可；不要用 pending 判断是否收工。"
++                )
++            else:
++                detail = (
++                    f"还有 {snapshot.get('pending')} 条在实查 12306。"
++                    "每条约 2 秒，隔几秒再取一次即可。"
++                    "本响应里已核出的部分是最终结论，不会再变。"
++                )
+             view["next_call"] = {
+                 "reason": "VERIFICATION_IN_PROGRESS",
+                 "options": [
+@@ -698,11 +748,7 @@ class TripMCPAdapter:
+                         "kind": "poll",
+                         "entrypoint": "read_verification",
+                         "arguments": {"verify_id": snapshot.get("verify_id")},
+-                        "detail": (
+-                            f"还有 {snapshot.get('pending')} 条在实查 12306。"
+-                            "每条约 2 秒，隔几秒再取一次即可。"
+-                            "本响应里已核出的部分是最终结论，不会再变。"
+-                        ),
++                        "detail": detail,
+                     }
+                 ],
+             }
+@@ -711,7 +757,8 @@ class TripMCPAdapter:
+             summary = view["summary"]
+             flagged = summary.get("needs_confirmation") or []
+             view["status"] = "completed" if status == "COMPLETE" else "failed"
+-            view["complete"] = True
++            view["terminal"] = True
++            view["complete"] = status == "COMPLETE"
+             if status == "COMPLETE":
+                 detail = (
+                     f"核验完成：{summary.get('sentence')}。"
+@@ -720,25 +767,38 @@ class TripMCPAdapter:
+                         "——conflicting 附了两边的值，unknown 请注意它表示"
+                         "「查无实据」而不是「假」。"
+                         if flagged
+-                        else "全部对得上，可以照此出行。"
++                        else "已提交的铁路断言全部对得上；其他出行域仍未核验。"
+                     )
+                 )
++                options: list[dict[str, object]] = []
+             else:
++                retry_assertions = snapshot.get("retry_assertions")
++                retry_assertions = (
++                    retry_assertions
++                    if isinstance(retry_assertions, list)
++                    else []
++                )
+                 detail = (
+                     f"核验中断：{snapshot.get('error')}。"
+                     f"已核出的 {summary.get('total')} 条仍然有效；"
+-                    "余下的可以重新提交一次 verify_itinerary。"
++                    f"余下 {len(retry_assertions)} 条可以重新提交。"
++                )
++                options = (
++                    [
++                        {
++                            "kind": "retry",
++                            "entrypoint": "verify_itinerary",
++                            "arguments": {"assertions": retry_assertions},
++                            "detail": "只重试尚未得到结论的断言。",
++                        }
++                    ]
++                    if retry_assertions
++                    else []
+                 )
+             view["next_call"] = {
+                 "reason": view["status"].upper(),
+-                "options": [
+-                    {
+-                        "kind": "done",
+-                        "entrypoint": "verify_itinerary",
+-                        "arguments": {},
+-                        "detail": detail,
+-                    }
+-                ],
++                "options": options,
++                "detail": detail,
+             }
+         return view
+ 
+diff --git a/src/trip_decider/mcp_server.py b/src/trip_decider/mcp_server.py
+index c0fbb3d..47d55a3 100644
+--- a/src/trip_decider/mcp_server.py
++++ b/src/trip_decider/mcp_server.py
+@@ -47,6 +47,13 @@ _ADVANCING = ToolAnnotations(
+     idempotent_hint=False,
+     open_world_hint=True,
+ )
++from trip_decider.runtime_owner import RuntimeOwner
++_VERIFYING = ToolAnnotations(
++    read_only_hint=False,
++    destructive_hint=False,
++    idempotent_hint=False,
++    open_world_hint=True,
++)
+ 
+ _APP_CALLABLE_META = {
+     "ui": {"visibility": ["model", "app"]},
+@@ -408,9 +415,10 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+             "【立刻返回，不要等】本工具**秒回**一个 verify_id 加首批结论"
+             "（形状问题当场就能判）。实查 12306 在后台跑，用 "
+             "read_verification(verify_id) 取增量——返回体的 next_call 会告诉你"
+-            "还剩几条。已核出的部分是最终结论，不会再变。"
++            "还剩几条。相同 assertions 在结果保留期内会复用同一 verify_id，"
++            "不会重复打 12306。已核出的部分是最终结论，不会再变。"
+         ),
+-        annotations=_READ_ONLY,
++        annotations=_VERIFYING,
+         structured_output=True,
+     )
+     def verify_itinerary(
+@@ -425,10 +433,13 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+             "取一份进行中或已完成的核验结果。verify_itinerary 立刻返回 "
+             "verify_id，实查 12306 在后台推进，用这个取增量。\n"
+             "【什么时候用】verify_itinerary 或上一次 read_verification 的返回体里 "
+-            "status 还是 RUNNING。\n"
++            "status 是 RUNNING 或 FINALIZING。FINALIZING 表示结论已经到齐、"
++            "后台正在提交终态，再取一次即可。\n"
+             "【怎么用】read_verification(verify_id=\"verify-…\")，"
+             "把上一次返回的 verify_id 原样传回。每条断言约 2 秒，"
+             "隔几秒取一次即可。\n"
++            "【收工只看 status】completed/failed 才是终态；不要用 pending==0 "
++            "判断收工，pending 只表示尚未得到结论的条数。\n"
+             "【已核出的不会变】增量只增不改，可以在部分结果上先下判断。\n"
+             "【结果保留一小时】服务重启或超时后 verify_id 失效，"
+             "会明确报「这个 id 不存在」而不是假装还在跑。"
+@@ -473,35 +484,40 @@ def _services_for(arguments: argparse.Namespace) -> TripServices:
+ def main() -> int:
+     arguments = _parser().parse_args()
+     services = _services_for(arguments)
++    runtime_root = services.application.store.runtime_root
++    if runtime_root is None:
++        raise RuntimeError("MCP runtime root is not configured")
++    owner = RuntimeOwner(runtime_root)
++    owner.acquire()
+     web_server = None
+     web_thread = None
+-    if arguments.with_web:
+-        from trip_decider import product_web
+-
+-        product_web.configure_services(
+-            services.application,
+-            services.query,
+-        )
+-        web_server = product_web.make_server(
+-            arguments.web_host,
+-            arguments.web_port,
+-        )
+-        web_thread = threading.Thread(
+-            target=web_server.serve_forever,
+-            name="trip-decider-shared-web",
+-            daemon=True,
+-        )
+-        web_thread.start()
+-        host, port = web_server.server_address
+-        print(
+-            f"trip-decider shared web: http://{host}:{port}/",
+-            file=sys.stderr,
+-            flush=True,
+-        )
+-    server = build_mcp_server(
+-        TripMCPAdapter(services.application, services.query)
+-    )
+     try:
++        if arguments.with_web:
++            from trip_decider import product_web
++
++            product_web.configure_services(
++                services.application,
++                services.query,
++            )
++            web_server = product_web.make_server(
++                arguments.web_host,
++                arguments.web_port,
++            )
++            web_thread = threading.Thread(
++                target=web_server.serve_forever,
++                name="trip-decider-shared-web",
++                daemon=True,
++            )
++            web_thread.start()
++            host, port = web_server.server_address
++            print(
++                f"trip-decider shared web: http://{host}:{port}/",
++                file=sys.stderr,
++                flush=True,
++            )
++        server = build_mcp_server(
++            TripMCPAdapter(services.application, services.query)
++        )
+         server.run("stdio")
+     finally:
+         if web_server is not None:
+@@ -509,6 +525,7 @@ def main() -> int:
+             web_server.server_close()
+         if web_thread is not None:
+             web_thread.join(timeout=5)
++        owner.release()
+     return 0
+ 
+ 
+diff --git a/src/trip_decider/product_web.py b/src/trip_decider/product_web.py
+index 5d93990..ad5d8fd 100644
+--- a/src/trip_decider/product_web.py
++++ b/src/trip_decider/product_web.py
+@@ -51,6 +51,7 @@ from trip_decider.travel_agent import (
+     TravelAgentError,
+     runtime_status,
+ )
++from trip_decider.runtime_owner import RuntimeOwner
+ 
+ 
+ _WEB_ROOT = Path(__file__).with_name("web")
+@@ -971,15 +972,24 @@ def main() -> int:
+     arguments = _parser().parse_args()
+     # 真实进程才重采：读时同步重采会打 12306 与高德（freshness-policy.md §5.1）。
+     enable_live_refetch(True)
+-    server = make_server(arguments.host, arguments.port)
+-    host, port = server.server_address
+-    print(f"trip-decider local product: http://{host}:{port}/")
++    store = _active_store()
++    runtime_root = store.runtime_root
++    if runtime_root is None:
++        raise RuntimeError("Web runtime root is not configured")
++    owner = RuntimeOwner(runtime_root)
++    owner.acquire()
++    server = None
+     try:
++        server = make_server(arguments.host, arguments.port)
++        host, port = server.server_address
++        print(f"trip-decider local product: http://{host}:{port}/")
+         server.serve_forever()
+     except KeyboardInterrupt:
+         pass
+     finally:
+-        server.server_close()
++        if server is not None:
++            server.server_close()
++        owner.release()
+     return 0
+ 
+ 
+diff --git a/src/trip_decider/travel_agent.py b/src/trip_decider/travel_agent.py
+index b1edc46..00f8b89 100644
+--- a/src/trip_decider/travel_agent.py
++++ b/src/trip_decider/travel_agent.py
+@@ -1403,7 +1403,11 @@ class InMemoryAgentStore:
+                 run,
+                 event_type="run.blocked",
+                 status="failed",
+-                message="真实证据不足，当前运行已停止。",
++                message=(
++                    "服务内部错误，当前运行已停止。"
++                    if reason_code == "INTERNAL_ERROR"
++                    else "真实证据不足，当前运行已停止。"
++                ),
+                 details={
+                     "reason_code": reason_code,
+                     "error_detail": error_detail,
+diff --git a/src/trip_decider/trip_application.py b/src/trip_decider/trip_application.py
+index 0901f01..3b8dd0c 100644
+--- a/src/trip_decider/trip_application.py
++++ b/src/trip_decider/trip_application.py
+@@ -24,6 +24,7 @@ from trip_decider.agent_actions import (
+     execute_registered_action,
+     get_next_actions,
+     restart_action_loop_for_intent,
++    resume_missing_action_loop,
+     run_until_blocked,
+     start_action_loop,
+     record_refetched_evidence,
+@@ -43,18 +44,12 @@ from trip_decider.evidence_broker import (
+ )
+ from trip_decider.guided_discovery import build_guided_comparison
+ from trip_decider.evidence_projection import business_view
+-from trip_decider.destination_runtime import (
+-    collect_map_evidence,
+-    collect_railway_evidence,
+-)
+-from trip_decider.dynamic_discovery import collect_live_destination_profile
+ from trip_decider.travel_agent import (
+     default_agent_store,
+     AgentRun,
+     EvidenceItem,
+     EvidenceStatus,
+     InMemoryAgentStore,
+-    NON_BUSINESS_ERRORS,
+     Revision,
+     RunStatus,
+     TaskMode,
+@@ -160,10 +155,43 @@ class TripApplicationService:
+                 # 此前这里一头扎进 run_until_blocked，撞上
+                 # 「action loop was not started」抛给宿主——而宿主什么都没做错，
+                 # 它只是在按提示轮询。**这不是错误状态，是「还在比较」**，
+-                # 如实回当前进度即可。
++                # 如实回当前进度即可。若本进程没有对应 worker（典型场景是服务
++                # 重启后从盘上恢复到 RUNNING），原线程已经不可能回来；这里原子
++                # 地补起一个。否则这个 run 会永久显示 COMPARING。
++                if run.intent.task_mode is TaskMode.DIRECT_PLAN:
++                    action_state = resume_missing_action_loop(
++                        run_id,
++                        store=self.store,
++                    )
++                    self._spawn_action_loop(run_id, purpose="recovered")
++                    return ApplicationOutcome(
++                        run_id,
++                        accepted=True,
++                        action_loop=action_state,
++                    )
++                if run.intent.task_mode not in {
++                    TaskMode.GUIDED_DISCOVERY,
++                    TaskMode.OPEN_DISCOVERY,
++                }:
++                    raise TripApplicationError(
++                        "running task has no resumable action loop"
++                    )
++                worker_restarted = self._ensure_candidate_comparison_worker(
++                    run_id,
++                    run.intent.task_mode,
++                )
++                if self.store.get_run(run_id).status is not RunStatus.RUNNING:
++                    return ApplicationOutcome(
++                        run_id,
++                        accepted=worker_restarted,
++                    )
++                progress = comparison_progress(run_id, store=self.store)
++                if worker_restarted:
++                    progress["worker_restarted"] = True
+                 return ApplicationOutcome(
+                     run_id,
+-                    action_loop=comparison_progress(run_id, store=self.store),
++                    accepted=worker_restarted,
++                    action_loop=progress,
+                 )
+             if action_id is not None:
+                 action_state = execute_registered_action(
+@@ -775,13 +803,7 @@ class TripApplicationService:
+                 f"{mode.value} handler received another task mode"
+             )
+         self.store.start(run_id)
+-        with self._cancellations_lock:
+-            self._cancellations[run_id] = threading.Event()
+-        self._spawn(
+-            target=self._candidate_comparison_background,
+-            args=(run_id, mode),
+-            name=f"trip-decider-{mode.value.lower()}-{run_id}",
+-        )
++        self._ensure_candidate_comparison_worker(run_id, mode)
+         return ApplicationOutcome(
+             run_id,
+             accepted=True,
+@@ -798,6 +820,29 @@ class TripApplicationService:
+             },
+         )
+ 
++    def _ensure_candidate_comparison_worker(
++        self,
++        run_id: str,
++        mode: TaskMode,
++    ) -> bool:
++        """确保本进程恰有一个候选比较 worker；返回是否新启动。"""
++
++        with self._cancellations_lock:
++            if run_id in self._cancellations:
++                return False
++            self._cancellations[run_id] = threading.Event()
++        try:
++            self._spawn(
++                target=self._candidate_comparison_background,
++                args=(run_id, mode),
++                name=f"trip-decider-{mode.value.lower()}-{run_id}",
++            )
++        except Exception:
++            with self._cancellations_lock:
++                self._cancellations.pop(run_id, None)
++            raise
++        return True
++
+     def _candidate_comparison_background(
+         self,
+         run_id: str,
+@@ -902,19 +947,32 @@ class TripApplicationService:
+                 },
+             )
+             self.store.complete(run_id, result)
+-        except NON_BUSINESS_ERRORS:
+-            # 编程错误不穿业务外衣。这个 except 曾把一个 NameError 报成
+-            # 「真实证据不足」——同一个叙述覆盖了「采集器没拿到数据」和
+-            # 「这段代码有 bug」，两者在可观测层面无法区分，归因因此走了
+-            # 一整轮弯路。业务失败保留原叙述，编程错误原样抛出。
+-            raise
+         except Exception as error:
++            code, detail = run_error_code(
++                error,
++                "GUIDED_COMPARISON_UNAVAILABLE",
++            )
++            if code == "INTERNAL_ERROR":
++                # 后台线程里重抛只会静默结束并把 run 永久留在 RUNNING。
++                # 栈进日志，有限错误码与异常类型进持久化状态。
++                _LOGGER.exception(
++                    "candidate comparison background thread hit a "
++                    "programming error (run_id=%s)",
++                    run_id,
++                )
+             current = self.store.get_run(run_id)
+             if current.status is RunStatus.RUNNING:
++                result = _failed_comparison_result(current.intent, error)
++                if code == "INTERNAL_ERROR":
++                    result["recovery"] = []
++                    result["blockers"] = [
++                        {"code": code, "reason": detail}
++                    ]
+                 self.store.block(
+                     run_id,
+-                    _failed_comparison_result(current.intent, error),
+-                    "GUIDED_COMPARISON_UNAVAILABLE",
++                    result,
++                    code,
++                    error_detail=detail,
+                 )
+         finally:
+             with self._cancellations_lock:
+diff --git a/src/trip_decider/trip_services.py b/src/trip_decider/trip_services.py
+index 1e2be0d..bcb51be 100644
+--- a/src/trip_decider/trip_services.py
++++ b/src/trip_decider/trip_services.py
+@@ -98,7 +98,7 @@ def build_trip_services(
+ 
+ 
+ __all__ = [
+-    "default_trip_services()",
++    "default_trip_services",
+     "TripServices",
+     "build_trip_services",
+ ]
+diff --git a/src/trip_decider/verification_registry.py b/src/trip_decider/verification_registry.py
+index a820fc7..206caf6 100644
+--- a/src/trip_decider/verification_registry.py
++++ b/src/trip_decider/verification_registry.py
+@@ -33,11 +33,18 @@ _RETENTION_SECONDS = 3600.0
+ _MAX_ENTRIES = 32
+ 
+ 
++class VerificationCapacityError(RuntimeError):
++    """所有槽位都被正在运行的核验占用。"""
++
++
+ @dataclass
+ class _Verification:
+     verify_id: str
+     total: int
+     created_at: float
++    dedupe_key: str | None = None
++    #: 后台失败时，只把尚未得到结论的原断言交还给宿主重试。
++    retry_items: list[object] = field(default_factory=list)
+     #: 形状不合格的那些——不消耗网络，第一次调用就能给出。
+     immediate: list[dict[str, object]] = field(default_factory=list)
+     #: 实采核出来的。**只由持锁的工具线程从 ``inbox`` 搬进来**，
+@@ -65,7 +72,7 @@ class _Verification:
+         # 假的非零值。不变式因此成立：**RUNNING 蕴含 pending > 0**。
+         if status == "RUNNING" and pending == 0:
+             status = "FINALIZING"
+-        return {
++        result = {
+             "verify_id": self.verify_id,
+             "status": status,
+             "total": self.total,
+@@ -74,6 +81,18 @@ class _Verification:
+             "findings": deepcopy(findings),
+             "error": self.error,
+         }
++        if self.status == "FAILED":
++            checked_indices = {
++                int(item.get("index") or 0) for item in findings
++            }
++            result["retry_assertions"] = deepcopy(
++                [
++                    item
++                    for index, item in enumerate(self.retry_items, start=1)
++                    if index not in checked_indices
++                ]
++            )
++        return result
+ 
+ 
+ class VerificationRegistry:
+@@ -83,10 +102,12 @@ class VerificationRegistry:
+         self,
+         *,
+         spawn: Callable[[Callable[[], None], str], None] | None = None,
++        clock: Callable[[], float] | None = None,
+     ) -> None:
+         self._lock = threading.RLock()
+         self._entries: dict[str, _Verification] = {}
+         self._spawn = spawn if spawn is not None else _default_spawn
++        self._clock = clock if clock is not None else time.monotonic
+ 
+     def start_background(
+         self,
+@@ -94,6 +115,8 @@ class VerificationRegistry:
+         total: int,
+         immediate: Sequence[Mapping[str, object]],
+         collect: Callable[[Callable[[Mapping[str, object]], None]], None],
++        dedupe_key: str | None = None,
++        retry_items: Sequence[object] = (),
+     ) -> dict[str, object]:
+         """登记一份核验并**立刻**返回回执。
+ 
+@@ -108,11 +131,33 @@ class VerificationRegistry:
+         entry = _Verification(
+             verify_id=f"verify-{uuid4()}",
+             total=total,
+-            created_at=time.monotonic(),
++            created_at=self._clock(),
++            dedupe_key=dedupe_key,
++            retry_items=deepcopy(list(retry_items)),
+             immediate=[dict(item) for item in immediate],
+         )
++        if len(entry.immediate) >= total:
++            # 全部都是形状问题，没有要采的——不必起线程。
++            entry.status = "COMPLETE"
+         with self._lock:
+-            self._evict_locked()
++            self._prune_locked()
++            if dedupe_key is not None:
++                duplicate = next(
++                    (
++                        existing
++                        for existing in self._entries.values()
++                        if existing.dedupe_key == dedupe_key
++                        and existing.status != "FAILED"
++                    ),
++                    None,
++                )
++                if duplicate is not None:
++                    return duplicate.snapshot()
++            self._evict_finished_for_capacity_locked()
++            if len(self._entries) >= _MAX_ENTRIES:
++                raise VerificationCapacityError(
++                    f"已有 {_MAX_ENTRIES} 份核验正在运行，请稍后重试"
++                )
+             self._entries[entry.verify_id] = entry
+ 
+         def report(finding: Mapping[str, object]) -> None:
+@@ -129,15 +174,15 @@ class VerificationRegistry:
+                 return
+             entry.inbox.put(("done", "COMPLETE", None))
+ 
+-        if len(entry.immediate) >= total:
+-            # 全部都是形状问题，没有要采的——不必起线程。
+-            entry.status = "COMPLETE"
+-        else:
++        if entry.status == "RUNNING":
+             self._spawn(worker, f"trip-decider-verify-{entry.verify_id}")
+-        return self.read(entry.verify_id)
++        snapshot = self.read(entry.verify_id)
++        assert snapshot is not None
++        return snapshot
+ 
+     def read(self, verify_id: str) -> dict[str, object] | None:
+         with self._lock:
++            self._prune_locked()
+             entry = self._entries.get(verify_id)
+             if entry is None:
+                 return None
+@@ -165,20 +210,21 @@ class VerificationRegistry:
+                 entry.status = str(payload)
+                 entry.error = detail
+ 
+-    def _evict_locked(self) -> None:
++    def _prune_locked(self) -> None:
+         # 先排空再判断终态：没人轮询过的条目，其完成消息还压在队列里，
+         # 不排空就会被当成 RUNNING 而永远淘汰不掉。
+         for entry in self._entries.values():
+             self._drain_locked(entry)
+-        now = time.monotonic()
++        now = self._clock()
+         stale = [
+             key
+             for key, entry in self._entries.items()
+             if now - entry.created_at > _RETENTION_SECONDS
+-            and entry.status != "RUNNING"
+         ]
+         for key in stale:
+             del self._entries[key]
++
++    def _evict_finished_for_capacity_locked(self) -> None:
+         if len(self._entries) < _MAX_ENTRIES:
+             return
+         finished = sorted(
+@@ -196,4 +242,4 @@ def _default_spawn(worker: Callable[[], None], name: str) -> None:
+     threading.Thread(target=worker, name=name, daemon=True).start()
+ 
+ 
+-__all__ = ["VerificationRegistry"]
++__all__ = ["VerificationCapacityError", "VerificationRegistry"]
+diff --git a/tests/test_guided_discovery_recovery.py b/tests/test_guided_discovery_recovery.py
+index 2269c8e..be10551 100644
+--- a/tests/test_guided_discovery_recovery.py
++++ b/tests/test_guided_discovery_recovery.py
+@@ -58,6 +58,13 @@ class _NoBackgroundApplication(TripApplicationService):
+         del target, args, name
+ 
+ 
++class _ImmediateBackgroundApplication(TripApplicationService):
++    @staticmethod
++    def _spawn(*, target: object, args: object, name: str) -> None:
++        del name
++        target(*args)
++
++
+ def _failing_comparison(intent: object, **arguments: object) -> dict[str, object]:
+     """真实失败点：活体候选检索解析不出区域（dynamic_discovery.py:71）。"""
+ 
+@@ -289,6 +296,47 @@ class GuidedDiscoveryRecoveryCase(unittest.TestCase):
+             "这是一句假话，宿主据此以为候选列表是空的比较结果",
+         )
+ 
++    # -- 7. 后台线程不能静默消失并留下永久 RUNNING ----------------------
++
++    def test_programming_error_blocks_with_internal_error(self) -> None:
++        def broken_comparison(*_args: object, **_kwargs: object):
++            raise NameError("undefined_candidate_helper")
++
++        self.application.comparison_builder = broken_comparison
++        run = self.application.create_trip(self.intent)
++        self.application.confirm_trip(run.run_id)
++        self.application.execute_trip(run.run_id)
++        self.application._candidate_comparison_background(
++            run.run_id,
++            TaskMode.GUIDED_DISCOVERY,
++        )
++
++        current = self.store.get_run(run.run_id)
++        self.assertIs(RunStatus.BLOCKED, current.status)
++        self.assertEqual("INTERNAL_ERROR", current.error_code)
++        self.assertEqual("NameError", current.error_detail)
++
++    def test_a_restarted_service_resumes_a_lost_comparison_worker(self) -> None:
++        """盘上 RUNNING、本进程却没有 worker 时，下一次轮询要补起它。"""
++
++        run = self.application.create_trip(self.intent)
++        self.application.confirm_trip(run.run_id)
++        self.application.execute_trip(run.run_id)
++        self.assertIs(RunStatus.RUNNING, self.store.get_run(run.run_id).status)
++
++        restarted = _ImmediateBackgroundApplication(
++            store=self.store,
++            evidence_broker=self.application.evidence_broker,
++            railway_collector=noop_collector,
++            map_collector=noop_collector,
++            web_collector=noop_collector,
++            comparison_builder=_succeeding_comparison,
++        )
++        outcome = restarted.execute_trip(run.run_id)
++
++        self.assertTrue(outcome.accepted)
++        self.assertIs(RunStatus.COMPLETED, self.store.get_run(run.run_id).status)
++
+ 
+ def _succeeding_comparison(intent: object, **arguments: object) -> dict[str, object]:
+     """重试成功那一支。形状取自 invariant_support.controlled_comparison。"""
+diff --git a/tests/test_programming_errors_wear_no_business_costume.py b/tests/test_programming_errors_wear_no_business_costume.py
+index fc1fdda..a793a59 100644
+--- a/tests/test_programming_errors_wear_no_business_costume.py
++++ b/tests/test_programming_errors_wear_no_business_costume.py
+@@ -24,10 +24,12 @@ from __future__ import annotations
+ 
+ from pathlib import Path
+ from tempfile import TemporaryDirectory
++import threading
+ import unittest
+ from unittest.mock import patch
+ 
+ from trip_decider.agent_actions import (
++    action_loop_started,
+     execute_registered_action,
+     start_action_loop,
+ )
+@@ -41,6 +43,7 @@ from trip_decider.travel_agent import (
+ 
+ from tests.invariant_support import (
+     NoBackgroundApplication as _NoBackgroundService,
++    noop_collector,
+     offline_intent,
+ )
+ 
+@@ -141,6 +144,49 @@ class ProgrammingErrorsCase(unittest.TestCase):
+             "业务失败的叙述被改了，正向对照失效",
+         )
+ 
++    def test_the_same_action_cannot_be_claimed_by_two_threads(self) -> None:
++        """第二个调用应收到稳定的状态错误，而不是争抢同一个临时文件。"""
++
++        run_id = _started_run(self.store)
++        collector_entered = threading.Event()
++        release_collector = threading.Event()
++        self.addCleanup(release_collector.set)
++        first_errors: list[BaseException] = []
++
++        def gated_collector(intent):
++            collector_entered.set()
++            release_collector.wait(timeout=5.0)
++            return noop_collector(intent)
++
++        def execute_first() -> None:
++            try:
++                execute_registered_action(run_id, "railway", store=self.store)
++            except BaseException as error:  # 测试线程必须把异常交回主线程
++                first_errors.append(error)
++
++        with patch(
++            "trip_decider.agent_actions.collect_railway_evidence",
++            gated_collector,
++        ):
++            thread = threading.Thread(target=execute_first, daemon=True)
++            thread.start()
++            self.assertTrue(collector_entered.wait(timeout=5.0))
++            with self.assertRaisesRegex(TravelAgentError, "not waiting"):
++                execute_registered_action(run_id, "railway", store=self.store)
++            release_collector.set()
++            thread.join(timeout=5.0)
++
++        self.assertFalse(thread.is_alive())
++        self.assertEqual([], first_errors)
++        run = self.store.get_run(run_id)
++        started = [
++            event
++            for event in self.store.events_after(run.session_id, 0)
++            if event.event_type == "tool.started"
++            and event.details.get("tool") == "railway"
++        ]
++        self.assertEqual(1, len(started))
++
+ 
+ class BackgroundThreadNarrativeCase(unittest.TestCase):
+     """后台线程那个落点——本文件此前**只测了同步落点**。
+@@ -210,6 +256,20 @@ class BackgroundThreadNarrativeCase(unittest.TestCase):
+         self.assertEqual("ACTION_LOOP_FAILED", run.error_code)
+         self.assertEqual("TravelAgentError", run.error_detail)
+ 
++    def test_direct_plan_recovers_if_start_crashed_before_loop_persisted(self) -> None:
++        intent = offline_intent()
++        intent["task_mode"] = "DIRECT_PLAN"
++        created = self.service.create_trip(intent)
++        self.service.confirm_trip(created.run_id)
++        # 模拟 start_action_loop 在 store.start 后、首次落盘前进程退出。
++        self.store.start(created.run_id)
++
++        outcome = self.service.execute_trip(created.run_id)
++
++        self.assertTrue(outcome.accepted)
++        self.assertTrue(action_loop_started(created.run_id, store=self.store))
++        self.assertEqual("ACTIONS_AVAILABLE", outcome.action_loop["status"])
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_verification_freshness_and_protocol.py b/tests/test_verification_freshness_and_protocol.py
+index 008699c..c097e62 100644
+--- a/tests/test_verification_freshness_and_protocol.py
++++ b/tests/test_verification_freshness_and_protocol.py
+@@ -232,12 +232,12 @@ class CompletedPollingProtocolCase(unittest.TestCase):
+         self.assertEqual(view["total"], view["checked"])
+ 
+     def test_the_next_step_names_what_to_do_about_the_findings(self) -> None:
+-        option = self._completed()["next_call"]["options"][0]
++        next_call = self._completed()["next_call"]
+ 
+-        self.assertEqual("done", option["kind"])
+-        self.assertIn("核验完成", option["detail"])
++        self.assertEqual([], next_call["options"])
++        self.assertIn("核验完成", next_call["detail"])
+         # 两条都是形状问题 → unknown → 应当点名要确认
+-        self.assertIn("查无实据", option["detail"])
++        self.assertIn("查无实据", next_call["detail"])
+ 
+     def test_polling_again_after_completion_is_stable(self) -> None:
+         """完成之后再取一次，增量为空、结论不变。"""
+@@ -259,13 +259,46 @@ class CompletedPollingProtocolCase(unittest.TestCase):
+             raise RuntimeError("12306 会话建不起来")
+ 
+         snapshot = registry.start_background(
+-            total=1, immediate=[], collect=explode
++            total=1,
++            immediate=[],
++            collect=explode,
++            retry_items=[{"train_code": "G1"}],
+         )
+         view = self.adapter.read_verification(str(snapshot["verify_id"]))
+ 
+         self.assertEqual("failed", view["status"])
+-        self.assertIs(True, view["complete"])
+-        self.assertIn("12306 会话建不起来", view["next_call"]["options"][0]["detail"])
++        self.assertIs(False, view["complete"])
++        self.assertIs(True, view["terminal"])
++        self.assertIn("12306 会话建不起来", view["next_call"]["detail"])
++        option = view["next_call"]["options"][0]
++        self.assertEqual("verify_itinerary", option["entrypoint"])
++        self.assertEqual(
++            {"assertions": [{"train_code": "G1"}]},
++            option["arguments"],
++        )
++
++    def test_a_cached_finding_token_is_recomputed_when_read(self) -> None:
++        old = (datetime.now().astimezone() - timedelta(hours=7)).isoformat()
++        view = self.adapter._verification_view(
++            {
++                "verify_id": "verify-old",
++                "status": "COMPLETE",
++                "total": 1,
++                "checked": 1,
++                "pending": 0,
++                "error": None,
++                "findings": [
++                    {
++                        "index": 1,
++                        "verdict": "sourced",
++                        "retrieved_at": old,
++                        "token": "verified",
++                    }
++                ],
++            }
++        )
++
++        self.assertEqual("sourced_stale", view["findings"][0]["token"])
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/test_verify_itinerary_batching.py b/tests/test_verify_itinerary_batching.py
+index e274f5c..33296b2 100644
+--- a/tests/test_verify_itinerary_batching.py
++++ b/tests/test_verify_itinerary_batching.py
+@@ -29,11 +29,15 @@ import unittest
+ from unittest import mock
+ 
+ from trip_decider.evidence_broker import EvidenceBroker
++from trip_decider.itinerary_verification import verify_checkable_incrementally
+ from trip_decider.mcp_adapter import TripMCPAdapter, TripMCPError
+ from trip_decider.travel_agent import InMemoryAgentStore
+ from trip_decider.trip_application import TripApplicationService
+ from trip_decider.trip_query import TripQueryService
+-from trip_decider.verification_registry import VerificationRegistry
++from trip_decider.verification_registry import (
++    VerificationCapacityError,
++    VerificationRegistry,
++)
+ 
+ from tests.invariant_support import noop_collector
+ 
+@@ -163,6 +167,16 @@ class ImmediateReceiptCase(unittest.TestCase):
+         self.assertEqual(0, response["summary"]["sourced"])
+         self.assertEqual(3, response["pending"])
+ 
++    def test_identical_request_reuses_the_running_verification(self) -> None:
++        first = self.adapter.verify_itinerary(
++            [dict(item) for item in HOST_ITINERARY_ASSERTIONS]
++        )
++        second = self.adapter.verify_itinerary(
++            [dict(item) for item in HOST_ITINERARY_ASSERTIONS]
++        )
++
++        self.assertEqual(first["verify_id"], second["verify_id"])
++
+ 
+ class PollingCase(unittest.TestCase):
+     def setUp(self) -> None:
+@@ -193,7 +207,7 @@ class PollingCase(unittest.TestCase):
+         self.assertEqual("completed", response["status"])
+         self.assertEqual(2, response["checked"])
+         self.assertEqual(0, response["pending"])
+-        self.assertEqual("done", response["next_call"]["options"][0]["kind"])
++        self.assertEqual([], response["next_call"]["options"])
+ 
+     def test_read_returns_the_same_view_shape_as_the_first_call(self) -> None:
+         registry = VerificationRegistry(spawn=lambda worker, name: worker())
+@@ -226,5 +240,127 @@ class BackgroundFailureIsVisibleCase(unittest.TestCase):
+         self.assertIn("12306 会话建不起来", str(snapshot["error"]))
+ 
+ 
++class TrulyIncrementalCollectionCase(unittest.TestCase):
++    """第二条卡住时，第一条必须已经交给登记处。"""
++
++    def test_one_finding_is_reported_before_the_next_query_finishes(self) -> None:
++        second_query_started = threading.Event()
++        release_second = threading.Event()
++        self.addCleanup(release_second.set)
++
++        class _GatedRail:
++            def __init__(self) -> None:
++                self.queries = 0
++
++            def initialize_web_session(self) -> None:
++                return None
++
++            def station_codes(self):
++                return (
++                    {"甲站": "AAA", "乙站": "BBB"},
++                    {"AAA": "甲站", "BBB": "乙站"},
++                )
++
++            def query_direct(self, **kwargs: object) -> list:
++                self.queries += 1
++                if self.queries == 2:
++                    second_query_started.set()
++                    release_second.wait(timeout=5.0)
++                return []
++
++            def close(self) -> None:
++                return None
++
++        checkable = [
++            (
++                index,
++                {
++                    "train_code": f"G{index}",
++                    "origin_station": "甲站",
++                    "destination_station": "乙站",
++                    "departure_at": f"2026-08-{10 + index:02d}T08:00",
++                },
++            )
++            for index in (1, 2)
++        ]
++        reports: list[dict[str, object]] = []
++        thread = threading.Thread(
++            target=lambda: verify_checkable_incrementally(
++                checkable,
++                report=lambda finding: reports.append(dict(finding)),
++                client_factory=_GatedRail,
++            ),
++            daemon=True,
++        )
++        thread.start()
++
++        self.assertTrue(second_query_started.wait(timeout=5.0))
++        self.assertEqual(
++            [1],
++            [finding["index"] for finding in reports],
++            "第二条还没查完时，第一条没有逐条上报",
++        )
++        release_second.set()
++        thread.join(timeout=5.0)
++        self.assertEqual([1, 2], [finding["index"] for finding in reports])
++
++
++class VerificationRegistryBoundedCase(unittest.TestCase):
++    def test_running_entries_never_exceed_the_hard_cap(self) -> None:
++        registry = VerificationRegistry(spawn=lambda worker, name: None)
++        for index in range(32):
++            registry.start_background(
++                total=1,
++                immediate=[],
++                collect=lambda report: None,
++                dedupe_key=f"request-{index}",
++            )
++
++        with self.assertRaises(VerificationCapacityError):
++            registry.start_background(
++                total=1,
++                immediate=[],
++                collect=lambda report: None,
++                dedupe_key="request-over-cap",
++            )
++
++    def test_duplicate_key_spawns_only_one_worker(self) -> None:
++        spawned: list[str] = []
++        registry = VerificationRegistry(
++            spawn=lambda worker, name: spawned.append(name)
++        )
++
++        first = registry.start_background(
++            total=1,
++            immediate=[],
++            collect=lambda report: None,
++            dedupe_key="same",
++        )
++        second = registry.start_background(
++            total=1,
++            immediate=[],
++            collect=lambda report: None,
++            dedupe_key="same",
++        )
++
++        self.assertEqual(first["verify_id"], second["verify_id"])
++        self.assertEqual(1, len(spawned))
++
++    def test_read_enforces_retention_without_a_new_start(self) -> None:
++        now = [10.0]
++        registry = VerificationRegistry(
++            spawn=lambda worker, name: None,
++            clock=lambda: now[0],
++        )
++        started = registry.start_background(
++            total=1,
++            immediate=[],
++            collect=lambda report: None,
++        )
++        now[0] += 3601.0
++
++        self.assertIsNone(registry.read(str(started["verify_id"])))
++
++
+ if __name__ == "__main__":
+     unittest.main()
+=== 未跟踪新增文件（git diff 不含，补录） ===
+--- requirements-dev.lock ---
+-r requirements.lock
+iniconfig==2.3.0
+packaging==26.0
+pluggy==1.6.0
+Pygments==2.19.2
+pytest==9.0.2
+--- src/trip_decider/runtime_owner.py ---
+"""进程入口对 durable runtime 的独占占用。
+
+`InMemoryAgentStore` 的并发保证是线程级，不是跨进程事务。两个 MCP/Web 进程指向
+同一个 sessions 目录时，各自持有一份内存快照并会覆盖同名临时文件；与其静默
+损坏或永久轮询旧状态，不如让第二个进程立即给出可操作的错误。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import BinaryIO
+
+
+class RuntimeOwnershipError(RuntimeError):
+    """另一个 trip-decider 进程正在使用同一 runtime。"""
+
+
+class RuntimeOwner:
+    """持有 sessions 目录中的单字节系统锁，直到进程入口退出。"""
+
+    def __init__(self, runtime_root: Path | str) -> None:
+        self.runtime_root = Path(runtime_root).resolve()
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> "RuntimeOwner":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_error: object) -> None:
+        self.release()
+
+    def acquire(self) -> None:
+        if self._handle is not None:
+            return
+        self.runtime_root.mkdir(parents=True, exist_ok=True)
+        path = self.runtime_root / ".trip-decider.owner.lock"
+        handle = path.open("a+b")
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            _lock(handle)
+        except OSError as error:
+            handle.close()
+            raise RuntimeOwnershipError(
+                f"runtime 已被另一个进程占用：{self.runtime_root}。"
+                "关闭重复的 trip-decider 进程、为它配置不同的 "
+                "TRIP_DECIDER_RUNTIME_ROOT，或用 mcp_server --with-web "
+                "在同一进程同时提供 MCP 与网页。"
+            ) from error
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            _unlock(handle)
+        finally:
+            handle.close()
+
+
+def _lock(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if __import__("os").name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if __import__("os").name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+__all__ = ["RuntimeOwner", "RuntimeOwnershipError"]
+--- tests/test_runtime_owner.py ---
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+from trip_decider.runtime_owner import RuntimeOwner, RuntimeOwnershipError
+
+
+class RuntimeOwnerCase(unittest.TestCase):
+    def test_a_second_process_owner_is_rejected_until_release(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sessions"
+            first = RuntimeOwner(root)
+            second = RuntimeOwner(root)
+            first.acquire()
+            self.addCleanup(first.release)
+
+            with self.assertRaisesRegex(
+                RuntimeOwnershipError,
+                "TRIP_DECIDER_RUNTIME_ROOT",
+            ):
+                second.acquire()
+
+            first.release()
+            second.acquire()
+            second.release()
+
+
+if __name__ == "__main__":
+    unittest.main()
