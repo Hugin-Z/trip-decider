@@ -58,6 +58,13 @@ class _NoBackgroundApplication(TripApplicationService):
         del target, args, name
 
 
+class _ImmediateBackgroundApplication(TripApplicationService):
+    @staticmethod
+    def _spawn(*, target: object, args: object, name: str) -> None:
+        del name
+        target(*args)
+
+
 def _failing_comparison(intent: object, **arguments: object) -> dict[str, object]:
     """真实失败点：活体候选检索解析不出区域（dynamic_discovery.py:71）。"""
 
@@ -288,6 +295,47 @@ class GuidedDiscoveryRecoveryCase(unittest.TestCase):
             "比较抛异常之后 candidates() 仍报 comparison_completed=True——"
             "这是一句假话，宿主据此以为候选列表是空的比较结果",
         )
+
+    # -- 7. 后台线程不能静默消失并留下永久 RUNNING ----------------------
+
+    def test_programming_error_blocks_with_internal_error(self) -> None:
+        def broken_comparison(*_args: object, **_kwargs: object):
+            raise NameError("undefined_candidate_helper")
+
+        self.application.comparison_builder = broken_comparison
+        run = self.application.create_trip(self.intent)
+        self.application.confirm_trip(run.run_id)
+        self.application.execute_trip(run.run_id)
+        self.application._candidate_comparison_background(
+            run.run_id,
+            TaskMode.GUIDED_DISCOVERY,
+        )
+
+        current = self.store.get_run(run.run_id)
+        self.assertIs(RunStatus.BLOCKED, current.status)
+        self.assertEqual("INTERNAL_ERROR", current.error_code)
+        self.assertEqual("NameError", current.error_detail)
+
+    def test_a_restarted_service_resumes_a_lost_comparison_worker(self) -> None:
+        """盘上 RUNNING、本进程却没有 worker 时，下一次轮询要补起它。"""
+
+        run = self.application.create_trip(self.intent)
+        self.application.confirm_trip(run.run_id)
+        self.application.execute_trip(run.run_id)
+        self.assertIs(RunStatus.RUNNING, self.store.get_run(run.run_id).status)
+
+        restarted = _ImmediateBackgroundApplication(
+            store=self.store,
+            evidence_broker=self.application.evidence_broker,
+            railway_collector=noop_collector,
+            map_collector=noop_collector,
+            web_collector=noop_collector,
+            comparison_builder=_succeeding_comparison,
+        )
+        outcome = restarted.execute_trip(run.run_id)
+
+        self.assertTrue(outcome.accepted)
+        self.assertIs(RunStatus.COMPLETED, self.store.get_run(run.run_id).status)
 
 
 def _succeeding_comparison(intent: object, **arguments: object) -> dict[str, object]:

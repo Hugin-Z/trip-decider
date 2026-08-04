@@ -24,6 +24,7 @@ from trip_decider.agent_actions import (
     execute_registered_action,
     get_next_actions,
     restart_action_loop_for_intent,
+    resume_missing_action_loop,
     run_until_blocked,
     start_action_loop,
     record_refetched_evidence,
@@ -43,18 +44,12 @@ from trip_decider.evidence_broker import (
 )
 from trip_decider.guided_discovery import build_guided_comparison
 from trip_decider.evidence_projection import business_view
-from trip_decider.destination_runtime import (
-    collect_map_evidence,
-    collect_railway_evidence,
-)
-from trip_decider.dynamic_discovery import collect_live_destination_profile
 from trip_decider.travel_agent import (
     default_agent_store,
     AgentRun,
     EvidenceItem,
     EvidenceStatus,
     InMemoryAgentStore,
-    NON_BUSINESS_ERRORS,
     Revision,
     RunStatus,
     TaskMode,
@@ -160,10 +155,43 @@ class TripApplicationService:
                 # 此前这里一头扎进 run_until_blocked，撞上
                 # 「action loop was not started」抛给宿主——而宿主什么都没做错，
                 # 它只是在按提示轮询。**这不是错误状态，是「还在比较」**，
-                # 如实回当前进度即可。
+                # 如实回当前进度即可。若本进程没有对应 worker（典型场景是服务
+                # 重启后从盘上恢复到 RUNNING），原线程已经不可能回来；这里原子
+                # 地补起一个。否则这个 run 会永久显示 COMPARING。
+                if run.intent.task_mode is TaskMode.DIRECT_PLAN:
+                    action_state = resume_missing_action_loop(
+                        run_id,
+                        store=self.store,
+                    )
+                    self._spawn_action_loop(run_id, purpose="recovered")
+                    return ApplicationOutcome(
+                        run_id,
+                        accepted=True,
+                        action_loop=action_state,
+                    )
+                if run.intent.task_mode not in {
+                    TaskMode.GUIDED_DISCOVERY,
+                    TaskMode.OPEN_DISCOVERY,
+                }:
+                    raise TripApplicationError(
+                        "running task has no resumable action loop"
+                    )
+                worker_restarted = self._ensure_candidate_comparison_worker(
+                    run_id,
+                    run.intent.task_mode,
+                )
+                if self.store.get_run(run_id).status is not RunStatus.RUNNING:
+                    return ApplicationOutcome(
+                        run_id,
+                        accepted=worker_restarted,
+                    )
+                progress = comparison_progress(run_id, store=self.store)
+                if worker_restarted:
+                    progress["worker_restarted"] = True
                 return ApplicationOutcome(
                     run_id,
-                    action_loop=comparison_progress(run_id, store=self.store),
+                    accepted=worker_restarted,
+                    action_loop=progress,
                 )
             if action_id is not None:
                 action_state = execute_registered_action(
@@ -775,13 +803,7 @@ class TripApplicationService:
                 f"{mode.value} handler received another task mode"
             )
         self.store.start(run_id)
-        with self._cancellations_lock:
-            self._cancellations[run_id] = threading.Event()
-        self._spawn(
-            target=self._candidate_comparison_background,
-            args=(run_id, mode),
-            name=f"trip-decider-{mode.value.lower()}-{run_id}",
-        )
+        self._ensure_candidate_comparison_worker(run_id, mode)
         return ApplicationOutcome(
             run_id,
             accepted=True,
@@ -797,6 +819,29 @@ class TripApplicationService:
                 ],
             },
         )
+
+    def _ensure_candidate_comparison_worker(
+        self,
+        run_id: str,
+        mode: TaskMode,
+    ) -> bool:
+        """确保本进程恰有一个候选比较 worker；返回是否新启动。"""
+
+        with self._cancellations_lock:
+            if run_id in self._cancellations:
+                return False
+            self._cancellations[run_id] = threading.Event()
+        try:
+            self._spawn(
+                target=self._candidate_comparison_background,
+                args=(run_id, mode),
+                name=f"trip-decider-{mode.value.lower()}-{run_id}",
+            )
+        except Exception:
+            with self._cancellations_lock:
+                self._cancellations.pop(run_id, None)
+            raise
+        return True
 
     def _candidate_comparison_background(
         self,
@@ -902,19 +947,32 @@ class TripApplicationService:
                 },
             )
             self.store.complete(run_id, result)
-        except NON_BUSINESS_ERRORS:
-            # 编程错误不穿业务外衣。这个 except 曾把一个 NameError 报成
-            # 「真实证据不足」——同一个叙述覆盖了「采集器没拿到数据」和
-            # 「这段代码有 bug」，两者在可观测层面无法区分，归因因此走了
-            # 一整轮弯路。业务失败保留原叙述，编程错误原样抛出。
-            raise
         except Exception as error:
+            code, detail = run_error_code(
+                error,
+                "GUIDED_COMPARISON_UNAVAILABLE",
+            )
+            if code == "INTERNAL_ERROR":
+                # 后台线程里重抛只会静默结束并把 run 永久留在 RUNNING。
+                # 栈进日志，有限错误码与异常类型进持久化状态。
+                _LOGGER.exception(
+                    "candidate comparison background thread hit a "
+                    "programming error (run_id=%s)",
+                    run_id,
+                )
             current = self.store.get_run(run_id)
             if current.status is RunStatus.RUNNING:
+                result = _failed_comparison_result(current.intent, error)
+                if code == "INTERNAL_ERROR":
+                    result["recovery"] = []
+                    result["blockers"] = [
+                        {"code": code, "reason": detail}
+                    ]
                 self.store.block(
                     run_id,
-                    _failed_comparison_result(current.intent, error),
-                    "GUIDED_COMPARISON_UNAVAILABLE",
+                    result,
+                    code,
+                    error_detail=detail,
                 )
         finally:
             with self._cancellations_lock:

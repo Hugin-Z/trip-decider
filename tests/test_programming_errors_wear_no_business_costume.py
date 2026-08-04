@@ -24,10 +24,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest.mock import patch
 
 from trip_decider.agent_actions import (
+    action_loop_started,
     execute_registered_action,
     start_action_loop,
 )
@@ -41,6 +43,7 @@ from trip_decider.travel_agent import (
 
 from tests.invariant_support import (
     NoBackgroundApplication as _NoBackgroundService,
+    noop_collector,
     offline_intent,
 )
 
@@ -141,6 +144,49 @@ class ProgrammingErrorsCase(unittest.TestCase):
             "业务失败的叙述被改了，正向对照失效",
         )
 
+    def test_the_same_action_cannot_be_claimed_by_two_threads(self) -> None:
+        """第二个调用应收到稳定的状态错误，而不是争抢同一个临时文件。"""
+
+        run_id = _started_run(self.store)
+        collector_entered = threading.Event()
+        release_collector = threading.Event()
+        self.addCleanup(release_collector.set)
+        first_errors: list[BaseException] = []
+
+        def gated_collector(intent):
+            collector_entered.set()
+            release_collector.wait(timeout=5.0)
+            return noop_collector(intent)
+
+        def execute_first() -> None:
+            try:
+                execute_registered_action(run_id, "railway", store=self.store)
+            except BaseException as error:  # 测试线程必须把异常交回主线程
+                first_errors.append(error)
+
+        with patch(
+            "trip_decider.agent_actions.collect_railway_evidence",
+            gated_collector,
+        ):
+            thread = threading.Thread(target=execute_first, daemon=True)
+            thread.start()
+            self.assertTrue(collector_entered.wait(timeout=5.0))
+            with self.assertRaisesRegex(TravelAgentError, "not waiting"):
+                execute_registered_action(run_id, "railway", store=self.store)
+            release_collector.set()
+            thread.join(timeout=5.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual([], first_errors)
+        run = self.store.get_run(run_id)
+        started = [
+            event
+            for event in self.store.events_after(run.session_id, 0)
+            if event.event_type == "tool.started"
+            and event.details.get("tool") == "railway"
+        ]
+        self.assertEqual(1, len(started))
+
 
 class BackgroundThreadNarrativeCase(unittest.TestCase):
     """后台线程那个落点——本文件此前**只测了同步落点**。
@@ -209,6 +255,20 @@ class BackgroundThreadNarrativeCase(unittest.TestCase):
         run = self.store.get_run(self._run_id)
         self.assertEqual("ACTION_LOOP_FAILED", run.error_code)
         self.assertEqual("TravelAgentError", run.error_detail)
+
+    def test_direct_plan_recovers_if_start_crashed_before_loop_persisted(self) -> None:
+        intent = offline_intent()
+        intent["task_mode"] = "DIRECT_PLAN"
+        created = self.service.create_trip(intent)
+        self.service.confirm_trip(created.run_id)
+        # 模拟 start_action_loop 在 store.start 后、首次落盘前进程退出。
+        self.store.start(created.run_id)
+
+        outcome = self.service.execute_trip(created.run_id)
+
+        self.assertTrue(outcome.accepted)
+        self.assertTrue(action_loop_started(created.run_id, store=self.store))
+        self.assertEqual("ACTIONS_AVAILABLE", outcome.action_loop["status"])
 
 
 if __name__ == "__main__":

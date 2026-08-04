@@ -1,4 +1,4 @@
-"""动作循环全链路真实数据冒烟：GUIDED_DISCOVERY → 候选 → 选择 → PlanVersion → 重排。
+"""动作循环全链路真实数据冒烟：OPEN_DISCOVERY → 候选 → 选择 → PlanVersion → 重排。
 
 与 `smoke_live.py` 的分工：那个直调采集器，验的是「采集器与编译器能吃真实数据」；
 **本脚本走动作循环本体**，验的是「产品的那条链路真的能跑通」。上一轮的冒烟绕过了
@@ -67,7 +67,7 @@ def _intent() -> dict:
     start = datetime.now(timezone.utc) + timedelta(days=11)
     end = start + timedelta(days=2)
     return {
-        "task_mode": "GUIDED_DISCOVERY",
+        "task_mode": "OPEN_DISCOVERY",
         "origin": "武汉",
         "destination_expression": "想找个山里安静的地方待两天",
         "earliest_departure_at": start.strftime("%Y-%m-%dT08:00"),
@@ -124,7 +124,7 @@ def main() -> int:
     status = store.get_run(run_id).status
     ok(f"run_id={run_id} status={status.value}")
 
-    step("2", "执行引导式发现（真实采集）", "产出候选，stage=guided_discovery")
+    step("2", "执行开放式发现（真实采集）", "产出候选，stage=open_discovery")
     try:
         application.execute_trip(run_id)
     except Exception as error:  # noqa: BLE001
@@ -151,7 +151,11 @@ def main() -> int:
     try:
         payload = query.candidates(run_id)
         options = payload.get("candidates") or []
-        ok(f"候选 {len(options)} 个，stage={payload.get('stage')}")
+        stage = payload.get("stage")
+        if stage == "open_discovery":
+            ok(f"候选 {len(options)} 个，stage={stage}")
+        else:
+            bad(f"任务声明 OPEN_DISCOVERY，实际 stage={stage}")
         for option in options[:3]:
             print(
                 f"      - {option.get('destination_id')} "
@@ -222,7 +226,7 @@ def main() -> int:
         try:
             application.revise_trip(
                 run_id,
-                {"note": "第二天别排那么满"},
+                revision={"note": "第二天别排那么满"},
             )
             after = query.plan_readiness(run_id).get("plan_version")
             if after != before:

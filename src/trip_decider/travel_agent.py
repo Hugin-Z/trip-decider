@@ -1403,7 +1403,11 @@ class InMemoryAgentStore:
                 run,
                 event_type="run.blocked",
                 status="failed",
-                message="真实证据不足，当前运行已停止。",
+                message=(
+                    "服务内部错误，当前运行已停止。"
+                    if reason_code == "INTERNAL_ERROR"
+                    else "真实证据不足，当前运行已停止。"
+                ),
                 details={
                     "reason_code": reason_code,
                     "error_detail": error_detail,

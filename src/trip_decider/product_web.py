@@ -51,6 +51,7 @@ from trip_decider.travel_agent import (
     TravelAgentError,
     runtime_status,
 )
+from trip_decider.runtime_owner import RuntimeOwner
 
 
 _WEB_ROOT = Path(__file__).with_name("web")
@@ -971,15 +972,24 @@ def main() -> int:
     arguments = _parser().parse_args()
     # 真实进程才重采：读时同步重采会打 12306 与高德（freshness-policy.md §5.1）。
     enable_live_refetch(True)
-    server = make_server(arguments.host, arguments.port)
-    host, port = server.server_address
-    print(f"trip-decider local product: http://{host}:{port}/")
+    store = _active_store()
+    runtime_root = store.runtime_root
+    if runtime_root is None:
+        raise RuntimeError("Web runtime root is not configured")
+    owner = RuntimeOwner(runtime_root)
+    owner.acquire()
+    server = None
     try:
+        server = make_server(arguments.host, arguments.port)
+        host, port = server.server_address
+        print(f"trip-decider local product: http://{host}:{port}/")
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        if server is not None:
+            server.server_close()
+        owner.release()
     return 0
 
 

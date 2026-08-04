@@ -154,8 +154,11 @@ class _LoopState:
 
 
 _LOCK = RLock()
+#: 并发：`_LOCK` 锁保护，锁对象表的全部读写都在锁内。
+_RUN_LOCKS: dict[str, RLock] = {}
 
-#: 并发：`_LOCK` 保护，全部读写都在锁内。
+#: 并发：`_LOCK` 只保护两个模块级字典本身；每个 `_LoopState` 的字段以及对应
+#: 的两个落盘文件由 `_run_lock(run_id)` 保护。
 #:
 #: 这是一份**跨调用共享的可变状态**——动作循环的内存缓存，键是 run_id。写它的
 #: 有两类线程：工具调用线程（同步推进）与后台动作循环线程。两者都必须先取
@@ -164,7 +167,15 @@ _LOCK = RLock()
 #:
 #: 落盘那一份（`action-loop.json`）与本表的关系见 persistence-v2.md §13.1：
 #: 权威在 `run.json`，本表是它的内存视图，缺失时可重建。
+#: 并发：`_run_lock(run_id)` 锁保护每个值的字段读写，`_LOCK` 保护表本身。
 _STATES: dict[str, _LoopState] = {}
+
+
+def _run_lock(run_id: str) -> RLock:
+    """同一 run 串行提交状态；不同 run 互不阻塞，也不把网络 I/O 锁进去。"""
+
+    with _LOCK:
+        return _RUN_LOCKS.setdefault(run_id, RLock())
 
 # 读取时刻的注入点。产品默认是墙钟——判定"这份证据现在还新鲜吗"本来就该问
 # 现在几点。表征需要它固定，否则同一份夹具隔天读会得到不同的 freshness，
@@ -198,11 +209,11 @@ def start_action_loop(
     """Move a confirmed run into its action-driven execution state."""
     store = store if store is not None else default_agent_store()
 
-    run = store.get_run(run_id)
-    if run.status is not RunStatus.CONFIRMED:
-        raise TravelAgentError("run must be confirmed before action execution")
-    store.start(run_id)
-    with _LOCK:
+    with _run_lock(run_id):
+        run = store.get_run(run_id)
+        if run.status is not RunStatus.CONFIRMED:
+            raise TravelAgentError("run must be confirmed before action execution")
+        store.start(run_id)
         state = _LoopState(
             fallback_result=(
                 recovery_safe(deepcopy(dict(run.result)))
@@ -235,7 +246,8 @@ def start_action_loop(
             else:
                 state.action_status[domain] = "waiting"
                 unavailable.append(domain)
-        _STATES[run_id] = state
+        with _LOCK:
+            _STATES[run_id] = state
         _persist_loop_state(run_id, state, store)
     store.append_event(
         run_id,
@@ -277,36 +289,74 @@ def restart_action_loop_for_intent(
     """Start a same-run revision while reusing still-applicable evidence."""
     store = store if store is not None else default_agent_store()
 
-    previous = store.get_run(run_id)
-    contract = (
-        intent
-        if isinstance(intent, TravelIntent)
-        else TravelIntent.from_mapping(intent)
-    )
-    state = _state(run_id, store)
-    reusable = dict(state.evidence)
-    previous_intent = previous.intent
-    if contract.destination_anchor != previous_intent.destination_anchor:
-        reusable.clear()
-    else:
-        rail_inputs = (
-            "origin",
-            "earliest_departure_at",
-            "latest_return_at",
-            "transport_preferences",
+    with _run_lock(run_id):
+        previous = store.get_run(run_id)
+        contract = (
+            intent
+            if isinstance(intent, TravelIntent)
+            else TravelIntent.from_mapping(intent)
         )
-        if any(
-            getattr(contract, field_name)
-            != getattr(previous_intent, field_name)
-            for field_name in rail_inputs
-        ):
-            reusable.pop("railway", None)
-    store.prepare_revision(run_id, intent=contract)
-    return start_action_loop(
-        run_id,
-        initial_evidence=reusable,
-        store=store,
-    )
+        state = _state(run_id, store)
+        reusable = dict(state.evidence)
+        previous_intent = previous.intent
+        if contract.destination_anchor != previous_intent.destination_anchor:
+            reusable.clear()
+        else:
+            rail_inputs = (
+                "origin",
+                "earliest_departure_at",
+                "latest_return_at",
+                "transport_preferences",
+            )
+            if any(
+                getattr(contract, field_name)
+                != getattr(previous_intent, field_name)
+                for field_name in rail_inputs
+            ):
+                reusable.pop("railway", None)
+        store.prepare_revision(run_id, intent=contract)
+        return start_action_loop(
+            run_id,
+            initial_evidence=reusable,
+            store=store,
+        )
+
+
+def resume_missing_action_loop(
+    run_id: str,
+    *,
+    store: InMemoryAgentStore | None = None,
+) -> dict[str, object]:
+    """恢复 ``store.start`` 后、动作循环首次落盘前崩溃的 DIRECT_PLAN。"""
+
+    store = store if store is not None else default_agent_store()
+    with _run_lock(run_id):
+        run = store.get_run(run_id)
+        if run.status is not RunStatus.RUNNING:
+            raise TravelAgentError("run is not executing actions")
+        loaded = _load_loop_state(run_id, store)
+        if loaded is not None:
+            with _LOCK:
+                _STATES[run_id] = loaded
+            return get_next_actions(run_id, store=store)
+        state = _LoopState(
+            fallback_result=(
+                recovery_safe(deepcopy(dict(run.result)))
+                if isinstance(run.result, Mapping)
+                else None
+            )
+        )
+        with _LOCK:
+            _STATES[run_id] = state
+        _persist_loop_state(run_id, state, store)
+        store.append_event(
+            run_id,
+            event_type="planning.actions.recovered",
+            status="running",
+            message="服务重启后已恢复未落盘的动作循环。",
+            details={"tool": "destination_context"},
+        )
+        return get_next_actions(run_id, store=store)
 
 
 def run_until_blocked(
@@ -477,6 +527,15 @@ def get_next_actions(
 ) -> dict[str, object]:
     """Return the next honest state and executable actions for Codex."""
     store = store if store is not None else default_agent_store()
+    with _run_lock(run_id):
+        return _get_next_actions_unlocked(run_id, store=store)
+
+
+def _get_next_actions_unlocked(
+    run_id: str,
+    *,
+    store: InMemoryAgentStore,
+) -> dict[str, object]:
 
     run = store.get_run(run_id)
     if run.status is RunStatus.AWAITING_CONFIRMATION:
@@ -621,38 +680,46 @@ def execute_registered_action(
     )
     store = store if store is not None else default_agent_store()
 
-    run = store.get_run(run_id)
-    if (
-        run.status is RunStatus.COMPLETED
-        and action_id in {"railway", "map", "planner"}
-    ):
-        run = store.resume(run_id)
-    if run.status is not RunStatus.RUNNING:
-        raise TravelAgentError("run is not executing actions")
-    state = _state(run_id, store)
-    if action_id not in _TOOL_REGISTRY:
-        raise TravelAgentError("action is not a registered runtime tool")
-    is_refresh = state.action_status[action_id] in {"completed", "failed"}
-    if state.action_status[action_id] != "waiting" and not is_refresh:
-        raise TravelAgentError("action is not waiting")
-    if not is_refresh:
-        available = {
-            action["action_id"] for action in get_next_actions(
-                run_id,
-                store=store,
-            )["actions"]
+    run_lock = _run_lock(run_id)
+    with run_lock:
+        run = store.get_run(run_id)
+        if (
+            run.status is RunStatus.COMPLETED
+            and action_id in {"railway", "map", "planner"}
+        ):
+            run = store.resume(run_id)
+        if run.status is not RunStatus.RUNNING:
+            raise TravelAgentError("run is not executing actions")
+        live_state = _state(run_id, store)
+        if action_id not in _TOOL_REGISTRY:
+            raise TravelAgentError("action is not a registered runtime tool")
+        is_refresh = live_state.action_status[action_id] in {
+            "completed",
+            "failed",
         }
-        if action_id not in available:
-            raise TravelAgentError("action prerequisites are not satisfied")
-    state.action_status[action_id] = "running"
-    _persist_loop_state(run_id, state, store)
-    store.append_event(
-        run_id,
-        event_type="tool.started",
-        status="started",
-        message=f"{_TOOL_REGISTRY[action_id]['title']}开始执行。",
-        details={"tool": action_id},
-    )
+        if live_state.action_status[action_id] != "waiting" and not is_refresh:
+            raise TravelAgentError("action is not waiting")
+        if not is_refresh:
+            available = {
+                action["action_id"] for action in get_next_actions(
+                    run_id,
+                    store=store,
+                )["actions"]
+            }
+            if action_id not in available:
+                raise TravelAgentError("action prerequisites are not satisfied")
+        live_state.action_status[action_id] = "running"
+        _persist_loop_state(run_id, live_state, store)
+        store.append_event(
+            run_id,
+            event_type="tool.started",
+            status="started",
+            message=f"{_TOOL_REGISTRY[action_id]['title']}开始执行。",
+            details={"tool": action_id},
+        )
+        # handler 可能做网络 I/O，绝不带锁。给它不可共享的快照，避免另一域
+        # 同时提交结果时改动 handler 正在读取的 dict。
+        state = deepcopy(live_state)
     action_started = time.monotonic()
     try:
         outcome = _TOOL_REGISTRY[action_id]["handler"](
@@ -664,75 +731,82 @@ def execute_registered_action(
         # 「{域}_ACTION_FAILED」+「该域缺证据」，那句叙述与事故原因毫无
         # 关系，只会把归因引向采集器和数据源。这里是同步调用，重抛能让它
         # 原样浮到调用方，栈也留得住。
-        state.action_status[action_id] = "blocked"
-        _persist_loop_state(run_id, state, store)
+        with run_lock:
+            live_state = _state(run_id, store)
+            live_state.action_status[action_id] = "blocked"
+            _persist_loop_state(run_id, live_state, store)
         raise
     except Exception as error:
-        state.action_status[action_id] = "blocked"
-        _persist_loop_state(run_id, state, store)
-        store.append_event(
-            run_id,
-            event_type="tool.failed",
-            status="failed",
-            message=f"{_TOOL_REGISTRY[action_id]['title']}执行失败。",
-            details={
-                "tool": action_id,
-                "error_type": type(error).__name__,
-                "duration_ms": round(
-                    (time.monotonic() - action_started) * 1000,
-                    3,
-                ),
-            },
-        )
-        _block_run(run_id, action_id, store=store)
-        return get_next_actions(run_id, store=store)
+        with run_lock:
+            live_state = _state(run_id, store)
+            live_state.action_status[action_id] = "blocked"
+            _persist_loop_state(run_id, live_state, store)
+            store.append_event(
+                run_id,
+                event_type="tool.failed",
+                status="failed",
+                message=f"{_TOOL_REGISTRY[action_id]['title']}执行失败。",
+                details={
+                    "tool": action_id,
+                    "error_type": type(error).__name__,
+                    "duration_ms": round(
+                        (time.monotonic() - action_started) * 1000,
+                        3,
+                    ),
+                },
+            )
+            _block_run(run_id, action_id, store=store)
+            return get_next_actions(run_id, store=store)
 
     if action_id == "planner":
         if not isinstance(outcome, Mapping):
             raise TravelAgentError("planner action returned a non-object")
-        result = deepcopy(dict(outcome))
-        state.result = result
-        state.action_status[action_id] = "completed"
-        # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
-        # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
-        # run.json 里却还没有 result，重启后状态自相矛盾。
-        store.record_result(run_id, result)
-        _persist_loop_state(run_id, state, store)
-        planner_evidence = _loop_evidence(state, run.intent)
-        if _result_is_displayable(result, planner_evidence):
-            store.persist_plan_version(run_id, result)
-        store.append_event(
-            run_id,
-            event_type="tool.completed",
-            status="completed",
-            message=(
-                "计划版本已通过证据门并安装。"
-                if _result_is_displayable(result, planner_evidence)
-                else "规划草稿已生成，仍在补充最低真实证据。"
-            ),
-            details={
-                "tool": "planner",
-                "duration_ms": round(
-                    (time.monotonic() - action_started) * 1000,
-                    3,
-                ),
-            },
-        )
-        if _result_is_displayable(result, planner_evidence):
-            store.complete(run_id, result)
-        else:
+        with run_lock:
+            live_state = _state(run_id, store)
+            result = deepcopy(dict(outcome))
+            live_state.result = result
+            live_state.action_status[action_id] = "completed"
+            # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
+            # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
+            # run.json 里却还没有 result，重启后状态自相矛盾。
+            store.record_result(run_id, result)
+            _persist_loop_state(run_id, live_state, store)
+            planner_evidence = _loop_evidence(live_state, run.intent)
+            displayable = _result_is_displayable(result, planner_evidence)
+            if displayable:
+                store.persist_plan_version(run_id, result)
             store.append_event(
                 run_id,
-                event_type="plan.supplementing",
-                status="waiting",
-                message="尚未满足可展示行程最低条件，继续补充真实数据。",
+                event_type="tool.completed",
+                status="completed",
+                message=(
+                    "计划版本已通过证据门并安装。"
+                    if displayable
+                    else "规划草稿已生成，仍在补充最低真实证据。"
+                ),
                 details={
-                    "missing_requirements": (
-                        _missing_display_requirements(result)
+                    "tool": "planner",
+                    "duration_ms": round(
+                        (time.monotonic() - action_started) * 1000,
+                        3,
                     ),
                 },
             )
-        return get_next_actions(run_id, store=store)
+            if displayable:
+                store.complete(run_id, result)
+            else:
+                store.append_event(
+                    run_id,
+                    event_type="plan.supplementing",
+                    status="waiting",
+                    message="尚未满足可展示行程最低条件，继续补充真实数据。",
+                    details={
+                        "missing_requirements": (
+                            _missing_display_requirements(result)
+                        ),
+                    },
+                )
+            return get_next_actions(run_id, store=store)
 
     if not isinstance(outcome, EvidenceItem):
         raise TravelAgentError("evidence action returned an invalid value")
@@ -802,6 +876,16 @@ def submit_evidence(
 ) -> dict[str, object]:
     """Validate and attach one action-owned evidence item."""
     store = store if store is not None else default_agent_store()
+    with _run_lock(run_id):
+        return _submit_evidence_unlocked(run_id, evidence, store=store)
+
+
+def _submit_evidence_unlocked(
+    run_id: str,
+    evidence: EvidenceItem | Mapping[str, object],
+    *,
+    store: InMemoryAgentStore,
+) -> dict[str, object]:
 
     run = store.get_run(run_id)
     if run.status is not RunStatus.RUNNING:
@@ -2364,39 +2448,40 @@ def _block_run(
     store: InMemoryAgentStore,
     stalled: bool = False,
 ) -> None:
-    state = _state(run_id, store)
-    item = state.evidence.get(domain)
-    retained = (
-        deepcopy(state.fallback_result)
-        if isinstance(state.fallback_result, Mapping)
-        else None
-    )
-    blocked_result = retained or {
-        "action_loop_status": "BLOCKED",
-        "blocked_domains": [domain],
-        "context": {
-            "missing_domains": (
-                [domain]
-                if item is None or item.status is EvidenceStatus.MISSING
-                else []
+    with _run_lock(run_id):
+        state = _state(run_id, store)
+        item = state.evidence.get(domain)
+        retained = (
+            deepcopy(state.fallback_result)
+            if isinstance(state.fallback_result, Mapping)
+            else None
+        )
+        blocked_result = retained or {
+            "action_loop_status": "BLOCKED",
+            "blocked_domains": [domain],
+            "context": {
+                "missing_domains": (
+                    [domain]
+                    if item is None or item.status is EvidenceStatus.MISSING
+                    else []
+                ),
+                "conflicting_domains": (
+                    [domain]
+                    if item is not None
+                    and item.status is EvidenceStatus.CONFLICTING
+                    else []
+                ),
+            },
+        }
+        store.block(
+            run_id,
+            blocked_result,
+            (
+                f"{domain.upper()}_ACTION_STALLED"
+                if stalled
+                else f"{domain.upper()}_ACTION_FAILED"
             ),
-            "conflicting_domains": (
-                [domain]
-                if item is not None
-                and item.status is EvidenceStatus.CONFLICTING
-                else []
-            ),
-        },
-    }
-    store.block(
-        run_id,
-        blocked_result,
-        (
-            f"{domain.upper()}_ACTION_STALLED"
-            if stalled
-            else f"{domain.upper()}_ACTION_FAILED"
-        ),
-    )
+        )
 
 
 def _timeout_actions(
@@ -2407,27 +2492,28 @@ def _timeout_actions(
 ) -> None:
     """Close actions that made no observable progress for 30 seconds."""
 
-    state = _state(run_id, store)
-    for action_id in action_ids:
-        if action_id in state.action_status:
-            state.action_status[action_id] = "blocked"
-        store.append_event(
+    with _run_lock(run_id):
+        state = _state(run_id, store)
+        for action_id in action_ids:
+            if action_id in state.action_status:
+                state.action_status[action_id] = "blocked"
+            store.append_event(
+                run_id,
+                event_type="tool.timeout",
+                status="failed",
+                message=f"{_action_title(action_id)}超过30秒没有新进展。",
+                details={
+                    "tool": action_id,
+                    "timeout_seconds": 30,
+                },
+            )
+        _persist_loop_state(run_id, state, store)
+        _block_run(
             run_id,
-            event_type="tool.timeout",
-            status="failed",
-            message=f"{_action_title(action_id)}超过30秒没有新进展。",
-            details={
-                "tool": action_id,
-                "timeout_seconds": 30,
-            },
+            action_ids[0],
+            store=store,
+            stalled=True,
         )
-    _persist_loop_state(run_id, state, store)
-    _block_run(
-        run_id,
-        action_ids[0],
-        store=store,
-        stalled=True,
-    )
 
 
 def _blocked_recovery(
@@ -2543,23 +2629,29 @@ def record_refetched_evidence(
     store = store if store is not None else default_agent_store()
     if not items:
         return ()
-    state = _load_loop_state(run_id, store)
-    if state is None:
-        return ()
-    written: list[str] = []
-    for domain, item in items:
-        if domain not in state.evidence:
-            continue
-        try:
-            state.evidence[domain] = EvidenceItem.from_mapping(dict(item))
-        except TravelAgentError:
-            # 重采回来的形状不合契约时不写回，也不让读取崩——本次读取照常
-            # 用内存里的那份，下次读取会重试。
-            continue
-        written.append(domain)
-    if written:
-        _persist_loop_state(run_id, state, store)
-    return tuple(written)
+    with _run_lock(run_id):
+        with _LOCK:
+            state = _STATES.get(run_id)
+        if state is None:
+            state = _load_loop_state(run_id, store)
+        if state is None:
+            return ()
+        written: list[str] = []
+        for domain, item in items:
+            if domain not in state.evidence:
+                continue
+            try:
+                state.evidence[domain] = EvidenceItem.from_mapping(dict(item))
+            except TravelAgentError:
+                # 重采回来的形状不合契约时不写回，也不让读取崩——本次读取照常
+                # 用内存里的那份，下次读取会重试。
+                continue
+            written.append(domain)
+        if written:
+            with _LOCK:
+                _STATES[run_id] = state
+            _persist_loop_state(run_id, state, store)
+        return tuple(written)
 
 
 def _persist_loop_state(
@@ -2567,17 +2659,18 @@ def _persist_loop_state(
     state: _LoopState,
     store: InMemoryAgentStore,
 ) -> None:
-    run_directory = store.run_directory(run_id)
-    if run_directory is None:
-        return
-    _atomic_runtime_json(
-        run_directory / "action-loop.json",
-        state.to_dict(),
-    )
-    _atomic_runtime_json(
-        run_directory / "evidence" / "current.json",
-        state.evidence_dict(run_id),
-    )
+    with _run_lock(run_id):
+        run_directory = store.run_directory(run_id)
+        if run_directory is None:
+            return
+        _atomic_runtime_json(
+            run_directory / "action-loop.json",
+            state.to_dict(),
+        )
+        _atomic_runtime_json(
+            run_directory / "evidence" / "current.json",
+            state.evidence_dict(run_id),
+        )
 
 
 def action_loop_started(
@@ -2594,9 +2687,10 @@ def action_loop_started(
     """
 
     store = store if store is not None else default_agent_store()
-    with _LOCK:
-        if _STATES.get(run_id) is not None:
-            return True
+    with _run_lock(run_id):
+        with _LOCK:
+            if _STATES.get(run_id) is not None:
+                return True
         return _load_loop_state(run_id, store) is not None
 
 
@@ -2769,6 +2863,7 @@ __all__ = [
     "action_loop_started",
     "get_next_actions",
     "restart_action_loop_for_intent",
+    "resume_missing_action_loop",
     "run_until_blocked",
     "start_action_loop",
     "record_refetched_evidence",

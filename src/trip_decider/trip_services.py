@@ -98,7 +98,7 @@ def build_trip_services(
 
 
 __all__ = [
-    "default_trip_services()",
+    "default_trip_services",
     "TripServices",
     "build_trip_services",
 ]
