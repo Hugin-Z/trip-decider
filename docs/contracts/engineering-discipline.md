@@ -322,6 +322,13 @@ commit message 能回答。
 | 6 | 核实模式逐条核验与三档结论 | `tests/test_itinerary_verification.py` | 夹具用宿主那份 web search 行程的断言形状 |
 | 7 | 比较阶段轮询（异步化引入的中间态） | `tests/test_host_call_protocol_relief.py::NoUninitialisedMiddleStateCase` | 无需网络 |
 | 8 | 手工提交班车证据（线路措辞） | `tests/test_invariant_i12_all_domains.py` | 夹具 `HOST_SHUTTLE_SUBMISSION`，取自宿主第三次实测的真实提交形状 |
+| 9 | 提交景点/住宿证据（web 域自然写法） | `tests/test_invariant_i12_all_domains.py::WebSubmissionSaysEverythingAtOnceCase` | 夹具 `HOST_WEB_SUBMISSIONS`，取自宿主第四次实测的真实提交形状 |
+| 10 | 核验分批：收活即回执、轮询取增量 | `tests/test_verify_itinerary_batching.py` | 夹具 `HOST_ITINERARY_ASSERTIONS`，真实车次未脱敏 |
+
+**第 9 条是被「矩阵全绿但宿主还在摔」逼出来的。** 第三次实测后写的 I12 矩阵用
+`controlled_web()` 当夹具，而那个夹具本来就带着门要的字段——矩阵测的于是是
+「我们自己写得对不对」，不是「宿主填得进来吗」。夹具形状与宿主真实提交形状有
+偏差时，绿色是假的。**新增域的矩阵一律用实测形状起头，不用自造夹具。**
 
 第 3、4 条来自实测的**另一半**：不是「调用崩了」，是「宿主没选用 / 选用了也
 要试十几次」。第 4 条守的东西不在代码行为里而在**描述文本**里——它照样能机械

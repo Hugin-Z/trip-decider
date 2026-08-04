@@ -24,6 +24,7 @@ import threading
 import time
 from typing import Any
 import unittest
+from unittest import mock
 
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.mcp_adapter import (
@@ -110,16 +111,82 @@ class BoundedMCPCallCase(unittest.TestCase):
         )
         return elapsed
 
+    def test_every_registered_tool_has_a_budget_probe(self) -> None:
+        """**扫描式**：新注册的工具自动进入 I13 的范围。
+
+        第四次实测（2026-08-04）`verify_itinerary` 首次被真宿主调用即 4 分钟
+        无响应——而 I13 当时是绿的。归因是**清单式守卫**：下面那份 calls 列表
+        是按写它那天的工具册手抄的，`verify_itinerary` 在同一轮新增却没进去。
+
+        与 next_call 守卫上一轮踩的是同一个坑：按清单核对的守卫，总会漏掉清单
+        之后新增的东西。这里不再手抄——从真实注册的工具册取名单，缺探针就红。
+        新增工具时你可以选择怎么探它，但**不能选择不探**（D20）。
+        """
+
+        import asyncio
+
+        from trip_decider.mcp_server import build_mcp_server
+
+        server = build_mcp_server(self.adapter)
+        registered = {tool.name for tool in asyncio.run(server.list_tools())}
+        probed = {label.split("(")[0] for label, _ in self._budget_probes()}
+
+        self.assertEqual(
+            set(),
+            registered - probed,
+            f"以下工具已注册但没有 I13 探针：{sorted(registered - probed)}。"
+            "在 _budget_probes 里补一条——这正是 verify_itinerary 漏掉的方式",
+        )
+        self.assertEqual(
+            set(),
+            probed - registered,
+            f"以下探针指向已不存在的工具：{sorted(probed - registered)}",
+        )
+
+    def _budget_probes(self) -> list[tuple[str, Any]]:
+        """工具名 → 一次会真的走到底的调用。
+
+        探针本身是数据，但**缺哪个会被上面的扫描抓到**——这就是它与旧清单的
+        全部区别。
+        """
+
+        run_id = getattr(self, "_probe_run_id", None)
+        if run_id is None:
+            run_id = str(
+                self.adapter.create_trip_task(dict(_INTENT))["run"]["run_id"]
+            )
+            self.adapter.confirm_trip_intent(run_id)
+            self._probe_run_id = run_id
+        # 只停自己起的这一个。`mock.patch.stopall` 会把别处起的补丁一并停掉，
+        # 那是跨用例的隐蔽干扰。
+        patch = mock.patch(
+            "trip_decider.mcp_adapter.verify_checkable_incrementally",
+            lambda checkable, **kwargs: None,
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        return [
+            *self._core_probes(run_id),
+            # 实采注入成不动的假货：本用例量的是**工具调用本身**多久返回，
+            # 不该顺带去打 12306（那会让用例依赖网络，还会漏线程给后续用例）。
+            ("verify_itinerary", lambda: self.adapter.verify_itinerary(
+                [{"train_code": "G1", "origin_station": "甲站",
+                  "destination_station": "乙站",
+                  "departure_at": "2026-08-11T08:00"}])),
+            ("read_verification", lambda: self.adapter.read_verification(
+                "verify-does-not-exist")),
+        ]
+
     def test_every_tool_returns_within_budget_under_a_slow_collector(
         self,
     ) -> None:
         """采集器慢到 25 秒，每个工具仍必须在上界内返回。"""
 
-        run_id = str(
-            self.adapter.create_trip_task(dict(_INTENT))["run"]["run_id"]
-        )
-        self.adapter.confirm_trip_intent(run_id)
+        for label, operation in self._budget_probes():
+            with self.subTest(tool=label):
+                self._elapsed(label, operation)
 
+    def _core_probes(self, run_id: str) -> list[tuple[str, Any]]:
         calls = [
             ("create_trip_task", lambda: self.adapter.create_trip_task(
                 dict(_INTENT))),
@@ -143,9 +210,7 @@ class BoundedMCPCallCase(unittest.TestCase):
             ("audit_trip_plan", lambda: self.adapter.audit_trip_plan(
                 content="测试攻略")),
         ]
-        for label, operation in calls:
-            with self.subTest(tool=label):
-                self._elapsed(label, operation)
+        return calls
 
 
 class TerminatesWithoutABackgroundThreadCase(unittest.TestCase):

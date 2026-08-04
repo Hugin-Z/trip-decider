@@ -1,0 +1,159 @@
+"""进行中的核验任务：立即返回可秒回的部分，实采在后台推进。
+
+**事故**（Claude Desktop 第四次实测，2026-08-04）：`verify_itinerary` 首次被真
+宿主调用即 4 分钟无响应，宿主回退 web search。归因是同步实采——一份行程的车次
+断言逐条查 12306，会话初始化本身就要 8 秒，每条再加 2 秒；任何一次 12306 变慢
+都会被 15 秒超时 × 2 次重试放大成 31 秒一条。
+
+修法与 run 那条链路同构：**工具调用只负责收下活并立刻回执**，实采在后台线程
+推进，宿主轮询取增量。区别是核验不建 run——它无状态、单次、不进规划，所以
+另起一个轻量登记处，而不是硬塞进 run 状态机。
+
+**为什么在内存里而不落盘**：核验是一次会话内的问答，宿主拿到结果就用掉了。
+落盘会引入一整套过期清理与并发写的问题，换来的只是「进程重启后还能查到上次的
+核验」——那个场景不存在（宿主重启后会重新问）。代价说清楚：进程重启则
+`verify_id` 失效，`read_verification` 会明确报「这个 id 不存在」并让宿主重提，
+而不是假装还在跑。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import dataclass, field
+import threading
+import time
+from uuid import uuid4
+
+#: 一份核验最多留多久。超过就可以被新的核验挤掉——防止长跑进程无限积累。
+_RETENTION_SECONDS = 3600.0
+
+#: 同时最多留多少份。到顶时先淘汰最旧的**已完成**的。
+_MAX_ENTRIES = 32
+
+
+@dataclass
+class _Verification:
+    verify_id: str
+    total: int
+    created_at: float
+    #: 形状不合格的那些——不消耗网络，第一次调用就能给出。
+    immediate: list[dict[str, object]] = field(default_factory=list)
+    #: 实采核出来的，后台线程逐条追加。
+    collected: list[dict[str, object]] = field(default_factory=list)
+    status: str = "RUNNING"
+    error: str | None = None
+
+    def snapshot(self) -> dict[str, object]:
+        findings = sorted(
+            (*self.immediate, *self.collected),
+            key=lambda item: int(item.get("index") or 0),
+        )
+        return {
+            "verify_id": self.verify_id,
+            "status": self.status,
+            "total": self.total,
+            "checked": len(findings),
+            "pending": max(0, self.total - len(findings)),
+            "findings": deepcopy(findings),
+            "error": self.error,
+        }
+
+
+class VerificationRegistry:
+    """核验任务的登记处。线程安全，进程内。"""
+
+    def __init__(
+        self,
+        *,
+        spawn: Callable[[Callable[[], None], str], None] | None = None,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._entries: dict[str, _Verification] = {}
+        self._spawn = spawn if spawn is not None else _default_spawn
+
+    def start_background(
+        self,
+        *,
+        total: int,
+        immediate: Sequence[Mapping[str, object]],
+        collect: Callable[[Callable[[Mapping[str, object]], None]], None],
+    ) -> dict[str, object]:
+        """登记一份核验并**立刻**返回回执。
+
+        名字里带 background 是给 I14 的静态扫描看的：它是一条**异步边界**，
+        传进来的 ``collect`` 在后台线程里跑，不在本次工具调用里跑。
+
+        ``collect`` 在后台线程里跑，每核出一条就调一次传给它的 ``report``。
+        逐条上报而不是等全部跑完再交——宿主轮询时能看到进度，也能在部分结果
+        上先做判断。
+        """
+
+        entry = _Verification(
+            verify_id=f"verify-{uuid4()}",
+            total=total,
+            created_at=time.monotonic(),
+            immediate=[dict(item) for item in immediate],
+        )
+        with self._lock:
+            self._evict_locked()
+            self._entries[entry.verify_id] = entry
+
+        def report(finding: Mapping[str, object]) -> None:
+            with self._lock:
+                entry.collected.append(dict(finding))
+
+        def worker() -> None:
+            try:
+                collect(report)
+            except Exception as error:  # noqa: BLE001
+                # 后台线程里重抛只会让线程静默死掉。如实记类型，让轮询看得见。
+                with self._lock:
+                    entry.error = (
+                        f"{type(error).__name__}: {error}"
+                    )
+                    entry.status = "FAILED"
+                return
+            with self._lock:
+                entry.status = "COMPLETE"
+
+        if len(entry.immediate) >= total:
+            # 全部都是形状问题，没有要采的——不必起线程。
+            entry.status = "COMPLETE"
+        else:
+            self._spawn(worker, f"trip-decider-verify-{entry.verify_id}")
+        return self.read(entry.verify_id)
+
+    def read(self, verify_id: str) -> dict[str, object] | None:
+        with self._lock:
+            entry = self._entries.get(verify_id)
+            return entry.snapshot() if entry is not None else None
+
+    def _evict_locked(self) -> None:
+        now = time.monotonic()
+        stale = [
+            key
+            for key, entry in self._entries.items()
+            if now - entry.created_at > _RETENTION_SECONDS
+            and entry.status != "RUNNING"
+        ]
+        for key in stale:
+            del self._entries[key]
+        if len(self._entries) < _MAX_ENTRIES:
+            return
+        finished = sorted(
+            (
+                (entry.created_at, key)
+                for key, entry in self._entries.items()
+                if entry.status != "RUNNING"
+            ),
+        )
+        for _created, key in finished[: len(self._entries) - _MAX_ENTRIES + 1]:
+            del self._entries[key]
+
+
+def _default_spawn(worker: Callable[[], None], name: str) -> None:
+    threading.Thread(target=worker, name=name, daemon=True).start()
+
+
+__all__ = ["VerificationRegistry"]

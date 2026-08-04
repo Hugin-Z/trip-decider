@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -142,6 +142,100 @@ def verify_railway_assertions(
             "v0 只核铁路域（车次存在性、时刻、票价）。住宿、门票、当地交通"
             "未核验——没有核验不等于没有问题。"
         ),
+    }
+
+
+def split_by_shape(
+    assertions: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], list[tuple[int, Mapping[str, object]]]]:
+    """把「一眼就知道不合格的」与「要实采才知道的」分开。
+
+    形状问题**不消耗网络**，所以可以在工具调用的同一次往返里就回给宿主
+    （`verification_registry` 的「首批可秒回」）。它们也不该因为网络失败而变成
+    unknown——「你没告诉我车次号」和「我查不到这趟车」是两回事。
+    """
+
+    immediate: list[dict[str, object]] = []
+    checkable: list[tuple[int, Mapping[str, object]]] = []
+    for index, claim in enumerate(assertions, start=1):
+        problem = _shape_problem(claim)
+        if problem is None:
+            checkable.append((index, claim))
+            continue
+        immediate.append(
+            VerifiedFinding(
+                index=index,
+                verdict="unknown",
+                claim=_claim_view(claim),
+                observed=None,
+                mismatches=(),
+                reason=problem,
+                retrieved_at=None,
+                suggested_action=(
+                    "补齐这条断言的必填字段后重新提交："
+                    + "、".join(RAILWAY_ASSERTION_REQUIRED_FIELDS)
+                ),
+            ).to_dict()
+        )
+    return immediate, checkable
+
+
+def verify_checkable_incrementally(
+    checkable: Sequence[tuple[int, Mapping[str, object]]],
+    *,
+    report: Callable[[Mapping[str, object]], None],
+    client_factory=_RailClient,
+) -> None:
+    """逐条实采并**逐条上报**，供后台线程调用。
+
+    逐条而不是攒齐再交：宿主轮询时能看到进度，也能在部分结果上先做判断。
+    一条查不到不影响其余各条——这一点与同步版一致。
+    """
+
+    for finding in _verify_against_live_rail(
+        list(checkable),
+        client_factory=client_factory,
+    ):
+        report(finding.to_dict())
+
+
+def summarize_dicts(findings: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """按已落成 dict 的结论算总评。
+
+    与 `summarize` 是同一套计数，入参形态不同：分批核验在登记处只留 dict。
+    计数规则不在这里重写一遍——转回 verdict 列表交给同一个实现（D19）。
+    """
+
+    counts = {"sourced": 0, "conflicting": 0, "unknown": 0}
+    flagged: list[int] = []
+    for finding in findings:
+        verdict = str(finding.get("verdict"))
+        if verdict not in counts:
+            continue
+        counts[verdict] += 1
+        if verdict in {"conflicting", "unknown"}:
+            flagged.append(int(finding.get("index") or 0))
+    flagged.sort()
+    total = sum(counts.values())
+    sentence = (
+        f"{total} 条断言："
+        f"{counts['sourced']} 条有据、"
+        f"{counts['conflicting']} 条冲突、"
+        f"{counts['unknown']} 条查无实据"
+    )
+    if flagged:
+        sentence += (
+            "，建议出发前确认第 "
+            + "、".join(str(index) for index in flagged)
+            + " 条"
+        )
+    return {
+        "total": total,
+        "sourced": counts["sourced"],
+        "conflicting": counts["conflicting"],
+        "unknown": counts["unknown"],
+        "needs_confirmation": flagged,
+        "sentence": sentence,
     }
 
 
@@ -495,4 +589,7 @@ __all__ = [
     "VerifiedFinding",
     "summarize",
     "verify_railway_assertions",
+    "split_by_shape",
+    "verify_checkable_incrementally",
+    "summarize_dicts",
 ]

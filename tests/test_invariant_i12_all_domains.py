@@ -404,3 +404,121 @@ class DeclarationMatchesConsumptionCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+#: 宿主第四次实测提交景点/住宿证据的形状（脱敏：地名换占位）。
+#:
+#: **为什么这几条要单列**：第三次实测后写的 I12 矩阵用 `controlled_web()` 当
+#: 夹具，而那个夹具**本来就带着** `destination_official_name` 与
+#: `verified_facts`——于是矩阵全绿，宿主却仍在同一处摔（第四次实测「调试数据
+#: 结构字段匹配问题」两轮试错）。
+#:
+#: 夹具形状与宿主真实提交形状有偏差时，矩阵测的是「我们自己写得对不对」，
+#: 不是「宿主填得进来吗」。用真形状替换是唯一的修法。
+HOST_WEB_SUBMISSIONS = {
+    "只按 accommodation_base_manual 声明的 required_fields 填": {
+        "hotel_area": {"name": "老城片区"},
+    },
+    "宿主自然写法：景点列表": {
+        "attractions": [
+            {"name": "甲景区", "opening_hours": "08:00-17:00", "ticket_cny": 60},
+        ],
+    },
+    "景点 + 住宿，仍无 destination_official_name": {
+        "hotel_area": {"name": "老城片区"},
+        "attractions": [{"name": "甲景区"}],
+    },
+}
+
+
+class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
+    """web 域：一次点名全部缺失项并给形状，不要挤牙膏。
+
+    此前 `_validate_web_value` 一次只报一个键、不给形状，宿主补一个再试一次、
+    再被另一个键拦下——两轮试错就是这么来的。
+    """
+
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        root = Path(self._temporary.name) / "sessions"
+        store = InMemoryAgentStore(root)
+        application = _NoBackground(
+            store=store,
+            evidence_broker=EvidenceBroker(root.parent / "cache"),
+            railway_collector=noop_collector,
+            map_collector=noop_collector,
+            web_collector=noop_collector,
+        )
+        query = TripQueryService(store=store, application_service=application)
+        self.adapter = TripMCPAdapter(application, query)
+        self.run_id = str(
+            self.adapter.create_trip_task(dict(_INTENT))["run"]["run_id"]
+        )
+        self.adapter.confirm_trip_intent(self.run_id)
+        application.execute_trip(self.run_id)
+
+    def _submit(self, value: dict[str, object]) -> None:
+        self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                "action_id": "web",
+                "value": value,
+                "sources": [
+                    {
+                        "provider": "官网",
+                        "retrieved_at": "2026-08-04T09:00:00+08:00",
+                    }
+                ],
+            },
+        )
+
+    def test_every_host_shape_is_told_all_missing_fields_at_once(self) -> None:
+        from trip_decider.agent_actions import WEB_REQUIRED_FIELDS
+
+        for label, value in HOST_WEB_SUBMISSIONS.items():
+            with self.subTest(shape=label):
+                with self.assertRaises(TripMCPError) as caught:
+                    self._submit(dict(value))
+                message = str(caught.exception)
+                for field in WEB_REQUIRED_FIELDS:
+                    self.assertIn(
+                        field,
+                        message,
+                        f"「{label}」被拒时没点名 {field}，宿主得再试一轮",
+                    )
+
+    def test_the_refusal_carries_a_copyable_shape(self) -> None:
+        from trip_decider.agent_actions import WEB_EXAMPLE
+
+        with self.assertRaises(TripMCPError) as caught:
+            self._submit(dict(HOST_WEB_SUBMISSIONS["宿主自然写法：景点列表"]))
+
+        self.assertIn(WEB_EXAMPLE, str(caught.exception))
+
+    def test_the_declared_required_fields_match_what_the_gate_enforces(
+        self,
+    ) -> None:
+        """声明与消费同一张表（D2）。此前 accommodation_base_manual 只声明
+        hotel_area.name，宿主照着填必被拒——那正是这一轮的病根。"""
+
+        from trip_decider.agent_actions import (
+            WEB_ACCOMMODATION_FIELD,
+            WEB_REQUIRED_FIELDS,
+        )
+
+        # 核对常量本身：`accommodation_base_manual` 的 required_fields 由它们
+        # 派生（见 agent_actions 里那处 `*WEB_REQUIRED_FIELDS`），所以常量对了
+        # 声明就对了——不必再把动作快照构造一遍。
+        self.assertIn("destination_official_name", WEB_REQUIRED_FIELDS)
+        self.assertIn("verified_facts", WEB_REQUIRED_FIELDS)
+        self.assertEqual("hotel_area.name", WEB_ACCOMMODATION_FIELD)
+
+    def test_the_example_itself_passes_the_gate(self) -> None:
+        """给宿主看的示例必须真的能过门，否则是在骗它。"""
+
+        import json
+
+        from trip_decider.agent_actions import WEB_EXAMPLE, _validate_web_value
+
+        _validate_web_value(json.loads(WEB_EXAMPLE))

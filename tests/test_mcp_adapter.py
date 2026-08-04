@@ -308,6 +308,7 @@ class TripMCPAdapterTests(unittest.TestCase):
                                 "revise_trip_plan",
                                 "audit_trip_plan",
                                 "verify_itinerary",
+                                "read_verification",
                             ],
                         )
                         render_tools = {

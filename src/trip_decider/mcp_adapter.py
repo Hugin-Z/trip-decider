@@ -15,8 +15,13 @@ from trip_decider.trip_application import (
     TripApplicationError,
     TripApplicationService,
 )
-from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE
-from trip_decider.itinerary_verification import verify_railway_assertions
+from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
+from trip_decider.itinerary_verification import (
+    split_by_shape,
+    summarize_dicts,
+    verify_checkable_incrementally,
+)
+from trip_decider.verification_registry import VerificationRegistry
 from trip_decider.trip_query import TripQueryError, TripQueryService
 from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
 
@@ -100,8 +105,7 @@ _EVIDENCE_HINT_BY_DOMAIN = {
     ),
     "web": (
         'submit_trip_evidence(run_id, evidence={"action_id": "web", '
-        '"value": {"destination_official_name": "<行政区全称>", '
-        '"verified_facts": [{...}]}, '
+        f'"value": {WEB_EXAMPLE}, '
         '"sources": [{"provider": "<出处>", '
         '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
     ),
@@ -263,6 +267,7 @@ class TripMCPAdapter:
             )
         self._application = application
         self._query = query
+        self._verifications = VerificationRegistry()
 
     def create_trip_task(
         self,
@@ -626,22 +631,94 @@ class TripMCPAdapter:
                 "assertions 必须是断言列表",
                 next_call=_VERIFY_HINT,
             )
+        if not assertions:
+            raise TripMCPError(
+                "assertions 不能为空",
+                next_call=_VERIFY_HINT,
+            )
         if len(assertions) > MAX_VERIFIED_ASSERTIONS:
-            # 一次核太多会撞 I13 的上界——每条断言最坏要一次时刻表查询加一次
-            # 票价查询。分批而不是偷偷截断：截断会让宿主以为全核过了。
+            # 分批而不是偷偷截断：截断会让宿主以为全核过了。
             raise TripMCPError(
                 f"一次最多核 {MAX_VERIFIED_ASSERTIONS} 条，本次收到 "
-                f"{len(assertions)} 条。请分批提交——"
-                "分批是为了每次调用都能在宿主超时前返回",
+                f"{len(assertions)} 条。请分批提交",
                 next_call=(
                     f"verify_itinerary(assertions=[前 {MAX_VERIFIED_ASSERTIONS} 条])"
                     "，然后对余下的再调一次"
                 ),
             )
-        try:
-            return verify_railway_assertions(assertions)
-        except ValueError as error:
-            raise TripMCPError(str(error), next_call=_VERIFY_HINT) from None
+        # 收下活，立刻回执。实采在后台——同步核会把这次调用拖到分钟级，
+        # 那正是第四次实测宿主放弃的原因（I14）。
+        immediate, checkable = split_by_shape(assertions)
+        started = self._verifications.start_background(
+            total=len(assertions),
+            immediate=immediate,
+            collect=lambda report: verify_checkable_incrementally(
+                checkable,
+                report=report,
+            ),
+        )
+        return self._verification_view(started)
+
+    def read_verification(self, verify_id: str) -> dict[str, object]:
+        """取一份核验的当前结果（含增量）。"""
+
+        snapshot = self._verifications.read(str(verify_id))
+        if snapshot is None:
+            raise TripMCPError(
+                f"verify_id={verify_id!r} 不存在。"
+                "核验结果只在本进程内保留一小时；服务重启或超时后需要重新提交",
+                next_call=_VERIFY_HINT,
+            )
+        return self._verification_view(snapshot)
+
+    @staticmethod
+    def _verification_view(snapshot: Mapping[str, object]) -> dict[str, object]:
+        findings = snapshot.get("findings")
+        findings = findings if isinstance(findings, list) else []
+        running = str(snapshot.get("status")) == "RUNNING"
+        view = {
+            "artifact_kind": "ItineraryVerification",
+            "domain": "railway",
+            **dict(snapshot),
+            # 总评按**已核出的**算，并明说还剩几条——不把未核的算成有据。
+            "summary": summarize_dicts(findings),
+            "scope_note": (
+                "v0 只核铁路域（车次存在性、时刻、票价）。住宿、门票、当地交通"
+                "未核验——没有核验不等于没有问题。"
+            ),
+        }
+        if running:
+            view["next_call"] = {
+                "reason": "VERIFICATION_IN_PROGRESS",
+                "options": [
+                    {
+                        "kind": "poll",
+                        "entrypoint": "read_verification",
+                        "arguments": {"verify_id": snapshot.get("verify_id")},
+                        "detail": (
+                            f"还有 {snapshot.get('pending')} 条在实查 12306。"
+                            "每条约 2 秒，隔几秒再取一次即可。"
+                            "本响应里已核出的部分是最终结论，不会再变。"
+                        ),
+                    }
+                ],
+            }
+        else:
+            view["next_call"] = {
+                "reason": str(snapshot.get("status")),
+                "options": [
+                    {
+                        "kind": "done",
+                        "entrypoint": "verify_itinerary",
+                        "arguments": {},
+                        "detail": (
+                            "核验完成。还有别的断言要核就再调一次 "
+                            "verify_itinerary。"
+                        ),
+                    }
+                ],
+            }
+        return view
 
     @staticmethod
     def _guard(

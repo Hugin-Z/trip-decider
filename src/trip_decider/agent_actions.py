@@ -2117,7 +2117,13 @@ def _plan_followup_actions(
                     "tool": "web",
                     "title": "手动填写住宿片区或交通枢纽",
                     "submit_action_id": "web",
-                    "required_fields": ["hotel_area.name"],
+                    # 声明与消费同一张表（D2）。此前这里只写 hotel_area.name，
+                    # 宿主照着填必被 _validate_web_value 拦下。
+                    "required_fields": [
+                        *WEB_REQUIRED_FIELDS,
+                        WEB_ACCOMMODATION_FIELD,
+                    ],
+                    "example": WEB_EXAMPLE,
                 },
             )
         )
@@ -2292,21 +2298,53 @@ def _validate_map_value(value: object) -> None:
         )
 
 
+#: web 证据被消费所必需的键。**与派发动作声明的 required_fields 是同一张表**
+#: （D2）——那边由这里派生。此前两边各写各的：`accommodation_base_manual` 声明
+#: 只要 `hotel_area.name`，而这道门要 `destination_official_name` +
+#: `verified_facts`，宿主照着声明填必被拒，且报错不说全套要什么。
+WEB_REQUIRED_FIELDS = ("destination_official_name", "verified_facts")
+
+#: 补住宿片区时**额外**要的。它是 `accommodation_base` 这个需求的专属要件，
+#: 不是每份 web 证据都得有。
+WEB_ACCOMMODATION_FIELD = "hotel_area.name"
+
+WEB_EXAMPLE = (
+    '{"destination_official_name": "<行政区全称>", '
+    '"verified_facts": [{"claim": "<一句可核对的事实>", '
+    '"source_url": "<出处链接>"}], '
+    '"hotel_area": {"name": "<住宿片区名>"}}'
+)
+
+
 def _validate_web_value(value: object) -> None:
+    """web 证据的提交门：**校验通过 = 消费必成功**（I12）。
+
+    一次点名**全部**缺失项并给出示例。此前一次只报一个键、且不给形状，宿主
+    补一个再试一次、再被另一个键拦下——第四次实测「调试数据结构字段匹配问题」
+    两轮试错就是这么来的。
+    """
+
     if not isinstance(value, Mapping):
-        raise TravelAgentError("web evidence value must be an object")
-    official_name = value.get("destination_official_name")
-    facts = value.get("verified_facts")
-    if not isinstance(official_name, str) or not official_name.strip():
         raise TravelAgentError(
-            "web evidence requires destination_official_name"
+            f"web evidence value must be an object。形状：{WEB_EXAMPLE}"
         )
+    absent: list[str] = []
+    official_name = value.get("destination_official_name")
+    if not isinstance(official_name, str) or not official_name.strip():
+        absent.append("destination_official_name（目的地行政区全称）")
+    facts = value.get("verified_facts")
     if (
         not isinstance(facts, list)
         or not facts
         or any(not isinstance(item, Mapping) for item in facts)
     ):
-        raise TravelAgentError("web evidence requires verified_facts")
+        absent.append("verified_facts（非空数组，每项一条可核对的事实）")
+    if absent:
+        raise TravelAgentError(
+            "web 证据缺：" + "、".join(absent)
+            + f"。景点、住宿片区这些都放在 verified_facts 里或与之并列，"
+            f"但上面两项是每份 web 证据都要有的。形状：{WEB_EXAMPLE}"
+        )
 
 
 def _block_run(

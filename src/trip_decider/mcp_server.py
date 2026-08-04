@@ -404,7 +404,11 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             " / 1 unknown，建议出发前确认第 2、4 条」。\n"
             "【范围】v0 只核铁路域。住宿、门票、当地交通未核验——"
             "没核不等于没问题，返回体里明写了这一点。\n"
-            "【一次最多 12 条】超了会要求分批，不会静默截断。"
+            "【一次最多 12 条】超了会要求分批，不会静默截断。\n"
+            "【立刻返回，不要等】本工具**秒回**一个 verify_id 加首批结论"
+            "（形状问题当场就能判）。实查 12306 在后台跑，用 "
+            "read_verification(verify_id) 取增量——返回体的 next_call 会告诉你"
+            "还剩几条。已核出的部分是最终结论，不会再变。"
         ),
         annotations=_READ_ONLY,
         structured_output=True,
@@ -413,6 +417,27 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
         assertions: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return adapter.verify_itinerary(assertions)
+
+    @server.tool(
+        name="read_verification",
+        title="取核验结果",
+        description=(
+            "取一份进行中或已完成的核验结果。verify_itinerary 立刻返回 "
+            "verify_id，实查 12306 在后台推进，用这个取增量。\n"
+            "【什么时候用】verify_itinerary 或上一次 read_verification 的返回体里 "
+            "status 还是 RUNNING。\n"
+            "【怎么用】read_verification(verify_id=\"verify-…\")，"
+            "把上一次返回的 verify_id 原样传回。每条断言约 2 秒，"
+            "隔几秒取一次即可。\n"
+            "【已核出的不会变】增量只增不改，可以在部分结果上先下判断。\n"
+            "【结果保留一小时】服务重启或超时后 verify_id 失效，"
+            "会明确报「这个 id 不存在」而不是假装还在跑。"
+        ),
+        annotations=_READ_ONLY,
+        structured_output=True,
+    )
+    def read_verification(verify_id: str) -> dict[str, Any]:
+        return adapter.read_verification(verify_id)
 
     return server
 
