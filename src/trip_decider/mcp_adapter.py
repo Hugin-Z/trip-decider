@@ -15,6 +15,7 @@ from trip_decider.trip_application import (
     TripApplicationError,
     TripApplicationService,
 )
+from trip_decider.itinerary_verification import verify_railway_assertions
 from trip_decider.trip_query import TripQueryError, TripQueryService
 from trip_decider.travel_agent import RETRYABLE_BLOCK_CODES, TravelAgentError
 
@@ -40,6 +41,27 @@ class TripMCPError(ValueError):
             f"{message}｜下一步：{next_call}" if next_call else message
         )
 
+
+#: 一次 `verify_itinerary` 最多核多少条断言。每条最坏一次时刻表查询加一次票价
+#: 查询；12 条是在 I13 上界内留足余量的保守值。超了要求分批，**不截断**——
+#: 截断会让宿主以为整份都核过了。
+MAX_VERIFIED_ASSERTIONS = 12
+
+_VERIFY_HINT = (
+    'verify_itinerary(assertions=[{"train_code": "G1234", '
+    '"origin_station": "<出发站全称>", "destination_station": "<到达站全称>", '
+    '"departure_at": "2026-08-11T12:40", "arrival_at": "2026-08-11T16:28", '
+    '"price_cny": 149.0}])'
+)
+
+#: 一次 MCP 工具调用允许占用的墙钟上限（秒）。见 invariants.md I13。
+#: 宿主的超时线是 60 秒级，取 45 留出传输与序列化的余量。**这不是目标值是上限**：
+#: 正常调用都在 1 秒内，只有 `advance_trip_task` 会主动等到 `wait_seconds`。
+MCP_CALL_BUDGET_SECONDS = 45.0
+
+#: `advance_trip_task` 里同步推进动作循环的预算。真正的采集在后台线程里，
+#: 这一脚只负责把循环踢动。加上 `wait_seconds`（≤30）仍远低于上面的上限。
+_SYNCHRONOUS_DRIVE_BUDGET_SECONDS = 5.0
 
 #: 域 → 该域的手工提交长什么样。**只用于错误提示**，不参与校验——校验的唯一
 #: 出处是 `agent_actions` 的提交门（railway 的必填集又从
@@ -200,7 +222,14 @@ class TripMCPAdapter:
             if status not in self._CHECKPOINT_STATUSES or _is_retryable_block(
                 before
             ):
-                self._application.execute_trip(run_id)
+                # 同步推进只给一点点预算。真正的采集在后台线程里跑，本次调用
+                # 只负责「踢一脚 + 在 wait_seconds 内看看到没到检查点」。
+                # 不限的话这里能自己跑满 30 秒，再叠上下面的轮询等待，
+                # 一次工具调用就逼近宿主的超时线（I13）。
+                self._application.execute_trip(
+                    run_id,
+                    drive_budget_seconds=_SYNCHRONOUS_DRIVE_BUDGET_SECONDS,
+                )
             elif status == "COMPLETED":
                 # A completed discovery run is already waiting for selection;
                 # a completed plan/audit run is already a stable checkpoint.
@@ -406,6 +435,34 @@ class TripMCPAdapter:
         except (TripApplicationError, TravelAgentError):
             return None
         return snapshot.get("recovery") if isinstance(snapshot, Mapping) else None
+
+    def verify_itinerary(
+        self,
+        assertions: object,
+    ) -> dict[str, object]:
+        """逐条核验别处排好的行程。无状态，不建 run。"""
+
+        if not isinstance(assertions, list):
+            raise TripMCPError(
+                "assertions 必须是断言列表",
+                next_call=_VERIFY_HINT,
+            )
+        if len(assertions) > MAX_VERIFIED_ASSERTIONS:
+            # 一次核太多会撞 I13 的上界——每条断言最坏要一次时刻表查询加一次
+            # 票价查询。分批而不是偷偷截断：截断会让宿主以为全核过了。
+            raise TripMCPError(
+                f"一次最多核 {MAX_VERIFIED_ASSERTIONS} 条，本次收到 "
+                f"{len(assertions)} 条。请分批提交——"
+                "分批是为了每次调用都能在宿主超时前返回",
+                next_call=(
+                    f"verify_itinerary(assertions=[前 {MAX_VERIFIED_ASSERTIONS} 条])"
+                    "，然后对余下的再调一次"
+                ),
+            )
+        try:
+            return verify_railway_assertions(assertions)
+        except ValueError as error:
+            raise TripMCPError(str(error), next_call=_VERIFY_HINT) from None
 
     @staticmethod
     def _guard(

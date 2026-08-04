@@ -525,6 +525,57 @@ support 不可用的字段整个丢掉，在投影之前的原始 mapping 上校
 
 ---
 
+## I13 单次 MCP 工具调用的墙钟时间有上界
+
+### 增列理由
+
+第二次真实宿主实测（Claude Desktop MCP，2026-08-04）的 P0：宿主主动选用了本服务、
+intent 一次填对、零试错——然后**卡死 4 分钟**，超时放弃，回退去 web search。
+宿主侧原文：「No result received from the Claude Desktop app after waiting 4
+minutes. The local MCP server providing this tool may be unresponsive, crashed,
+or not running.」
+
+归因（本轮实测复现）：`select_trip_candidate` 之后的动作循环停在
+`web` 动作——那是只有外部才能做的 `codex_web_research`。循环**算出**了
+「走不动了，要外部补证据」，但这个结论只有后台线程那一支会落到 run 状态上；
+`execute_trip` 的同步支算出同一个结论后直接丢掉。于是 run 永远停在 `RUNNING`，
+宿主每次 `advance_trip_task` 都拿到 `checkpoint=RUNNING`，一直到自己超时。
+
+单次调用**都在 10 秒内返回**——没有任何一次调用「慢」。坏的是**总时长无界**：
+没有任何一次调用能让宿主离终点更近。所以上界不能只盯单次耗时，还要有
+「循环必须能到达检查点」这一条，否则单次达标、整体照样死。
+
+### 陈述
+
+1. **单次上界**：任何 MCP 工具调用的墙钟时间不得超过
+   `mcp_adapter.MCP_CALL_BUDGET_SECONDS`（当前 45 秒；宿主超时线是 60 秒级，
+   留出传输与序列化余量）。采集慢不是豁免理由——慢采集必须在后台线程里跑，
+   本次调用只负责踢一脚并在 `wait_seconds` 内观察。
+2. **可终止**：动作循环算出 `NEED_USER_INPUT` 之后，run 必须落到一个宿主
+   认得的检查点状态。同步支与后台支**共用同一个落状态入口**
+   （`TripApplicationService.settle_action_loop`）——两处实现、只有一处生效，
+   正是本次事故的形状（D19）。
+
+### 判定方法
+
+`tests/test_invariant_i13_mcp_calls_are_bounded.py`：
+
+1. **sleep 注入**：把采集器换成 sleep 25 秒的假采集器，逐个调用全部 10 个工具，
+   断言每次都在 `MCP_CALL_BUDGET_SECONDS` 内返回。负向验证：把同步推进预算
+   调回 30 秒，`advance_trip_task` 应当超标。
+2. **可终止**：外部动作待补时，`advance_trip_task` 必须在有限次内到达
+   非 `RUNNING` 的检查点，不得无限返回 `RUNNING`。
+3. **单一落状态入口**：AST 扫 `trip_application`，断言 `store.block(` 的调用
+   只出现在登记的入口里，防止再长出第二处只落一半的实现。
+
+### 未覆盖
+
+`MCP_CALL_BUDGET_SECONDS` 是**上界不是目标**。正常调用都在 1 秒内，唯一会主动
+等待的是 `advance_trip_task`（等到 `wait_seconds`，≤30）。本不变式不管「快不快」，
+只管「会不会把宿主拖到超时」。
+
+---
+
 ## 附：不变式与阶段闸门的对应
 
 | 不变式 | 预期转绿阶段 | 依据 |
@@ -537,6 +588,7 @@ support 不可用的字段整个丢掉，在投影之前的原始 mapping 上校
 | I1、I10 | P4-b/c | 需要落盘契约变更（字段级 facts + 删展示态） |
 | I4、I9 | P5 | I4 需要 `hotel_price` 生产者落地；I9 需要候选生成脱离硬编码目的地 |
 | I12 | P5 轮 3 | 增列于首次真实宿主实测之后，落地即绿——它守的东西在实测前没有任何守卫 |
+| I13 | P5 轮 5 | 增列于第二次真实宿主实测之后，落地即绿。同上：卡死 4 分钟这件事此前没有任何守卫，因为每一次单独调用看起来都正常 |
 
 **2026-08-02 修订（A1）**：原表把 I5、I6 列为「P2 → P3」，与 `PLAN.md` v4 §12 的 P2 闸门第 3 条一并修正——P2 只转绿 I2 与 I3a，且只在内核范围。
 

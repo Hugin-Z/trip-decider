@@ -140,25 +140,34 @@ class TripApplicationService:
         run_id: str,
         *,
         action_id: str | None = None,
+        drive_budget_seconds: float = 30.0,
     ) -> ApplicationOutcome:
-        """Execute or resume the mode-specific application workflow."""
+        """Execute or resume the mode-specific application workflow.
+
+        ``drive_budget_seconds`` 限的是**本次调用同步推进动作循环的时长**。默认
+        30 秒沿用旧行为（网页端与测试都按它写的）；MCP 那条路会传一个小得多的
+        值，因为宿主的一次工具调用不能拿去跑采集（I13）。
+        """
 
         run = self.store.get_run(run_id)
         if run.status is RunStatus.RUNNING:
-            action_state = (
-                execute_registered_action(
+            if action_id is not None:
+                action_state = execute_registered_action(
                     run_id,
                     action_id,
                     store=self.store,
                     evidence_broker=self.evidence_broker,
                 )
-                if action_id is not None
-                else run_until_blocked(
+            else:
+                action_state = run_until_blocked(
                     run_id,
                     store=self.store,
                     evidence_broker=self.evidence_broker,
+                    max_wait_seconds=drive_budget_seconds,
                 )
-            )
+                # 算出「走不动了」就得落到 run 上。不落的话 run 停在 RUNNING，
+                # 宿主每次 advance 都只拿到 checkpoint=RUNNING，直到自己超时。
+                self.settle_action_loop(run_id, action_state)
             return ApplicationOutcome(
                 run_id,
                 action_loop=action_state,
@@ -306,6 +315,10 @@ class TripApplicationService:
             ),
             store=self.store,
         )
+        # 这里**故意不 spawn**：两个客户端在选完之后都会紧接着显式驱动一次
+        # （网页端 selectGuidedOption 立刻 POST /execute，MCP 端宿主调
+        # advance_trip_task）。再 spawn 一条就会和它们抢，并让 /select 的
+        # 响应体变成竞态的——那正是本轮想消灭的不确定性。
         return ApplicationOutcome(
             run_id,
             accepted=True,
@@ -900,48 +913,64 @@ class TripApplicationService:
             name=f"trip-decider-{purpose}-{run_id}",
         )
 
+    def settle_action_loop(self, run_id: str, snapshot: Mapping[str, object]) -> None:
+        """把动作循环的结论**落到 run 状态上**。
+
+        循环停在「只剩外部才能做的动作」时，它已经知道自己走不动了——这个结论
+        必须变成 run 的状态，否则 run 永远停在 RUNNING，宿主 `advance` 一次拿一次
+        `checkpoint=RUNNING`，直到自己超时放弃。第二次实测那 4 分钟就是这么来的。
+
+        此前只有后台线程这一支会落状态；`execute_trip` 的同步支算出同一个结论后
+        直接丢掉。同一件事两处实现、只有一处生效，是 D19 的典型形状——所以这里
+        抽成**唯一**的落状态入口，两条路径都调它。
+        """
+
+        if snapshot.get("status") != "NEED_USER_INPUT":
+            return
+        run = self.store.get_run(run_id)
+        if run.status is not RunStatus.RUNNING:
+            return
+        actions = snapshot.get("actions")
+        action_types = (
+            [
+                str(action.get("action_type"))
+                for action in actions
+                if isinstance(action, Mapping)
+            ]
+            if isinstance(actions, list)
+            else []
+        )
+        # 判据看的是 action_type 前缀，**不看 domain**——旧名
+        # WEB_EVIDENCE_REQUIRED 既复述证据状态又和自己的触发条件对不上。
+        reason = (
+            "CODEX_ACTION_REQUIRED"
+            if any(value.startswith("codex") for value in action_types)
+            else "USER_INPUT_REQUIRED"
+        )
+        snapshot_result = snapshot.get("result")
+        retained = (
+            deepcopy(dict(snapshot_result))
+            if isinstance(snapshot_result, Mapping)
+            else run.result
+            if isinstance(run.result, Mapping)
+            else {
+                "action_loop_status": "BLOCKED",
+                "blocked_domains": [],
+            }
+        )
+        self.store.block(run_id, retained, reason)
+
     def _run_action_loop_background(self, run_id: str) -> None:
         try:
-            snapshot = run_until_blocked(
+            self.settle_action_loop(
                 run_id,
-                store=self.store,
-                evidence_broker=self.evidence_broker,
-                max_wait_seconds=30.0,
+                run_until_blocked(
+                    run_id,
+                    store=self.store,
+                    evidence_broker=self.evidence_broker,
+                    max_wait_seconds=30.0,
+                ),
             )
-            if snapshot.get("status") != "NEED_USER_INPUT":
-                return
-            run = self.store.get_run(run_id)
-            if run.status is not RunStatus.RUNNING:
-                return
-            actions = snapshot.get("actions")
-            action_types = (
-                [
-                    str(action.get("action_type"))
-                    for action in actions
-                    if isinstance(action, Mapping)
-                ]
-                if isinstance(actions, list)
-                else []
-            )
-            # 判据看的是 action_type 前缀，**不看 domain**——旧名
-            # WEB_EVIDENCE_REQUIRED 既复述证据状态又和自己的触发条件对不上。
-            reason = (
-                "CODEX_ACTION_REQUIRED"
-                if any(value.startswith("codex") for value in action_types)
-                else "USER_INPUT_REQUIRED"
-            )
-            snapshot_result = snapshot.get("result")
-            retained = (
-                deepcopy(dict(snapshot_result))
-                if isinstance(snapshot_result, Mapping)
-                else run.result
-                if isinstance(run.result, Mapping)
-                else {
-                    "action_loop_status": "BLOCKED",
-                    "blocked_domains": [],
-                }
-            )
-            self.store.block(run_id, retained, reason)
         except Exception as error:
             # 这里在后台线程里，重抛只会让线程静默死掉——比包装还糟。
             # 所以走「如实记类型」那一支：编程错误必须在对外叙述里自报家门，

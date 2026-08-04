@@ -376,6 +376,44 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             content=content,
         )
 
+    @server.tool(
+        name="verify_itinerary",
+        title="核实已有行程",
+        description=(
+            "核验 AI 或人排好的行程：逐条对照 12306 实查，标出哪条是真的、"
+            "哪条冲突、哪条查无实据。不排新行程，只核你手上这份。\n"
+            "【什么时候用】用户贴来一份行程或攻略问「这个靠谱吗」；"
+            "你自己（或别的工具）凭检索排了行程，想在给出前核一遍车次是否真实；"
+            "用户问「这趟车真的有吗 / 这个票价对不对」。\n"
+            "【assertions 示例】按 schema 提交断言列表：\n"
+            '[{"train_code": "G1234",\n'
+            '  "origin_station": "<出发站全称>",\n'
+            '  "destination_station": "<到达站全称>",\n'
+            '  "departure_at": "2026-08-11T12:40",\n'
+            '  "arrival_at": "2026-08-11T16:28",\n'
+            '  "price_cny": 149.0}]\n'
+            "【必填四项】train_code、origin_station、destination_station、"
+            "departure_at。arrival_at 与 price_cny 可选，给了就一起核。\n"
+            "【站名要全称】12306 用的是车站全称，只写城市名核不到，"
+            "会如实返回 unknown 并提示换全称。\n"
+            "【三档结论】sourced 查到且对得上（附实查值与采集时间）｜"
+            "conflicting 查到但对不上（附两边的值）｜unknown 查无实据。"
+            "**unknown 不等于假**——可能是超出预售期、站名写法不同或网络故障，"
+            "返回体会给出建议动作。\n"
+            "【总评是计数不是评分】格式如「5 条断言：3 sourced / 1 conflicting"
+            " / 1 unknown，建议出发前确认第 2、4 条」。\n"
+            "【范围】v0 只核铁路域。住宿、门票、当地交通未核验——"
+            "没核不等于没问题，返回体里明写了这一点。\n"
+            "【一次最多 12 条】超了会要求分批，不会静默截断。"
+        ),
+        annotations=_READ_ONLY,
+        structured_output=True,
+    )
+    def verify_itinerary(
+        assertions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return adapter.verify_itinerary(assertions)
+
     return server
 
 
