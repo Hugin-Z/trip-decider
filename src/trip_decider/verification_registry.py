@@ -33,11 +33,18 @@ _RETENTION_SECONDS = 3600.0
 _MAX_ENTRIES = 32
 
 
+class VerificationCapacityError(RuntimeError):
+    """所有槽位都被正在运行的核验占用。"""
+
+
 @dataclass
 class _Verification:
     verify_id: str
     total: int
     created_at: float
+    dedupe_key: str | None = None
+    #: 后台失败时，只把尚未得到结论的原断言交还给宿主重试。
+    retry_items: list[object] = field(default_factory=list)
     #: 形状不合格的那些——不消耗网络，第一次调用就能给出。
     immediate: list[dict[str, object]] = field(default_factory=list)
     #: 实采核出来的。**只由持锁的工具线程从 ``inbox`` 搬进来**，
@@ -65,7 +72,7 @@ class _Verification:
         # 假的非零值。不变式因此成立：**RUNNING 蕴含 pending > 0**。
         if status == "RUNNING" and pending == 0:
             status = "FINALIZING"
-        return {
+        result = {
             "verify_id": self.verify_id,
             "status": status,
             "total": self.total,
@@ -74,6 +81,18 @@ class _Verification:
             "findings": deepcopy(findings),
             "error": self.error,
         }
+        if self.status == "FAILED":
+            checked_indices = {
+                int(item.get("index") or 0) for item in findings
+            }
+            result["retry_assertions"] = deepcopy(
+                [
+                    item
+                    for index, item in enumerate(self.retry_items, start=1)
+                    if index not in checked_indices
+                ]
+            )
+        return result
 
 
 class VerificationRegistry:
@@ -83,10 +102,12 @@ class VerificationRegistry:
         self,
         *,
         spawn: Callable[[Callable[[], None], str], None] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._entries: dict[str, _Verification] = {}
         self._spawn = spawn if spawn is not None else _default_spawn
+        self._clock = clock if clock is not None else time.monotonic
 
     def start_background(
         self,
@@ -94,6 +115,8 @@ class VerificationRegistry:
         total: int,
         immediate: Sequence[Mapping[str, object]],
         collect: Callable[[Callable[[Mapping[str, object]], None]], None],
+        dedupe_key: str | None = None,
+        retry_items: Sequence[object] = (),
     ) -> dict[str, object]:
         """登记一份核验并**立刻**返回回执。
 
@@ -108,11 +131,33 @@ class VerificationRegistry:
         entry = _Verification(
             verify_id=f"verify-{uuid4()}",
             total=total,
-            created_at=time.monotonic(),
+            created_at=self._clock(),
+            dedupe_key=dedupe_key,
+            retry_items=deepcopy(list(retry_items)),
             immediate=[dict(item) for item in immediate],
         )
+        if len(entry.immediate) >= total:
+            # 全部都是形状问题，没有要采的——不必起线程。
+            entry.status = "COMPLETE"
         with self._lock:
-            self._evict_locked()
+            self._prune_locked()
+            if dedupe_key is not None:
+                duplicate = next(
+                    (
+                        existing
+                        for existing in self._entries.values()
+                        if existing.dedupe_key == dedupe_key
+                        and existing.status != "FAILED"
+                    ),
+                    None,
+                )
+                if duplicate is not None:
+                    return duplicate.snapshot()
+            self._evict_finished_for_capacity_locked()
+            if len(self._entries) >= _MAX_ENTRIES:
+                raise VerificationCapacityError(
+                    f"已有 {_MAX_ENTRIES} 份核验正在运行，请稍后重试"
+                )
             self._entries[entry.verify_id] = entry
 
         def report(finding: Mapping[str, object]) -> None:
@@ -129,15 +174,15 @@ class VerificationRegistry:
                 return
             entry.inbox.put(("done", "COMPLETE", None))
 
-        if len(entry.immediate) >= total:
-            # 全部都是形状问题，没有要采的——不必起线程。
-            entry.status = "COMPLETE"
-        else:
+        if entry.status == "RUNNING":
             self._spawn(worker, f"trip-decider-verify-{entry.verify_id}")
-        return self.read(entry.verify_id)
+        snapshot = self.read(entry.verify_id)
+        assert snapshot is not None
+        return snapshot
 
     def read(self, verify_id: str) -> dict[str, object] | None:
         with self._lock:
+            self._prune_locked()
             entry = self._entries.get(verify_id)
             if entry is None:
                 return None
@@ -165,20 +210,21 @@ class VerificationRegistry:
                 entry.status = str(payload)
                 entry.error = detail
 
-    def _evict_locked(self) -> None:
+    def _prune_locked(self) -> None:
         # 先排空再判断终态：没人轮询过的条目，其完成消息还压在队列里，
         # 不排空就会被当成 RUNNING 而永远淘汰不掉。
         for entry in self._entries.values():
             self._drain_locked(entry)
-        now = time.monotonic()
+        now = self._clock()
         stale = [
             key
             for key, entry in self._entries.items()
             if now - entry.created_at > _RETENTION_SECONDS
-            and entry.status != "RUNNING"
         ]
         for key in stale:
             del self._entries[key]
+
+    def _evict_finished_for_capacity_locked(self) -> None:
         if len(self._entries) < _MAX_ENTRIES:
             return
         finished = sorted(
@@ -196,4 +242,4 @@ def _default_spawn(worker: Callable[[], None], name: str) -> None:
     threading.Thread(target=worker, name=name, daemon=True).start()
 
 
-__all__ = ["VerificationRegistry"]
+__all__ = ["VerificationCapacityError", "VerificationRegistry"]

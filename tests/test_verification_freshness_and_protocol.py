@@ -232,12 +232,12 @@ class CompletedPollingProtocolCase(unittest.TestCase):
         self.assertEqual(view["total"], view["checked"])
 
     def test_the_next_step_names_what_to_do_about_the_findings(self) -> None:
-        option = self._completed()["next_call"]["options"][0]
+        next_call = self._completed()["next_call"]
 
-        self.assertEqual("done", option["kind"])
-        self.assertIn("核验完成", option["detail"])
+        self.assertEqual([], next_call["options"])
+        self.assertIn("核验完成", next_call["detail"])
         # 两条都是形状问题 → unknown → 应当点名要确认
-        self.assertIn("查无实据", option["detail"])
+        self.assertIn("查无实据", next_call["detail"])
 
     def test_polling_again_after_completion_is_stable(self) -> None:
         """完成之后再取一次，增量为空、结论不变。"""
@@ -259,13 +259,46 @@ class CompletedPollingProtocolCase(unittest.TestCase):
             raise RuntimeError("12306 会话建不起来")
 
         snapshot = registry.start_background(
-            total=1, immediate=[], collect=explode
+            total=1,
+            immediate=[],
+            collect=explode,
+            retry_items=[{"train_code": "G1"}],
         )
         view = self.adapter.read_verification(str(snapshot["verify_id"]))
 
         self.assertEqual("failed", view["status"])
-        self.assertIs(True, view["complete"])
-        self.assertIn("12306 会话建不起来", view["next_call"]["options"][0]["detail"])
+        self.assertIs(False, view["complete"])
+        self.assertIs(True, view["terminal"])
+        self.assertIn("12306 会话建不起来", view["next_call"]["detail"])
+        option = view["next_call"]["options"][0]
+        self.assertEqual("verify_itinerary", option["entrypoint"])
+        self.assertEqual(
+            {"assertions": [{"train_code": "G1"}]},
+            option["arguments"],
+        )
+
+    def test_a_cached_finding_token_is_recomputed_when_read(self) -> None:
+        old = (datetime.now().astimezone() - timedelta(hours=7)).isoformat()
+        view = self.adapter._verification_view(
+            {
+                "verify_id": "verify-old",
+                "status": "COMPLETE",
+                "total": 1,
+                "checked": 1,
+                "pending": 0,
+                "error": None,
+                "findings": [
+                    {
+                        "index": 1,
+                        "verdict": "sourced",
+                        "retrieved_at": old,
+                        "token": "verified",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual("sourced_stale", view["findings"][0]["token"])
 
 
 if __name__ == "__main__":

@@ -29,11 +29,15 @@ import unittest
 from unittest import mock
 
 from trip_decider.evidence_broker import EvidenceBroker
+from trip_decider.itinerary_verification import verify_checkable_incrementally
 from trip_decider.mcp_adapter import TripMCPAdapter, TripMCPError
 from trip_decider.travel_agent import InMemoryAgentStore
 from trip_decider.trip_application import TripApplicationService
 from trip_decider.trip_query import TripQueryService
-from trip_decider.verification_registry import VerificationRegistry
+from trip_decider.verification_registry import (
+    VerificationCapacityError,
+    VerificationRegistry,
+)
 
 from tests.invariant_support import noop_collector
 
@@ -163,6 +167,16 @@ class ImmediateReceiptCase(unittest.TestCase):
         self.assertEqual(0, response["summary"]["sourced"])
         self.assertEqual(3, response["pending"])
 
+    def test_identical_request_reuses_the_running_verification(self) -> None:
+        first = self.adapter.verify_itinerary(
+            [dict(item) for item in HOST_ITINERARY_ASSERTIONS]
+        )
+        second = self.adapter.verify_itinerary(
+            [dict(item) for item in HOST_ITINERARY_ASSERTIONS]
+        )
+
+        self.assertEqual(first["verify_id"], second["verify_id"])
+
 
 class PollingCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -193,7 +207,7 @@ class PollingCase(unittest.TestCase):
         self.assertEqual("completed", response["status"])
         self.assertEqual(2, response["checked"])
         self.assertEqual(0, response["pending"])
-        self.assertEqual("done", response["next_call"]["options"][0]["kind"])
+        self.assertEqual([], response["next_call"]["options"])
 
     def test_read_returns_the_same_view_shape_as_the_first_call(self) -> None:
         registry = VerificationRegistry(spawn=lambda worker, name: worker())
@@ -224,6 +238,128 @@ class BackgroundFailureIsVisibleCase(unittest.TestCase):
 
         self.assertEqual("FAILED", snapshot["status"])
         self.assertIn("12306 会话建不起来", str(snapshot["error"]))
+
+
+class TrulyIncrementalCollectionCase(unittest.TestCase):
+    """第二条卡住时，第一条必须已经交给登记处。"""
+
+    def test_one_finding_is_reported_before_the_next_query_finishes(self) -> None:
+        second_query_started = threading.Event()
+        release_second = threading.Event()
+        self.addCleanup(release_second.set)
+
+        class _GatedRail:
+            def __init__(self) -> None:
+                self.queries = 0
+
+            def initialize_web_session(self) -> None:
+                return None
+
+            def station_codes(self):
+                return (
+                    {"甲站": "AAA", "乙站": "BBB"},
+                    {"AAA": "甲站", "BBB": "乙站"},
+                )
+
+            def query_direct(self, **kwargs: object) -> list:
+                self.queries += 1
+                if self.queries == 2:
+                    second_query_started.set()
+                    release_second.wait(timeout=5.0)
+                return []
+
+            def close(self) -> None:
+                return None
+
+        checkable = [
+            (
+                index,
+                {
+                    "train_code": f"G{index}",
+                    "origin_station": "甲站",
+                    "destination_station": "乙站",
+                    "departure_at": f"2026-08-{10 + index:02d}T08:00",
+                },
+            )
+            for index in (1, 2)
+        ]
+        reports: list[dict[str, object]] = []
+        thread = threading.Thread(
+            target=lambda: verify_checkable_incrementally(
+                checkable,
+                report=lambda finding: reports.append(dict(finding)),
+                client_factory=_GatedRail,
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+        self.assertTrue(second_query_started.wait(timeout=5.0))
+        self.assertEqual(
+            [1],
+            [finding["index"] for finding in reports],
+            "第二条还没查完时，第一条没有逐条上报",
+        )
+        release_second.set()
+        thread.join(timeout=5.0)
+        self.assertEqual([1, 2], [finding["index"] for finding in reports])
+
+
+class VerificationRegistryBoundedCase(unittest.TestCase):
+    def test_running_entries_never_exceed_the_hard_cap(self) -> None:
+        registry = VerificationRegistry(spawn=lambda worker, name: None)
+        for index in range(32):
+            registry.start_background(
+                total=1,
+                immediate=[],
+                collect=lambda report: None,
+                dedupe_key=f"request-{index}",
+            )
+
+        with self.assertRaises(VerificationCapacityError):
+            registry.start_background(
+                total=1,
+                immediate=[],
+                collect=lambda report: None,
+                dedupe_key="request-over-cap",
+            )
+
+    def test_duplicate_key_spawns_only_one_worker(self) -> None:
+        spawned: list[str] = []
+        registry = VerificationRegistry(
+            spawn=lambda worker, name: spawned.append(name)
+        )
+
+        first = registry.start_background(
+            total=1,
+            immediate=[],
+            collect=lambda report: None,
+            dedupe_key="same",
+        )
+        second = registry.start_background(
+            total=1,
+            immediate=[],
+            collect=lambda report: None,
+            dedupe_key="same",
+        )
+
+        self.assertEqual(first["verify_id"], second["verify_id"])
+        self.assertEqual(1, len(spawned))
+
+    def test_read_enforces_retention_without_a_new_start(self) -> None:
+        now = [10.0]
+        registry = VerificationRegistry(
+            spawn=lambda worker, name: None,
+            clock=lambda: now[0],
+        )
+        started = registry.start_background(
+            total=1,
+            immediate=[],
+            collect=lambda report: None,
+        )
+        now[0] += 3601.0
+
+        self.assertIsNone(registry.read(str(started["verify_id"])))
 
 
 if __name__ == "__main__":

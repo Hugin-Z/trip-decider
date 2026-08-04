@@ -84,18 +84,11 @@ class VerifiedFinding:
         计算走 `evidence_core` 的同一套实现，不在这里另写一份判定（D19）。
         """
 
-        support = _VERDICT_SUPPORT[self.verdict]
-        if support in {SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}:
-            # 这两个吸收 freshness——查不到/对不上，谈不上新不新鲜。
-            return combine_token(support, FRESHNESS_FRESH)
-        freshness = resolve_freshness(
+        return verification_token(
+            self.verdict,
             self.retrieved_at,
-            now=now or datetime.now().astimezone(),
-            tolerance_seconds=FRESHNESS_POLICIES[
-                RAILWAY_DATA_TYPE
-            ].stale_ttl_seconds,
+            now=now,
         )
-        return combine_token(support, freshness.value)
 
     def to_dict(self, *, now: datetime | None = None) -> dict[str, object]:
         return {
@@ -121,6 +114,28 @@ _VERDICT_SUPPORT = {
     "conflicting": SUPPORT_CONFLICTING,
     "unknown": SUPPORT_UNKNOWN,
 }
+
+
+def verification_token(
+    verdict: str,
+    retrieved_at: object,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """按读取时刻重算核验 token，避免登记处缓存把新鲜度冻住。"""
+
+    support = _VERDICT_SUPPORT[verdict]
+    if support in {SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}:
+        # 这两个吸收 freshness——查不到/对不上，谈不上新不新鲜。
+        return combine_token(support, FRESHNESS_FRESH)
+    freshness = resolve_freshness(
+        retrieved_at,
+        now=now or datetime.now().astimezone(),
+        tolerance_seconds=FRESHNESS_POLICIES[
+            RAILWAY_DATA_TYPE
+        ].stale_ttl_seconds,
+    )
+    return combine_token(support, freshness.value)
 
 
 def verify_railway_assertions(
@@ -237,7 +252,7 @@ def verify_checkable_incrementally(
     一条查不到不影响其余各条——这一点与同步版一致。
     """
 
-    for finding in _verify_against_live_rail(
+    for finding in _iter_verify_against_live_rail(
         list(checkable),
         client_factory=client_factory,
     ):
@@ -353,35 +368,48 @@ def _verify_against_live_rail(
     *,
     client_factory,
 ) -> list[VerifiedFinding]:
+    return list(
+        _iter_verify_against_live_rail(
+            checkable,
+            client_factory=client_factory,
+        )
+    )
+
+
+def _iter_verify_against_live_rail(
+    checkable: Sequence[tuple[int, Mapping[str, object]]],
+    *,
+    client_factory,
+):
+    """逐条产出结论；同步入口仅负责把这个迭代器收集成列表。"""
+
     client = client_factory()
     try:
-        client.initialize_web_session()
-        name_to_code, code_to_name = client.station_codes()
-    except (_RailFailure, OSError, ValueError) as error:
-        # 会话建不起来，全部条目都是 unknown——**不是 conflicting**。
-        # 我们没查到，不代表用户写错了。
-        return [
-            VerifiedFinding(
-                index=index,
-                verdict="unknown",
-                claim=_claim_view(claim),
-                observed=None,
-                mismatches=(),
-                reason=f"rail_session_unavailable:{type(error).__name__}",
-                retrieved_at=None,
-                suggested_action="12306 连不上，稍后重试本次核验",
-            )
-            for index, claim in checkable
-        ]
+        try:
+            client.initialize_web_session()
+            name_to_code, code_to_name = client.station_codes()
+        except (_RailFailure, OSError, ValueError) as error:
+            # 会话建不起来，全部条目都是 unknown——**不是 conflicting**。
+            # 逐条 yield 同样重要：即使失败结论很多，宿主也能看到进度。
+            for index, claim in checkable:
+                yield VerifiedFinding(
+                    index=index,
+                    verdict="unknown",
+                    claim=_claim_view(claim),
+                    observed=None,
+                    mismatches=(),
+                    reason=f"rail_session_unavailable:{type(error).__name__}",
+                    retrieved_at=None,
+                    suggested_action="12306 连不上，稍后重试本次核验",
+                )
+            return
 
-    findings: list[VerifiedFinding] = []
-    # 值是 (车次列表, 那一次的采集时刻)——时刻与数据同生共死（R2）。
-    schedule_cache: dict[
-        tuple[str, str, date], tuple[list[_Train], str]
-    ] = {}
-    for index, claim in checkable:
-        findings.append(
-            _verify_one(
+        # 值是 (车次列表, 那一次的采集时刻)——时刻与数据同生共死（R2）。
+        schedule_cache: dict[
+            tuple[str, str, date], tuple[list[_Train], str]
+        ] = {}
+        for index, claim in checkable:
+            yield _verify_one(
                 index,
                 claim,
                 client=client,
@@ -389,8 +417,14 @@ def _verify_against_live_rail(
                 code_to_name=code_to_name,
                 schedule_cache=schedule_cache,
             )
-        )
-    return findings
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except (OSError, ValueError):
+                # 结果已经采到；关闭会话失败不应把整份核验改判成失败。
+                pass
 
 
 def _verify_one(
@@ -641,6 +675,7 @@ __all__ = [
     "RAILWAY_ASSERTION_REQUIRED_FIELDS",
     "RAILWAY_ASSERTION_OPTIONAL_FIELDS",
     "VerifiedFinding",
+    "verification_token",
     "summarize",
     "verify_railway_assertions",
     "split_by_shape",
