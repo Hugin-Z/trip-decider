@@ -29,6 +29,15 @@ from datetime import date, datetime
 from decimal import Decimal
 import time
 
+from trip_decider.evidence_broker import FRESHNESS_POLICIES
+from trip_decider.evidence_core import (
+    FRESHNESS_FRESH,
+    SUPPORT_CONFLICTING,
+    SUPPORT_SOURCED,
+    SUPPORT_UNKNOWN,
+    combine_token,
+    resolve_freshness,
+)
 from trip_decider.intercity_rail import _RailClient, _RailFailure, _Train
 
 #: 一条铁路断言必须有的字段。少任何一个都没法核——不是「核不出」而是
@@ -65,7 +74,30 @@ class VerifiedFinding:
     retrieved_at: str | None
     suggested_action: str | None
 
-    def to_dict(self) -> dict[str, object]:
+    def token(self, *, now: datetime | None = None) -> str:
+        """这条结论的展示 token，按**真实**采集时刻算。
+
+        R2：核验路径**不得抬升**证据状态。一条 6 小时前采到的时刻表，在别处
+        读是 ``sourced_stale``，从核验里读出来也必须是 ``sourced_stale``——
+        「刚核过」指的是刚做过比对，不是数据刚采到。
+
+        计算走 `evidence_core` 的同一套实现，不在这里另写一份判定（D19）。
+        """
+
+        support = _VERDICT_SUPPORT[self.verdict]
+        if support in {SUPPORT_CONFLICTING, SUPPORT_UNKNOWN}:
+            # 这两个吸收 freshness——查不到/对不上，谈不上新不新鲜。
+            return combine_token(support, FRESHNESS_FRESH)
+        freshness = resolve_freshness(
+            self.retrieved_at,
+            now=now or datetime.now().astimezone(),
+            tolerance_seconds=FRESHNESS_POLICIES[
+                RAILWAY_DATA_TYPE
+            ].stale_ttl_seconds,
+        )
+        return combine_token(support, freshness.value)
+
+    def to_dict(self, *, now: datetime | None = None) -> dict[str, object]:
         return {
             "index": self.index,
             "verdict": self.verdict,
@@ -74,8 +106,21 @@ class VerifiedFinding:
             "mismatches": [dict(item) for item in self.mismatches],
             "reason": self.reason,
             "retrieved_at": self.retrieved_at,
+            "token": self.token(now=now),
             "suggested_action": self.suggested_action,
         }
+
+
+#: 核验读的是哪个 data_type 的容差。与规划链路读同一张策略表——**容差只有一份**，
+#: 核验不能自带一个更宽松的（那就是变相抬升新鲜度）。
+RAILWAY_DATA_TYPE = "railway_schedule_fare"
+
+#: verdict → support 分量。三档判定与两轴模型的对应关系，只此一处。
+_VERDICT_SUPPORT = {
+    "sourced": SUPPORT_SOURCED,
+    "conflicting": SUPPORT_CONFLICTING,
+    "unknown": SUPPORT_UNKNOWN,
+}
 
 
 def verify_railway_assertions(
@@ -330,7 +375,10 @@ def _verify_against_live_rail(
         ]
 
     findings: list[VerifiedFinding] = []
-    schedule_cache: dict[tuple[str, str, date], list[_Train]] = {}
+    # 值是 (车次列表, 那一次的采集时刻)——时刻与数据同生共死（R2）。
+    schedule_cache: dict[
+        tuple[str, str, date], tuple[list[_Train], str]
+    ] = {}
     for index, claim in checkable:
         findings.append(
             _verify_one(
@@ -352,12 +400,11 @@ def _verify_one(
     client,
     name_to_code: Mapping[str, str],
     code_to_name: Mapping[str, str],
-    schedule_cache: dict[tuple[str, str, date], list[_Train]],
+    schedule_cache: dict[tuple[str, str, date], tuple[list[_Train], str]],
 ) -> VerifiedFinding:
     origin = str(claim["origin_station"]).strip()
     destination = str(claim["destination_station"]).strip()
     departure = _wall_time(str(claim["departure_at"]))
-    retrieved_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
     unknown_stations = [
         name for name in (origin, destination) if name not in name_to_code
@@ -370,7 +417,8 @@ def _verify_one(
             observed=None,
             mismatches=(),
             reason="station_name_not_recognized:" + ",".join(unknown_stations),
-            retrieved_at=retrieved_at,
+            # 一个字节都没取到，就不能盖一个采集时刻（R2）。
+            retrieved_at=None,
             suggested_action=(
                 "12306 用的是车站全称（如「上海虹桥」而不是「上海」）。"
                 "换成全称后重新提交这一条"
@@ -384,7 +432,7 @@ def _verify_one(
     )
     if key not in schedule_cache:
         try:
-            schedule_cache[key] = client.query_direct(
+            fetched = client.query_direct(
                 travel_date=departure.date(),
                 origin_code=key[0],
                 destination_code=key[1],
@@ -398,11 +446,17 @@ def _verify_one(
                 observed=None,
                 mismatches=(),
                 reason=f"schedule_query_failed:{type(error).__name__}",
-                retrieved_at=retrieved_at,
+                retrieved_at=None,
                 suggested_action="这一段没查成，稍后重试",
             )
+        # 采集时刻在**取到之后**记，并与数据一起存。多条断言共用一次查询时，
+        # 后来的那些必须报**那一次**的时刻，不能各自盖一个「现在」（R2）。
+        schedule_cache[key] = (
+            fetched,
+            datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
 
-    trains = schedule_cache[key]
+    trains, retrieved_at = schedule_cache[key]
     wanted = str(claim["train_code"]).strip().upper()
     candidates = [
         train for train in trains if train.train_code.upper() == wanted

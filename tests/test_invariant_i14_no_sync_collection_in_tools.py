@@ -30,26 +30,132 @@ import unittest
 _SOURCE_ROOT = Path("src/trip_decider")
 _SERVER = _SOURCE_ROOT / "mcp_server.py"
 
-#: 网络原语。摸到任何一个就算「同步实采」。
+#: 真正发出网络请求的底层写法。**只用来认出「哪些模块是采集器模块」**，
+#: 不再充当判定名单本身。
 #:
-#: 前两个是真正发请求的地方；`_RailClient` 是 12306 会话（构造即握手）；
-#: 后面几个是各采集器的公开入口——它们最终都落到前面那些上，但列出来能让报错
-#: 直接指向「你调的是哪个采集器」而不是一个底层函数名。
-_NETWORK_PRIMITIVES = frozenset(
-    {
-        "urlopen",
-        "_http_get",
-        "_RailClient",
-        "collect_railway_evidence",
-        "collect_map_evidence",
-        "collect_live_destination_profile",
-        "estimate_live_public_transport_segments",
-        "search_live_destination_candidates",
-        "_transit_route_value",
-        "_route_value",
-        "verify_railway_assertions",
+#: 两条都必要：`urlopen` 是 AMap 那边的写法，`build_opener` 是 12306 那边的
+#: （它把 opener 存在实例上，之后写成 `self._opener.open(...)`，没有 `urlopen`
+#: 这个名字可抓）。
+_NETWORK_CALLS = frozenset({"urlopen", "build_opener", "socket"})
+
+
+def _collector_modules() -> set[str]:
+    """哪些模块直接摸网络。**看行为不看名字。**
+
+    R4：原先的判定是一份手写的函数名前缀清单，改个名字就漏。现在从「谁真的
+    发请求」出发认模块，再由 import 关系认可调用——采集器改名后 import 来源
+    不变，照样被抓到。
+    """
+
+    modules: set[str] = set()
+    for path in sorted(_SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            name = None
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else func.id
+                    if isinstance(func, ast.Name)
+                    else None
+                )
+            if name in _NETWORK_CALLS:
+                modules.add(path.stem)
+                break
+    return modules
+
+
+def _network_reaching_names(tree: ast.Module) -> set[str]:
+    """采集器模块内，**在模块内部**能走到网络调用的顶层函数与类。
+
+    只在本模块里传播（不跨模块），因为跨模块那一跳由 import 判定接管。
+    类算作一个整体：只要它任何一个方法摸网络，构造它就等于握手
+    （`_RailClient` 正是这个形状）。
+    """
+
+    bodies: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bodies[node.name] = node
+
+    def calls(node: ast.AST) -> set[str]:
+        found: set[str] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Name):
+                found.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                found.add(func.attr)
+        return found
+
+    direct = {
+        name
+        for name, body in bodies.items()
+        if calls(body) & _NETWORK_CALLS
     }
-)
+    # 反复传播：调用了「已知摸网络的同模块函数」的，自己也摸网络。
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in direct:
+                continue
+            if calls(body) & direct:
+                direct.add(name)
+                changed = True
+    return direct
+
+
+def _collector_names() -> tuple[frozenset[str], frozenset[str]]:
+    """采集器可调用的名字集合，以及它们所属的模块。
+
+    两步：
+    1. **直接**——凡是从采集器模块 `from X import Y` 进来的 Y；
+    2. **一跳**——采集器模块内部定义的公开函数（它们就是那个模块的门面）。
+
+    这比按名字匹配稳：`collect_railway_evidence` 改成任何名字，它仍然定义在
+    采集器模块里、仍然被别处 `from ... import` 进去。
+
+    **已知边界（记录而非隐瞒）**：不做完整 AST 调用图，也不解析 `import X`
+    之后 `X.y()` 的属性访问链。这两类由 I13 的计时兜底。
+    """
+
+    collectors = _collector_modules()
+    # 第一步：每个采集器模块里**真的摸到网络**的那些名字。
+    #
+    # 「整个模块的顶层函数都算」是过宽的：`intercity_rail` 里的
+    # `rail_snapshot_metadata` 只是格式化元数据，一个请求都不发，却会把每个
+    # 工具都染红（实测如此）。判定过宽和过窄一样没用——前者让人学会忽略它。
+    names: set[str] = set()
+    for path in sorted(_SOURCE_ROOT.rglob("*.py")):
+        if path.stem in collectors:
+            names.update(
+                _network_reaching_names(
+                    ast.parse(path.read_text(encoding="utf-8"))
+                )
+            )
+    # 第二步：别的模块给它们起的别名。`from X import y as z` 之后，代码里出现的
+    # 是 `z`——只认原名就会漏掉整条链。
+    for path in sorted(_SOURCE_ROOT.rglob("*.py")):
+        if path.stem in collectors:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.module.rsplit(".", 1)[-1] not in collectors:
+                continue
+            for alias in node.names:
+                if alias.name in names and alias.asname:
+                    names.add(alias.asname)
+    return frozenset(names), frozenset(collectors)
+
+
+_NETWORK_PRIMITIVES, _COLLECTOR_MODULES = _collector_names()
 
 #: **异步边界**：传进这些函数的东西在别的线程里跑，不算本次调用的同步实采。
 #: 扫描遇到它们时**不跟进实参子树**。

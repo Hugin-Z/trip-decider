@@ -189,7 +189,8 @@ class PollingCase(unittest.TestCase):
             ]
         )
 
-        self.assertEqual("COMPLETE", response["status"])
+        # R3：对外的完成态词是 `completed`（登记处内部用 COMPLETE）。
+        self.assertEqual("completed", response["status"])
         self.assertEqual(2, response["checked"])
         self.assertEqual(0, response["pending"])
         self.assertEqual("done", response["next_call"]["options"][0]["kind"])

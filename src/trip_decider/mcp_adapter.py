@@ -675,7 +675,10 @@ class TripMCPAdapter:
     def _verification_view(snapshot: Mapping[str, object]) -> dict[str, object]:
         findings = snapshot.get("findings")
         findings = findings if isinstance(findings, list) else []
-        running = str(snapshot.get("status")) == "RUNNING"
+        status = str(snapshot.get("status"))
+        # FINALIZING = 结论已到齐、后台还没宣告收工。对宿主而言仍要再取一次，
+        # 所以和 RUNNING 同样处理，但状态名如实区分（R1）。
+        running = status in {"RUNNING", "FINALIZING"}
         view = {
             "artifact_kind": "ItineraryVerification",
             "domain": "railway",
@@ -704,17 +707,36 @@ class TripMCPAdapter:
                 ],
             }
         else:
+            # R3：完成态要一眼可判——状态词固定、计数总评完整、建议动作具体。
+            summary = view["summary"]
+            flagged = summary.get("needs_confirmation") or []
+            view["status"] = "completed" if status == "COMPLETE" else "failed"
+            view["complete"] = True
+            if status == "COMPLETE":
+                detail = (
+                    f"核验完成：{summary.get('sentence')}。"
+                    + (
+                        f"建议逐条落实第 {'、'.join(str(i) for i in flagged)} 条"
+                        "——conflicting 附了两边的值，unknown 请注意它表示"
+                        "「查无实据」而不是「假」。"
+                        if flagged
+                        else "全部对得上，可以照此出行。"
+                    )
+                )
+            else:
+                detail = (
+                    f"核验中断：{snapshot.get('error')}。"
+                    f"已核出的 {summary.get('total')} 条仍然有效；"
+                    "余下的可以重新提交一次 verify_itinerary。"
+                )
             view["next_call"] = {
-                "reason": str(snapshot.get("status")),
+                "reason": view["status"].upper(),
                 "options": [
                     {
                         "kind": "done",
                         "entrypoint": "verify_itinerary",
                         "arguments": {},
-                        "detail": (
-                            "核验完成。还有别的断言要核就再调一次 "
-                            "verify_itinerary。"
-                        ),
+                        "detail": detail,
                     }
                 ],
             }
