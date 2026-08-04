@@ -13,6 +13,9 @@ dependencies = [
     "jsonschema[format-nongpl]==4.26.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest==9.0.2"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
