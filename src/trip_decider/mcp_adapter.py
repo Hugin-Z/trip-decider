@@ -1,13 +1,15 @@
 """Headless, protocol-neutral MCP-facing adapter.
 
 This module intentionally knows only the application command boundary and the
-query/read-model boundary.  It does not import HTTP, the run store, projection
-helpers, planners, or provider tools.
+query/read-model boundary.  It does not import HTTP, the run store, planners,
+or provider tools.  MCP App enrichment may consume the existing evidence
+projection, but never derives an evidence token itself.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import hashlib
 import json
 import time
@@ -18,6 +20,7 @@ from trip_decider.trip_application import (
     TripApplicationService,
 )
 from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
+from trip_decider.evidence_projection import usable_fact_values
 from trip_decider.itinerary_verification import (
     split_by_shape,
     summarize_dicts,
@@ -244,6 +247,217 @@ def _sweeten_local_transit(value: object) -> object:
     return {**value, "local_transit": sweetened}
 
 
+def _coordinate(value: object) -> dict[str, object] | None:
+    """Return an explicitly supplied point; never geocode or guess one."""
+
+    if not isinstance(value, Mapping):
+        return None
+    for key in ("position", "coordinates", "location", "center"):
+        nested = value.get(key)
+        if isinstance(nested, Mapping):
+            point = _coordinate(nested)
+            if point is not None:
+                return point
+    longitude = value.get("longitude", value.get("lon"))
+    latitude = value.get("latitude", value.get("lat"))
+    if (
+        not isinstance(longitude, (int, float))
+        or isinstance(longitude, bool)
+        or not isinstance(latitude, (int, float))
+        or isinstance(latitude, bool)
+        or not -180 <= float(longitude) <= 180
+        or not -90 <= float(latitude) <= 90
+    ):
+        return None
+    return {
+        "longitude": float(longitude),
+        "latitude": float(latitude),
+        "coordinate_system": str(
+            value.get("coordinate_system", value.get("crs", "GCJ-02"))
+            or "GCJ-02"
+        ),
+    }
+
+
+def _candidate_map(evidence: Mapping[str, object]) -> dict[str, object]:
+    """Project only fact-backed POI coordinates for one candidate card."""
+
+    markers: list[dict[str, object]] = []
+    seen: set[tuple[float, float, str]] = set()
+
+    def add(name: object, value: object, kind: str) -> None:
+        if not isinstance(name, str) or not name.strip():
+            return
+        point = _coordinate(value)
+        if point is None:
+            return
+        identity = (
+            float(point["longitude"]),
+            float(point["latitude"]),
+            name.strip(),
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        markers.append(
+            {
+                "marker_id": f"candidate-point-{len(markers) + 1}",
+                "name": name.strip(),
+                "kind": kind,
+                "position": point,
+            }
+        )
+
+    for domain, raw_item in evidence.items():
+        facts = getattr(raw_item, "facts", ())
+        value = usable_fact_values(facts)
+        for key, kind in (
+            ("attractions", "attraction"),
+            ("hotel_candidates", "accommodation"),
+            ("map_points", "place"),
+            ("places", "place"),
+        ):
+            rows = value.get(key)
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, Mapping):
+                        add(
+                            row.get("name") or row.get("display_name"),
+                            row,
+                            kind,
+                        )
+        base = value.get("hotel_area")
+        if isinstance(base, Mapping):
+            add(base.get("name"), base, "accommodation")
+        resolutions = value.get("local_transit_place_resolutions")
+        if isinstance(resolutions, Mapping):
+            for name, row in resolutions.items():
+                add(name, row, "transit_stop")
+    return {"markers": markers, "route_polylines": []}
+
+
+def _source_view(item: Mapping[str, object]) -> list[dict[str, object]]:
+    sources = item.get("sources")
+    return [
+        {
+            "provider": str(
+                source.get("provider")
+                or source.get("publisher")
+                or source.get("source_type")
+                or "未标明来源"
+            ),
+            **(
+                {"retrieved_at": str(source["retrieved_at"])}
+                if isinstance(source.get("retrieved_at"), str)
+                else {}
+            ),
+        }
+        for source in (sources if isinstance(sources, (list, tuple)) else ())
+        if isinstance(source, Mapping)
+    ]
+
+
+def _event_evidence_view(
+    plan_payload: Mapping[str, object],
+    trip_payload: Mapping[str, object],
+    evidence: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    """Resolve event fact_refs to the read-time projection already in trip().
+
+    The adapter only joins references to projection rows.  ``token`` and
+    ``next_action`` are copied verbatim from the read model; no support or
+    freshness condition exists here.
+    """
+
+    presentation = trip_payload.get("presentation")
+    statuses = (
+        presentation.get("evidence_statuses")
+        if isinstance(presentation, Mapping)
+        else None
+    )
+    status_rows = [
+        row for row in statuses if isinstance(row, Mapping)
+    ] if isinstance(statuses, list) else []
+    status_by_projection_domain = {
+        str(row.get("domain")): row for row in status_rows
+    }
+    item_by_id: dict[str, tuple[str, Mapping[str, object]]] = {}
+    for domain, item in evidence.items():
+        evidence_id = item.get("evidence_id")
+        if isinstance(evidence_id, str):
+            item_by_id[evidence_id] = (str(domain), item)
+
+    installed_plan = plan_payload.get("plan")
+    days = (
+        installed_plan.get("days")
+        if isinstance(installed_plan, Mapping)
+        else None
+    )
+    output: dict[str, object] = {}
+    for day in days if isinstance(days, list) else ():
+        if not isinstance(day, Mapping):
+            continue
+        events = day.get("events")
+        for event in events if isinstance(events, list) else ():
+            if not isinstance(event, Mapping):
+                continue
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str):
+                continue
+            references = [
+                str(reference)
+                for reference in (
+                    event.get("fact_refs")
+                    if isinstance(event.get("fact_refs"), list)
+                    else []
+                )
+                if isinstance(reference, str)
+            ]
+            grouped: dict[str, list[str]] = {}
+            unresolved: list[str] = []
+            for reference in references:
+                evidence_id = reference.partition("#")[0]
+                if evidence_id in item_by_id:
+                    grouped.setdefault(evidence_id, []).append(reference)
+                else:
+                    unresolved.append(reference)
+            badges: list[dict[str, object]] = []
+            for evidence_id, fact_refs in grouped.items():
+                domain, item = item_by_id[evidence_id]
+                projection_domain = {
+                    "railway": "railway",
+                    "map": "local_transit",
+                    "web": (
+                        "accommodation"
+                        if event.get("type") in {"hotel", "rest"}
+                        else "attraction"
+                    ),
+                }.get(domain)
+                status = status_by_projection_domain.get(
+                    str(projection_domain or "")
+                )
+                if not isinstance(status, Mapping) or not isinstance(
+                    status.get("token"), str
+                ):
+                    unresolved.extend(fact_refs)
+                    continue
+                badge = {
+                    "fact_refs": fact_refs,
+                    "label": status.get("label") or domain,
+                    "token": status["token"],
+                    "retrieved_at": status.get("retrieved_at"),
+                    "sources": _source_view(item),
+                }
+                if isinstance(status.get("next_action"), Mapping):
+                    badge["next_action"] = deepcopy(status["next_action"])
+                badges.append(badge)
+            output[event_id] = {
+                "badges": badges,
+                "unresolved_fact_refs": unresolved,
+            }
+    return output
+
+
 class TripMCPAdapter:
     """User-goal operations over the one authoritative trip runtime."""
 
@@ -423,13 +637,36 @@ class TripMCPAdapter:
     ) -> dict[str, object]:
         """Return the canonical candidate view in an MCP App envelope."""
 
-        return self._guard(
-            lambda: {
+        def operation() -> dict[str, object]:
+            candidates = self._query.candidates(run_id)
+            maps: dict[str, object] = {}
+            options = candidates.get("candidates")
+            for option in options if isinstance(options, list) else ():
+                if not isinstance(option, Mapping):
+                    continue
+                destination_id = option.get("destination_id")
+                if not isinstance(destination_id, str):
+                    continue
+                try:
+                    evidence = self._application.guided_evidence_for_selection(
+                        run_id,
+                        destination_id,
+                    )
+                except TripApplicationError:
+                    continue
+                candidate_map = _candidate_map(evidence)
+                if candidate_map["markers"]:
+                    maps[destination_id] = candidate_map
+            return {
                 "view": "candidates",
                 "run_id": run_id,
                 "current_version": None,
-                "candidates": self._query.candidates(run_id),
-            },
+                "candidates": candidates,
+                "candidate_maps": maps,
+            }
+
+        return self._guard(
+            operation,
             next_call=(
                 "候选还没准备好。advance_trip_task(run_id) 推到 "
                 "CANDIDATES_READY 再来"
@@ -444,13 +681,19 @@ class TripMCPAdapter:
 
         def operation() -> dict[str, object]:
             plan = self._query.current_plan(run_id)
+            trip = self._query.trip(run_id)
             version = plan.get("plan_version")
             return {
                 "view": "plan",
                 "run_id": run_id,
                 "current_version": version,
-                "trip": self._query.trip(run_id),
+                "trip": trip,
                 "plan": plan,
+                "event_evidence": _event_evidence_view(
+                    plan,
+                    trip,
+                    self._application.current_run_evidence(run_id),
+                ),
             }
 
         return self._guard(
@@ -718,6 +961,7 @@ class TripMCPAdapter:
         # 所以和 RUNNING 同样处理，但状态名如实区分（R1）。
         running = status in {"RUNNING", "FINALIZING"}
         view = {
+            "view": "verification",
             "artifact_kind": "ItineraryVerification",
             "domain": "railway",
             **dict(snapshot),
@@ -729,6 +973,12 @@ class TripMCPAdapter:
                 "未核验——没有核验不等于没有问题。"
             ),
         }
+        for finding in findings:
+            if finding.get("retrieved_at") is not None:
+                finding["sources"] = [{"provider": "中国铁路12306"}]
+            suggested = finding.get("suggested_action")
+            if isinstance(suggested, str) and suggested.strip():
+                finding["next_action"] = {"detail": suggested}
         if running:
             if status == "FINALIZING":
                 detail = (

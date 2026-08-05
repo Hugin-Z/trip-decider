@@ -37,6 +37,20 @@
     .card { scroll-snap-align: start; display: grid; gap: 11px; align-content: start; }
     .card h3, .panel h3, .day h3 { margin: 0; }
     .status { display: inline-flex; width: fit-content; border-radius: 999px; background: var(--accent-soft); padding: 4px 8px; font-size: .78rem; }
+    .evidence-badge { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); overflow: hidden; }
+    .evidence-badge summary { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 6px 8px; font-size: .78rem; }
+    .evidence-badge summary::marker { color: var(--muted); }
+    .token { border-radius: 999px; padding: 3px 7px; font-weight: 650; background: #7b8492; color: #fff; }
+    .token[data-token="verified"] { background: #18794e; }
+    .token[data-token="sourced_stale"],
+    .token[data-token="sourced_undated"],
+    .token[data-token="estimated"],
+    .token[data-token="estimated_stale"],
+    .token[data-token="estimated_undated"] { background: #9a6700; }
+    .token[data-token="conflicting"] { background: #c9372c; }
+    .token[data-token="unknown"] { background: #667085; }
+    .evidence-detail { display: grid; gap: 5px; border-top: 1px solid var(--line); padding: 8px; font-size: .79rem; color: var(--muted); }
+    .evidence-detail p { margin: 0; }
     dl { display: grid; grid-template-columns: minmax(88px, auto) 1fr; gap: 6px 10px; margin: 0; font-size: .87rem; }
     dt { color: var(--muted); }
     dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
@@ -51,8 +65,14 @@
     .event strong { display: block; }
     .event p { margin: 3px 0 0; color: var(--muted); font-size: .84rem; }
     .sidebar { display: grid; gap: 12px; }
-    .budget-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 7px 0; }
-    .budget-row:first-of-type { border-top: 0; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+    .data-table th, .data-table td { border-top: 1px solid var(--line); padding: 8px 6px; text-align: left; vertical-align: top; }
+    .data-table th { color: var(--muted); font-weight: 600; }
+    .data-table thead th { border-top: 0; }
+    .diff-value { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+    .diff-claim, .diff-observed { border-radius: 6px; padding: 5px 6px; overflow-wrap: anywhere; }
+    .diff-claim { background: light-dark(#fff1f0, #4a2422); }
+    .diff-observed { background: light-dark(#e8f5ee, #173d2d); }
     .route { border-top: 1px solid var(--line); padding: 8px 0; }
     .route:first-of-type { border-top: 0; }
     .route small { display: block; color: var(--muted); margin-top: 3px; }
@@ -63,13 +83,22 @@
     .notice { border-radius: 10px; background: var(--surface-soft); padding: 10px 12px; color: var(--muted); }
     /* 证据事实卡片：next_action.detail 落在卡片内部，不进全局提示区
        （docs/contracts/invariants.md I3b）。blocking 与非 blocking 要能一眼分开。 */
-    .evidence-fact { border-top: 1px solid var(--border); padding: 8px 0; display: grid; gap: 4px; }
+    .evidence-fact { border-top: 1px solid var(--line); padding: 8px 0; display: grid; gap: 4px; }
     .evidence-fact:first-of-type { border-top: 0; }
     .evidence-facts { display: grid; gap: 2px; margin-top: 8px; }
     .next-action { margin: 0; font-size: 0.85rem; color: var(--muted); }
     .next-action.blocking { color: #8a3a1a; font-weight: 600; }
     .next-action-options { margin: 2px 0 0 1rem; font-size: 0.85rem; color: var(--muted); }
     .notice.error { color: var(--warning); }
+    .map-figure { display: grid; gap: 7px; margin: 0; }
+    .map-figure figcaption { color: var(--muted); font-size: .78rem; }
+    .map-canvas { width: 100%; min-height: 190px; border: 1px solid var(--line); border-radius: 10px; background: light-dark(#f7faf9, #101b18); }
+    .map-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; opacity: .82; }
+    .map-line.schematic { stroke-dasharray: 6 5; }
+    .map-point { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+    .map-label { fill: var(--text); font-size: 10px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
+    .verification-progress { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .verification-progress .status { background: var(--surface-soft); }
     .diff-list { font-size: .86rem; }
     .hidden { display: none !important; }
     @media (max-width: 760px) {
@@ -215,45 +244,45 @@
         return list;
       };
 
-      // docs/contracts/evidence-axes.md §4.1 的 8 个 token。这里只做「token ->
-      // 中文标签」的查表；由两轴推导 token 的逻辑只存在于 evidence_core
-      // （invariants.md I6），前端不得自行推导。
-      const tokenLabels = {
-        verified: "已核实",
-        sourced_stale: "较早数据",
-        sourced_undated: "来源未记录采集时间",
-        estimated: "推算值",
-        estimated_stale: "较早推算值",
-        estimated_undated: "推算值，未记录采集时间",
-        conflicting: "来源不一致",
-        unknown: "尚未取得",
-      };
-
-      // 每条事实一张卡片。next_action 只在 token !== "verified" 时存在
-      // （§5.1 双向约束），因此它的有无就是渲染分支；detail 必须落在这张卡片
-      // 内部，不能挪到全局提示区——它说的是这一条事实缺什么。
+      // UI 只透传读取层给出的 token，不含 support/freshness 判定或 token 映射。
+      // 颜色由 CSS 的 data-token 选择器负责；next_action.detail 留在事实内部。
       const evidenceCard = (item) => {
-        const card = element("article", "evidence-fact");
-        card.append(element("strong", "", item.label || item.domain || "事实"));
-        const token = item.token || "unknown";
-        card.append(element("span", "status", tokenLabels[token] || "待核验"));
-        if (finite(item.count)) card.append(element("span", "muted", `${item.count} 项`));
+        const card = element("details", "evidence-badge");
+        const summary = element("summary");
+        summary.append(element("strong", "", item.label || item.domain || "事实"));
+        const token = element(
+          "span",
+          "token",
+          typeof item.token === "string" ? item.token : "token 未提供",
+        );
+        if (typeof item.token === "string") token.dataset.token = item.token;
+        summary.append(token);
+        if (finite(item.count)) summary.append(element("span", "muted", `${item.count} 项`));
+        card.append(summary);
+        const detail = element("div", "evidence-detail");
+        detail.append(element("p", "", `采集时间：${item.retrieved_at || "未取得"}`));
+        const sources = Array.isArray(item.sources) ? item.sources : [];
+        detail.append(element(
+          "p",
+          "",
+          `来源：${sources.length ? sources.map((source) => source.provider || "未标明来源").join("、") : "未取得"}`,
+        ));
         const action = item.next_action;
         if (action && action.detail) {
-          const note = element(
+          detail.append(element(
             "p",
             action.blocking ? "next-action blocking" : "next-action",
-            action.detail,
-          );
-          card.append(note);
+            `下一步：${action.detail}`,
+          ));
           if (Array.isArray(action.options) && action.options.length) {
             const choices = element("ul", "next-action-options");
             action.options.forEach((choice) => {
               choices.append(element("li", "", choice.label || choice.option_id));
             });
-            card.append(choices);
+            detail.append(choices);
           }
         }
+        card.append(detail);
         return card;
       };
 
@@ -267,6 +296,93 @@
         }
         rows.forEach((item) => panel.append(evidenceCard(item)));
         return panel;
+      };
+
+      const svgElement = (tag) => document.createElementNS("http://www.w3.org/2000/svg", tag);
+      const mapPoint = (value) => {
+        if (!value || typeof value !== "object") return null;
+        const nested = value.position || value.coordinates || value.location || value.center;
+        if (nested && nested !== value) {
+          const point = mapPoint(nested);
+          if (point) return point;
+        }
+        const longitude = value.longitude ?? value.lon;
+        const latitude = value.latitude ?? value.lat;
+        if (!finite(longitude) || !finite(latitude)) return null;
+        if (longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) return null;
+        return {longitude, latitude};
+      };
+
+      // Self-contained SVG: it uses only supplied coordinates and explicit route
+      // geometry/endpoints. No tile request, geocoding, or name-to-coordinate guess.
+      const mapFigure = (model, title) => {
+        const markerRows = Array.isArray(model?.markers) ? model.markers : [];
+        const routeRows = Array.isArray(model?.route_polylines) ? model.route_polylines : [];
+        const markers = markerRows.map((marker) => ({marker, point: mapPoint(marker.position || marker)})).filter((item) => item.point);
+        const markerById = new Map(markers.map((item) => [item.marker.marker_id, item.point]));
+        const routes = routeRows.map((route) => {
+          const supplied = Array.isArray(route.polyline) ? route.polyline.map(mapPoint).filter(Boolean) : [];
+          if (supplied.length >= 2) return {route, points: supplied, schematic: route.geometry_status !== "EXISTING_POLYLINE"};
+          const from = markerById.get(route.from_marker_id);
+          const to = markerById.get(route.to_marker_id);
+          return from && to ? {route, points: [from, to], schematic: true} : null;
+        }).filter(Boolean);
+        const allPoints = [...markers.map((item) => item.point), ...routes.flatMap((item) => item.points)];
+        if (!allPoints.length) return null;
+        const width = 720;
+        const height = 300;
+        const inset = 34;
+        const longitudes = allPoints.map((point) => point.longitude);
+        const latitudes = allPoints.map((point) => point.latitude);
+        const minLon = Math.min(...longitudes);
+        const maxLon = Math.max(...longitudes);
+        const minLat = Math.min(...latitudes);
+        const maxLat = Math.max(...latitudes);
+        const lonSpan = Math.max(maxLon - minLon, 0.01);
+        const latSpan = Math.max(maxLat - minLat, 0.01);
+        const project = (point) => ({
+          x: maxLon === minLon
+            ? width / 2
+            : inset + ((point.longitude - minLon) / lonSpan) * (width - inset * 2),
+          y: maxLat === minLat
+            ? height / 2
+            : height - inset - ((point.latitude - minLat) / latSpan) * (height - inset * 2),
+        });
+        const palette = ["#156b55", "#3b82f6", "#8b5cf6", "#d97706", "#db2777"];
+        const figure = element("figure", "map-figure");
+        const svg = svgElement("svg");
+        svg.classList.add("map-canvas");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("aria-label", title);
+        routes.forEach(({route, points, schematic}, index) => {
+          const line = svgElement("polyline");
+          line.classList.add("map-line");
+          if (schematic) line.classList.add("schematic");
+          line.setAttribute("points", points.map((point) => {
+            const placed = project(point);
+            return `${placed.x},${placed.y}`;
+          }).join(" "));
+          const day = Number(route.day);
+          line.style.stroke = palette[Number.isFinite(day) && day > 0 ? (day - 1) % palette.length : index % palette.length];
+          svg.append(line);
+        });
+        markers.forEach(({marker, point}) => {
+          const placed = project(point);
+          const dot = svgElement("circle");
+          dot.classList.add("map-point");
+          dot.setAttribute("cx", String(placed.x));
+          dot.setAttribute("cy", String(placed.y));
+          dot.setAttribute("r", "5");
+          const label = svgElement("text");
+          label.classList.add("map-label");
+          label.setAttribute("x", String(placed.x + 8));
+          label.setAttribute("y", String(placed.y - 7));
+          label.textContent = marker.display_name || marker.name || "POI";
+          svg.append(dot, label);
+        });
+        figure.append(svg, element("figcaption", "", "GCJ-02 坐标示意；虚线表示只有端点或明确标为示意的连接，不代表真实道路几何。"));
+        return figure;
       };
 
       const renderCandidates = (payload) => {
@@ -293,6 +409,11 @@
               ["预算余量", money(option.budget_headroom_after_known_transport_cny)],
             ])
           );
+          const candidateMap = mapFigure(
+            payload.candidate_maps?.[option.destination_id],
+            `${title} POI 坐标`,
+          );
+          if (candidateMap) card.append(candidateMap);
           if (Array.isArray(option.evidence_statuses) && option.evidence_statuses.length) {
             const facts = element("div", "evidence-facts");
             option.evidence_statuses.forEach((item) => facts.append(evidenceCard(item)));
@@ -338,8 +459,39 @@
 
       const eventDetail = (event) => {
         const parts = [];
+        if (typeof event.detail === "string" && event.detail.trim()) parts.push(event.detail.trim());
+        const legs = Array.isArray(event.legs) ? event.legs : [];
+        legs.forEach((leg) => {
+          if (leg.mode === "walk" && finite(leg.distance_meters)) {
+            parts.push(`步行 ${Math.round(leg.distance_meters)} 米`);
+          } else if (leg.mode === "ride") {
+            const service = leg.service || "线路待核验";
+            const stops = leg.board_at || leg.alight_at ? `（${leg.board_at || "上车点待核验"} 上车，${leg.alight_at || "下车点待核验"} 下车）` : "";
+            const count = finite(leg.stop_count) ? `，${leg.stop_count} 站` : "";
+            parts.push(`乘 ${service}${stops}${count}`);
+          }
+        });
+        if (!legs.length && Array.isArray(event.services)) {
+          event.services.forEach((service) => {
+            parts.push(`乘 ${service.service || "线路待核验"}（${service.board_at || "上车点待核验"} 上车，${service.alight_at || "下车点待核验"} 下车）`);
+          });
+        }
+        if (Array.isArray(event.transfers) && event.transfers.length) {
+          const transferText = event.transfers.map((item) => {
+            if (!item || typeof item !== "object") return String(item);
+            const services = [item.from_service, item.to_service].filter(Boolean).join(" → ");
+            const stops = [item.alight_at, item.board_at].filter(Boolean).join(" → ");
+            return [services, stops].filter(Boolean).join("（") + (services && stops ? "）" : "");
+          }).filter(Boolean);
+          if (transferText.length) parts.push(`换乘：${transferText.join("、")}`);
+        }
+        if (finite(event.headway_minutes)) parts.push(`约每 ${event.headway_minutes} 分钟一班`);
+        if (event.first_departure || event.last_departure) {
+          parts.push(`运营 ${event.first_departure || "首班待核验"}–${event.last_departure || "末班待核验"}`);
+        }
         if (finite(event.duration_seconds)) parts.push(duration(event.duration_seconds));
         if (finite(event.distance_meters)) parts.push(`${(event.distance_meters / 1000).toFixed(1)}公里`);
+        if (finite(event.walking_distance_meters)) parts.push(`合计步行${Math.round(event.walking_distance_meters)}米`);
         if (finite(event.planning_allocation_minutes)) parts.push(`游览${event.planning_allocation_minutes}分钟`);
         const amount = event.fare?.amount_cny ?? event.cost?.amount_cny;
         if (finite(amount)) parts.push(money(amount));
@@ -366,6 +518,15 @@
             const copy = element("div");
             copy.append(element("strong", "", event.name || "未命名事件"));
             copy.append(element("p", "", eventDetail(event)));
+            const projected = payload.event_evidence?.[event.event_id];
+            if (Array.isArray(projected?.badges) && projected.badges.length) {
+              const badges = element("div", "evidence-facts");
+              projected.badges.forEach((badge) => badges.append(evidenceCard(badge)));
+              copy.append(badges);
+            }
+            if (Array.isArray(projected?.unresolved_fact_refs) && projected.unresolved_fact_refs.length) {
+              copy.append(element("p", "muted", `${projected.unresolved_fact_refs.length} 条事实引用当前没有可展示投影。`));
+            }
             row.append(copy);
             events.append(row);
           });
@@ -378,15 +539,34 @@
         const sidebar = element("aside", "sidebar");
         const budgetPanel = element("section", "panel");
         budgetPanel.append(element("h3", "", "预算"));
+        const budgetTable = element("table", "data-table");
+        const budgetHead = element("thead");
+        const budgetHeadRow = element("tr");
+        ["项目", "金额", "状态"].forEach((label) => budgetHeadRow.append(element("th", "", label)));
+        budgetHead.append(budgetHeadRow);
+        const budgetBody = element("tbody");
         (presentation.budget_summary || []).forEach((item) => {
-          const row = element("div", "budget-row");
-          const parts = [];
-          if (finite(item.known_cny) && item.known_cny > 0) parts.push(`已知 ${money(item.known_cny)}`);
-          if (finite(item.estimated_cny) && item.estimated_cny > 0) parts.push(`估算 ${money(item.estimated_cny)}`);
-          if (item.unknown) parts.push("另有金额待核验");
-          row.append(element("strong", "", item.label), element("span", "", parts.join(" · ") || "待核验"));
-          budgetPanel.append(row);
+          const row = element("tr");
+          const amounts = [];
+          const states = [];
+          if (finite(item.known_cny) && item.known_cny > 0) {
+            amounts.push(money(item.known_cny));
+            states.push("已知");
+          }
+          if (finite(item.estimated_cny) && item.estimated_cny > 0) {
+            amounts.push(money(item.estimated_cny));
+            states.push("估算");
+          }
+          if (item.unknown) states.push("含待核验金额");
+          row.append(
+            element("td", "", item.label),
+            element("td", "", amounts.join(" + ") || "—"),
+            element("td", "", states.join(" / ") || "无已知支出"),
+          );
+          budgetBody.append(row);
         });
+        budgetTable.append(budgetHead, budgetBody);
+        budgetPanel.append(budgetTable);
         sidebar.append(budgetPanel);
 
         const missingPanel = element("section", "panel");
@@ -408,13 +588,20 @@
         sidebar.append(missingPanel);
         sidebar.append(evidencePanel(presentation.evidence_statuses));
 
+        const planMap = mapFigure(presentation.map_payload, "逐日行程 POI 与路线");
+        if (planMap) {
+          const mapPanel = element("section", "panel");
+          mapPanel.append(element("h3", "", "地图"), planMap);
+          sidebar.append(mapPanel);
+        }
+
         const routesPanel = element("section", "panel");
         routesPanel.append(element("h3", "", "路线摘要"));
         const routes = presentation.map_payload?.route_polylines || [];
         routes.forEach((route) => {
           const row = element("div", "route");
           row.append(element("strong", "", `${route.from || "起点"} → ${route.to || "终点"}`));
-          row.append(element("small", "", `${route.transport_mode || "方式待核验"} · ${duration(route.duration_seconds)} · ${route.evidence_status || "待核验"}`));
+          row.append(element("small", "", `${route.transport_mode || "方式待核验"} · ${duration(route.duration_seconds)} · ${route.token || "token 未提供"}`));
           routesPanel.append(row);
         });
         if (!routes.length) routesPanel.append(element("p", "muted", "路线数据待核验。"));
@@ -449,13 +636,16 @@
             });
             const next = structured(response);
             if (next?.plan) {
-              renderPlan({
-                view: "plan",
-                run_id: payload.run_id,
-                current_version: next.plan.plan_version,
-                trip: next.trip,
-                plan: next.plan,
-              });
+              // 重新走唯一展示入口，取得与新 PlanVersion 对应的读时证据徽章；
+              // revise 的结构化结果仍是失败时可保留的完整业务回退。
+              try {
+                const refreshed = structured(await callTool("show_trip_plan", {run_id: payload.run_id}));
+                if (refreshed) renderPayload(refreshed);
+                else renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
+              } catch (_) {
+                renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
+                revisionPanel.append(element("div", "notice error", "行程已修改，但证据徽章刷新失败；可在对话中再次打开当前行程。"));
+              }
             }
           } catch (_) {
             revisionPanel.append(element("div", "notice error", "本次修改未安装；当前版本保持不变。可在对话中补充修改要求。"));
@@ -488,10 +678,115 @@
         app.append(grid);
       };
 
+      const compactValue = (value) => {
+        if (value === null || value === undefined || value === "") return "—";
+        if (typeof value === "object") return JSON.stringify(value, null, 2);
+        return String(value);
+      };
+
+      const claimText = (claim) => {
+        if (!claim || typeof claim !== "object") return "断言内容缺失";
+        const route = [claim.origin_station, claim.destination_station].filter(Boolean).join(" → ");
+        const parts = [claim.train_code, route, claim.departure_at, finite(claim.price_cny) ? money(claim.price_cny) : null].filter(Boolean);
+        return parts.join(" · ") || compactValue(claim);
+      };
+
+      const renderVerification = (payload) => {
+        app.replaceChildren();
+        const summary = payload.summary || {};
+        const total = finite(payload.total) ? payload.total : summary.total || 0;
+        app.append(heading(
+          "行程核验报告",
+          `${total} 条：${summary.sourced || 0} sourced / ${summary.conflicting || 0} conflicting / ${summary.unknown || 0} unknown`,
+        ));
+        const progress = element("section", "panel verification-progress");
+        progress.append(
+          element("span", "status", `status: ${payload.status || "未提供"}`),
+          element("span", "", `已核 ${payload.checked || 0} / ${total}`),
+          element("span", "", `待核 ${payload.pending || 0}`),
+        );
+        if (!payload.terminal && payload.verify_id) {
+          const refresh = element("button", "button", "刷新核验进度");
+          refresh.type = "button";
+          refresh.addEventListener("click", async () => {
+            if (busy) return;
+            busy = true;
+            refresh.disabled = true;
+            refresh.textContent = "正在刷新…";
+            try {
+              const response = await callTool("read_verification", {verify_id: payload.verify_id});
+              const next = structured(response);
+              if (next) renderVerification(next);
+            } catch (_) {
+              refresh.disabled = false;
+              refresh.textContent = "重试刷新";
+              progress.append(element("span", "notice error", "刷新失败；已显示的增量结果仍然有效。"));
+            } finally {
+              busy = false;
+            }
+          });
+          progress.append(refresh);
+        }
+        app.append(progress);
+
+        const panel = element("section", "panel");
+        const table = element("table", "data-table");
+        const head = element("thead");
+        const headRow = element("tr");
+        ["断言内容", "核验结果", "详情"].forEach((label) => headRow.append(element("th", "", label)));
+        head.append(headRow);
+        const body = element("tbody");
+        const findings = Array.isArray(payload.findings) ? payload.findings : [];
+        findings.forEach((finding) => {
+          const row = element("tr");
+          const claim = element("td", "", claimText(finding.claim));
+          const result = element("td");
+          result.append(evidenceCard({
+            label: `第 ${finding.index || "?"} 条`,
+            token: finding.token,
+            retrieved_at: finding.retrieved_at,
+            sources: finding.sources,
+            next_action: finding.next_action,
+          }));
+          const detail = element("td");
+          const mismatches = Array.isArray(finding.mismatches) ? finding.mismatches : [];
+          mismatches.forEach((mismatch) => {
+            const item = element("div");
+            item.append(element("strong", "", mismatch.field || "差异"));
+            const pair = element("div", "diff-value");
+            pair.append(
+              element("div", "diff-claim", `声称：${compactValue(mismatch.claimed)}`),
+              element("div", "diff-observed", `实查：${compactValue(mismatch.observed)}`),
+            );
+            item.append(pair);
+            detail.append(item);
+          });
+          if (!mismatches.length) {
+            const observed = finding.observed ? `实查：${compactValue(finding.observed)}` : "没有取得可对照值";
+            detail.append(element("p", "", observed));
+          }
+          if (finding.reason) detail.append(element("p", "muted", `说明：${finding.reason}`));
+          if (finding.next_action?.detail) detail.append(element("p", "next-action", `建议：${finding.next_action.detail}`));
+          row.append(claim, result, detail);
+          body.append(row);
+        });
+        if (!findings.length) {
+          const row = element("tr");
+          const cell = element("td", "muted", "结论正在增量到达；刷新后会追加到这里。");
+          cell.colSpan = 3;
+          row.append(cell);
+          body.append(row);
+        }
+        table.append(head, body);
+        panel.append(table);
+        app.append(panel, element("p", "muted", payload.scope_note || ""));
+      };
+
       const renderPayload = (payload) => {
         if (!payload || typeof payload !== "object") return;
         if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
         else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
+        else if (payload.view === "verification" || payload.artifact_kind === "ItineraryVerification") renderVerification(payload);
       };
 
       if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);

@@ -104,8 +104,8 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
         name="trip-decider-workspace",
         title="Trip Decider 交互工作台",
         description=(
-            "交互工作台：渲染目的地比较与已安装行程，每条数据旁标注证据状态与"
-            "采集时间。不持有业务状态。"
+            "交互工作台：渲染目的地比较、已安装行程和核验报告，每条数据旁标注"
+            "证据状态与采集时间；有明确坐标时增强为内嵌地图。不持有业务状态。"
         ),
         mime_type=TRIP_MCP_APP_MIME_TYPE,
         meta={"ui": {"prefersBorder": True}},
@@ -419,6 +419,11 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             "不会重复打 12306。已核出的部分是最终结论，不会再变。"
         ),
         annotations=_VERIFYING,
+        meta={
+            **_APP_RENDER_META,
+            "openai/toolInvocation/invoking": "正在建立核验报告…",
+            "openai/toolInvocation/invoked": "核验报告已建立",
+        },
         structured_output=True,
     )
     def verify_itinerary(
@@ -445,6 +450,11 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             "会明确报「这个 id 不存在」而不是假装还在跑。"
         ),
         annotations=_READ_ONLY,
+        meta={
+            **_APP_RENDER_META,
+            "openai/toolInvocation/invoking": "正在刷新核验进度…",
+            "openai/toolInvocation/invoked": "核验进度已刷新",
+        },
         structured_output=True,
     )
     def read_verification(verify_id: str) -> dict[str, Any]:

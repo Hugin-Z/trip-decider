@@ -313,11 +313,18 @@ class TripMCPAdapterTests(unittest.TestCase):
                         )
                         render_tools = {
                             tool.name: tool for tool in tools.tools
-                            if tool.name.startswith("show_trip_")
+                            if tool.meta
+                            and tool.meta.get("ui", {}).get("resourceUri")
+                            == TRIP_MCP_APP_URI
                         }
                         self.assertEqual(
                             set(render_tools),
-                            {"show_trip_candidates", "show_trip_plan"},
+                            {
+                                "show_trip_candidates",
+                                "show_trip_plan",
+                                "verify_itinerary",
+                                "read_verification",
+                            },
                         )
                         for tool in render_tools.values():
                             self.assertEqual(
@@ -331,6 +338,8 @@ class TripMCPAdapterTests(unittest.TestCase):
                             "revise_trip_plan",
                             "show_trip_candidates",
                             "show_trip_plan",
+                            "verify_itinerary",
+                            "read_verification",
                         ):
                             self.assertIn(
                                 "app",
@@ -366,6 +375,9 @@ class TripMCPAdapterTests(unittest.TestCase):
                             '"select_trip_candidate"',
                             '"advance_trip_task"',
                             '"revise_trip_plan"',
+                            '"read_verification"',
+                            "renderVerification",
+                            "mapFigure",
                             "requestDisplayMode",
                         ):
                             self.assertIn(required, app_html)
