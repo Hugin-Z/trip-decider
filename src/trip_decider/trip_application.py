@@ -80,18 +80,60 @@ BACKGROUND_DRIVE_BUDGET_SECONDS = ACTION_STALL_SECONDS + 15.0
 
 
 
+def _submitted_domain(evidence: object) -> str | None:
+    """这次提交的是哪个域。用于回报解析出的事实条数。"""
+
+    if isinstance(evidence, EvidenceItem):
+        return evidence.domain
+    if isinstance(evidence, Mapping):
+        for key in ("action_id", "domain"):
+            value = evidence.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 class TripApplicationError(ValueError):
     """A caller supplied an invalid application command."""
 
 
 @dataclass(frozen=True)
 class ApplicationOutcome:
-    """Transport-neutral result of a command."""
+    """Transport-neutral result of a command.
+
+    **``accepted=False`` 必须带 ``rejection_reason``**（D20：把纪律做成形状）。
+
+    第六次实测的挂点就是一次「半接受」：证据实际入库、事件流写下
+    `support: sourced`，返回体却是 `accepted: false` 且不给任何理由。宿主连试
+    三轮、拿不到一个字段名，只能止损。根因是 `submit_run_evidence` 忘了传
+    ``accepted=True``——而 ``accepted`` 有默认值 ``False``，忘了传不会报错。
+
+    默认值保留（大量既有构造点靠它表达「这条命令不是收活的」），但一旦显式
+    否定就必须解释。构造后校验而不是靠调用方自觉：静默拒绝在形状上不可能。
+    """
 
     run_id: str
     accepted: bool = False
     action_loop: Mapping[str, object] | None = None
     audit_execution: Mapping[str, object] | None = None
+    #: 否定语义的解释。``accepted`` 为假**且本次命令是收活的**时必填。
+    rejection_reason: str | None = None
+    #: 这次提交真正解析出多少条字段级事实。0 与 None 是两回事：
+    #: 0 是「解析了，一条都没解析出来」，None 是「这条命令不涉及解析」。
+    parsed_facts_count: int | None = None
+    missing_keys: tuple[str, ...] = ()
+    schema_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.parsed_facts_count is not None
+            and not self.accepted
+            and not self.rejection_reason
+        ):
+            raise ValueError(
+                "收活的命令返回 accepted=False 时必须给 rejection_reason——"
+                "静默拒绝正是第六次实测宿主止损的原因"
+            )
 
 
 EvidenceCollector = Callable[[TravelIntent], EvidenceItem]
@@ -486,7 +528,39 @@ class TripApplicationService:
             evidence,
             store=self.store,
         )
-        return ApplicationOutcome(run_id, action_loop=action_state)
+        # 走到这里就是收下了：`submit_evidence` 不合契约时抛异常，不静默返回。
+        # 此前这里漏了 accepted=True，而它的默认值是 False——于是一次成功的
+        # 提交对外报「未接受」，宿主连试三轮不知道自己其实已经交上了。
+        return ApplicationOutcome(
+            run_id,
+            accepted=True,
+            action_loop=action_state,
+            parsed_facts_count=self._parsed_facts_count(run_id, evidence),
+        )
+
+    def _parsed_facts_count(
+        self,
+        run_id: str,
+        evidence: EvidenceItem | Mapping[str, object],
+    ) -> int:
+        """这次提交真正解析出多少条字段级事实。
+
+        `status=missing` 的提交是合法的（「我查过了，没查到」），它的 ``value``
+        是 ``None``、解析出 0 条事实——**0 不是错误**，正是这条提交要表达的东西。
+        所以这里逐层防御取值，任何一层缺失都归 0，而不是让读取本身炸掉。
+        """
+
+        domain = _submitted_domain(evidence)
+        if not domain:
+            return 0
+        stored = self.current_run_evidence(run_id).get(domain)
+        if not isinstance(stored, Mapping):
+            return 0
+        value = stored.get("value")
+        if not isinstance(value, Mapping):
+            return 0
+        facts = value.get("facts")
+        return len(facts) if isinstance(facts, list) else 0
 
     def select_hotel(
         self,

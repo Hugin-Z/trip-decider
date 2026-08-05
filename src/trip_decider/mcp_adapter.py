@@ -1205,11 +1205,29 @@ def _with_outcome(
     outcome: object,
 ) -> dict[str, object]:
     action_loop = getattr(outcome, "action_loop", None)
-    return {
+    accepted = bool(getattr(outcome, "accepted", False))
+    view: dict[str, object] = {
         "trip": trip,
-        "accepted": bool(getattr(outcome, "accepted", False)),
+        "accepted": accepted,
         "action_loop": dict(action_loop) if isinstance(action_loop, Mapping) else None,
     }
+    # 收活的命令要回报「解析出多少条事实」。宿主此前只看到 accepted:false，
+    # 无从判断证据到底进没进去（实际是进了）——数字比布尔诚实得多。
+    parsed = getattr(outcome, "parsed_facts_count", None)
+    if parsed is not None:
+        view["parsed_facts_count"] = int(parsed)
+    # 否定语义必须自带解释（D20 的运行时那一半）。
+    if not accepted:
+        reason = getattr(outcome, "rejection_reason", None)
+        if reason:
+            view["rejection_reason"] = reason
+        missing_keys = tuple(getattr(outcome, "missing_keys", ()) or ())
+        if missing_keys:
+            view["missing_keys"] = list(missing_keys)
+        schema_ref = getattr(outcome, "schema_ref", None)
+        if schema_ref:
+            view["schema_ref"] = schema_ref
+    return view
 
 
 __all__ = ["TripMCPAdapter", "TripMCPError"]
