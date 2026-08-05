@@ -174,6 +174,35 @@ B1（五态在产品路径不存在）、M2（STALE 不暴露刷新信号）、M
 
 三条必须全测。只测第 1 条不足以证明不变式贯穿到判定层。
 
+### 优先级重估（2026-08-04，第五次实测后）
+
+hotel_price 五次实测五次被宿主点名「无可靠数据源」，因此实查了一次高德 POI 的
+可得性，看够不够支撑「价格区间」这个粒度。
+
+**结论：不够。数据源侧一个价格字段都没有。** I4 维持登记。
+
+实查（婺源 adcode 361130，`/v5/place/text` 取 10 家住宿，`show_fields` 把
+business / indoor / navi / photos / children 全要上）：
+
+| 查什么 | 结果 |
+|---|---|
+| `business` 的全部非空键 | `keytag` / `rating` / `rectag` / `tel` / `business_area` |
+| 整份响应里 `cost` | 0 次 |
+| 整份响应里 `price` | 0 次 |
+| 整份响应里 `avg_price` | 0 次 |
+| 整份响应里 `均价` | 0 次 |
+
+唯一沾边的是 `rating`（3.2–4.9），那是**评分不是价格**，两者之间没有任何可推
+导的关系——拿评分折算房价正是「不猜」要防的那种编造。
+
+所以这不是「精度不够」而是「字段不存在」：给 I4 解冻需要**另接一个数据源**
+（订房平台一类），属新增外部依赖，不在当前冻结范围内。
+
+**给冻结决策的量级估计**（若将来要做）：新数据源的接入本身不大，难的是它带来的
+连锁——新 data_type 的 freshness 策略、证据门、`stale_allowed` 判定、以及
+hotel_price 一旦可得，`I4` 的第 2、3 条断言才第一次有机会跑起来。建议不要在
+冻结前塞。
+
 ### 当前状态：部分成立，但未被贯穿核对
 
 `evidence_broker.py:190-192` 的 `stale_after_failure()` 对 `not policy.stale_allowed` 直接 `return None`，即缓存层行为正确。但现有测试 `tests/test_evidence_broker.py:113-129`（`test_expired_or_never_stale_values_are_not_reused`）只断言上述第 1 条，第 2、3 条无覆盖。且 `hotel_price` 当前在产品路径中无生产者（`status == planned`，`freshness-policy.md` §2.2），因此第 2、3 条**在 P5 生产者落地前无法构造场景**——该部分测试登记为阻塞项。
