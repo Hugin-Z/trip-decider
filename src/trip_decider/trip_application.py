@@ -82,19 +82,6 @@ BACKGROUND_DRIVE_BUDGET_SECONDS = ACTION_STALL_SECONDS + 15.0
 
 
 
-def _submitted_domain(evidence: object) -> str | None:
-    """这次提交的是哪个域。用于回报解析出的事实条数。"""
-
-    if isinstance(evidence, EvidenceItem):
-        return evidence.domain
-    if isinstance(evidence, Mapping):
-        for key in ("action_id", "domain"):
-            value = evidence.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
-
-
 class TripApplicationError(ValueError):
     """A caller supplied an invalid application command."""
 
@@ -574,17 +561,19 @@ class TripApplicationService:
         所以这里逐层防御取值，任何一层缺失都归 0，而不是让读取本身炸掉。
         """
 
-        domain = _submitted_domain(evidence)
-        if not domain:
+        del run_id
+        try:
+            if isinstance(evidence, EvidenceItem):
+                item = evidence
+            else:
+                raw = dict(evidence)
+                raw.pop("action_id", None)
+                item = EvidenceItem.from_mapping(raw)
+        except (TypeError, ValueError, TravelAgentError):
             return 0
-        stored = self.current_run_evidence(run_id).get(domain)
-        if not isinstance(stored, Mapping):
-            return 0
-        value = stored.get("value")
-        if not isinstance(value, Mapping):
-            return 0
-        facts = value.get("facts")
-        return len(facts) if isinstance(facts, list) else 0
+        # 只报**本次记录**解析出的事实，不读合并后的整域累计值。否则一条
+        # 0-fact 提交会借旧记录的 facts 对外报非零（D22）。
+        return len(item.facts)
 
     def select_hotel(
         self,

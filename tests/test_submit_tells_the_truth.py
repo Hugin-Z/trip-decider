@@ -28,11 +28,17 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from trip_decider.agent_actions import submit_evidence
+from trip_decider.agent_actions import (
+    _DOMAINS,
+    execute_registered_action,
+    pending_action_schemas,
+    submit_evidence,
+)
 from trip_decider.evidence_broker import EvidenceBroker
 from trip_decider.evidence_projection import usable_fact_values
 from trip_decider.mcp_adapter import TripMCPAdapter
@@ -151,6 +157,267 @@ class NoHalfAcceptanceCase(_Harness):
             len(usable_fact_values(stored_facts).get("local_transit") or []),
         )
 
+    def test_published_local_transit_example_completes_the_full_chain(
+        self,
+    ) -> None:
+        """决定性测试 v2：外部方只照 missing 公布的形状回喂。
+
+        v1 把 live-query 的内部对象交给 user_supply，只证明两条入口共用
+        extractor；这条不读任何内部 value 结构，只消费 pending_action 的
+        ``submit_action_id`` 与 ``example``，再看字段级事实与 read model。
+        """
+
+        for item in (controlled_railway(), controlled_web()):
+            self.adapter.submit_trip_evidence(
+                self.run_id,
+                {
+                    "action_id": item.domain,
+                    "value": dict(item.value),
+                    "sources": [dict(source) for source in item.sources],
+                },
+            )
+        self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                "action_id": "map",
+                "status": "missing",
+                "missing_reason": "宿主地图查询没有返回路线",
+            },
+        )
+        execute_registered_action(self.run_id, "planner", store=self.store)
+
+        missing = self.adapter.read_trip(self.run_id, view="missing")
+        action = next(
+            item
+            for item in missing["pending_actions"]
+            if item["action_id"] == "local_transit_manual"
+        )
+        before = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["local_transit_count"]
+
+        # 旧说明书只公布一个 JSON 字符串。外部方没有内部结构可参考，只能把
+        # example 原值作为工具 schema 所说的 value 提交；修复后的完整 example
+        # 则应当能够不加解释地原样提交。
+        example = action["example"]
+        submission = (
+            dict(example)
+            if isinstance(example, dict)
+            else {
+                "action_id": action["submit_action_id"],
+                "value": example,
+                "sources": [
+                    {
+                        "provider": "external-host",
+                        "retrieved_at": "2026-08-05T13:30:00+08:00",
+                    }
+                ],
+            }
+        )
+        response = self.adapter.submit_trip_evidence(
+            self.run_id,
+            submission,
+        )
+
+        self.assertGreater(
+            response["parsed_facts_count"],
+            0,
+            "missing 公布的 example 被 accepted，却没有解析出字段级事实",
+        )
+        execute_registered_action(self.run_id, "planner", store=self.store)
+        after = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["local_transit_count"]
+        self.assertGreater(
+            after,
+            before,
+            "照 example 提交后，collected_information.local_transit_count 没增长",
+        )
+
+    def test_published_accommodation_example_completes_the_full_chain(
+        self,
+    ) -> None:
+        rail = controlled_railway()
+        self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                "action_id": "railway",
+                "value": dict(rail.value),
+                "sources": [dict(source) for source in rail.sources],
+            },
+        )
+        for action_id in ("web", "map"):
+            self.adapter.submit_trip_evidence(
+                self.run_id,
+                {
+                    "action_id": action_id,
+                    "status": "missing",
+                    "missing_reason": f"{action_id} 查询没有返回结果",
+                },
+            )
+        execute_registered_action(self.run_id, "planner", store=self.store)
+
+        action = next(
+            item
+            for item in self.adapter.read_trip(
+                self.run_id,
+                view="missing",
+            )["pending_actions"]
+            if item["action_id"] == "accommodation_base_manual"
+        )
+        before = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["accommodation_base"]
+        response = self.adapter.submit_trip_evidence(
+            self.run_id,
+            deepcopy(action["example"]),
+        )
+
+        self.assertGreater(response["parsed_facts_count"], 0)
+        execute_registered_action(self.run_id, "planner", store=self.store)
+        after = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["accommodation_base"]
+        self.assertFalse(before)
+        self.assertTrue(
+            after,
+            "照住宿 example 提交后，collected_information.accommodation_base 未增长",
+        )
+
+    def test_published_attraction_example_completes_the_full_chain(
+        self,
+    ) -> None:
+        """外部方只读 attraction pending schema 也能补进景点事实。"""
+
+        rail = controlled_railway()
+        self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                "action_id": "railway",
+                "value": dict(rail.value),
+                "sources": [dict(source) for source in rail.sources],
+            },
+        )
+        for action_id in ("web", "map"):
+            self.adapter.submit_trip_evidence(
+                self.run_id,
+                {
+                    "action_id": action_id,
+                    "status": "missing",
+                    "missing_reason": f"{action_id} 查询没有返回结果",
+                },
+            )
+        execute_registered_action(self.run_id, "planner", store=self.store)
+
+        action = next(
+            item
+            for item in self.adapter.read_trip(
+                self.run_id,
+                view="missing",
+            )["pending_actions"]
+            if item["submit_action_id"] == "web"
+        )
+        before = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["attraction_count"]
+        response = self.adapter.submit_trip_evidence(
+            self.run_id,
+            deepcopy(action["example"]),
+        )
+
+        self.assertGreater(response["parsed_facts_count"], 0)
+        execute_registered_action(self.run_id, "planner", store=self.store)
+        after = self.adapter.read_trip(self.run_id)["presentation"][
+            "planning_draft"
+        ]["collected_information"]["attraction_count"]
+        self.assertEqual(0, before)
+        self.assertGreater(
+            after,
+            before,
+            "照 attraction example 提交后，attraction_count 仍为 0",
+        )
+
+    def test_every_published_user_supply_example_is_directly_replayable(
+        self,
+    ) -> None:
+        """扫描式契约：missing 公布多少 example，机器就原样吃多少。"""
+
+        for action_id in _DOMAINS:
+            self.adapter.submit_trip_evidence(
+                self.run_id,
+                {
+                    "action_id": action_id,
+                    "status": "missing",
+                    "missing_reason": f"{action_id} 查询没有返回结果",
+                },
+            )
+        execute_registered_action(self.run_id, "planner", store=self.store)
+        pending = self.adapter.read_trip(
+            self.run_id,
+            view="missing",
+        )["pending_actions"]
+        documented = list(pending)
+        self.assertTrue(documented, "pending_actions 没有可回喂的证据动作")
+
+        for action in documented:
+            with self.subTest(action_id=action["action_id"]):
+                self.assertTrue(
+                    action.get("required_fields"),
+                    "gate 依赖动作必须公布非空 required_fields",
+                )
+                self.assertIn(
+                    "example",
+                    action,
+                    "公布 required_fields 的动作必须同时给完整 example",
+                )
+                example = action["example"]
+                self.assertIsInstance(
+                    example,
+                    dict,
+                    "example 必须是结构化提交记录，不得是待二次解析的字符串",
+                )
+                self.assertEqual("example.value", action.get("field_scope"))
+                self.assertEqual(
+                    action["submit_action_id"],
+                    example.get("action_id"),
+                    "公布动作与可回喂 example 的 action_id 必须一致",
+                )
+                response = self.adapter.submit_trip_evidence(
+                    self.run_id,
+                    deepcopy(example),
+                )
+                self.assertGreater(
+                    response["parsed_facts_count"],
+                    0,
+                    "pending_action.example 原样回喂没有产生事实",
+                )
+
+    def test_every_submission_gate_has_a_nonempty_published_schema(self) -> None:
+        """按真实 gate 清单反推，不等某个域先在宿主里撞红。"""
+
+        schemas = pending_action_schemas(
+            [
+                {
+                    "action_id": domain,
+                    "submit_action_id": domain,
+                    "title": f"{domain} gate probe",
+                }
+                for domain in _DOMAINS
+            ]
+        )
+        self.assertEqual(set(_DOMAINS), {
+            schema["submit_action_id"] for schema in schemas
+        })
+        for schema in schemas:
+            with self.subTest(domain=schema["submit_action_id"]):
+                self.assertTrue(schema.get("required_fields"))
+                self.assertIsInstance(schema.get("example"), dict)
+                self.assertTrue(schema["example"])
+                self.assertEqual(
+                    schema["submit_action_id"],
+                    schema["example"].get("action_id"),
+                )
+
     def test_a_negative_acceptance_must_carry_a_reason(self) -> None:
         """D20：收活的命令报 accepted=False 而不给理由，在形状上不可能。"""
 
@@ -228,6 +495,33 @@ class EventsAndStateAgreeCase(_Harness):
                     0,
                     f"{domain} 域声称 sourced 却解析出 0 条事实",
                 )
+
+    def test_zero_fact_record_does_not_emit_a_sourced_event(self) -> None:
+        response = self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                "action_id": "map",
+                "value": {},
+                "sources": [
+                    {
+                        "provider": "empty-map-result",
+                        "retrieved_at": "2026-08-05T13:30:00+08:00",
+                    }
+                ],
+            },
+        )
+
+        self.assertTrue(response["accepted"])
+        self.assertEqual(0, response["parsed_facts_count"])
+        self.assertEqual(
+            [],
+            [
+                event
+                for event in self._sourced_events()
+                if event.get("tool") == "map"
+            ],
+            "记录被接受不等于解析出了 sourced 字段；0 facts 不得发 sourced",
+        )
 
 
 class MissingViewKeepsItsPromiseCase(_Harness):

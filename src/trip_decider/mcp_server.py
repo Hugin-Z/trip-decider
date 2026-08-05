@@ -205,7 +205,9 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
             "【view 取值】\n"
             '"overview"（默认）任务全貌 + 各域证据的新鲜度；\n'
             '"plan" 当前已安装行程（含每段的证据依赖）；\n'
-            '"missing" 还缺什么、每一项该由谁补——**要补证据前先看这个**；\n'
+            '"missing" 还缺什么、每一项该由谁补——**要补证据前先看这个**。'
+            "其中 required_fields/optional_fields 均相对 example.value，example "
+            "本身是可直接作为 submit_trip_evidence 的 evidence 参数回喂的完整对象；\n"
             '"candidates" 候选比较结果；\n'
             '"map" 地图标记与路线；\n'
             '"audit" 审计结论。\n'

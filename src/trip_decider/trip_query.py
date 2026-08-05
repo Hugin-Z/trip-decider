@@ -17,6 +17,7 @@ from trip_decider.trip_application import (
     default_trip_application_service,
     TripApplicationService,
 )
+from trip_decider.agent_actions import pending_action_schemas
 from trip_decider.trip_read_model import (
     _map_payload_contract,
     _planning_draft_read_model,
@@ -546,23 +547,7 @@ class TripQueryService:
         actions = snapshot.get("actions") or snapshot.get("pending_actions")
         if not isinstance(actions, list):
             return []
-        pending: list[dict[str, object]] = []
-        for action in actions:
-            if not isinstance(action, Mapping):
-                continue
-            entry: dict[str, object] = {
-                "action_id": action.get("action_id"),
-                "submit_action_id": action.get(
-                    "submit_action_id", action.get("action_id")
-                ),
-                "title": action.get("title"),
-                "required_fields": list(action.get("required_fields") or []),
-                "optional_fields": list(action.get("optional_fields") or []),
-            }
-            if action.get("example"):
-                entry["example"] = deepcopy(action["example"])
-            pending.append(entry)
-        return pending
+        return pending_action_schemas(actions)
 
     def audit_result(self, run_id: str) -> dict[str, object]:
         run = self.store.get_run(run_id)

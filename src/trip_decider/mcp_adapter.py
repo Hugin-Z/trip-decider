@@ -19,7 +19,11 @@ from trip_decider.trip_application import (
     TripApplicationError,
     TripApplicationService,
 )
-from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
+from trip_decider.agent_actions import (
+    MAP_SEGMENT_EXAMPLE,
+    RAILWAY_MANUAL_EXAMPLE,
+    WEB_EXAMPLE,
+)
 from trip_decider.evidence_projection import usable_fact_values
 from trip_decider.itinerary_verification import (
     split_by_shape,
@@ -100,24 +104,14 @@ _SYNCHRONOUS_DRIVE_BUDGET_SECONDS = 5.0
 #: `itinerary_planner.RAIL_EVENT_REQUIRED_TRAIN_FIELDS` 派生）。这里再抄一份
 #: 校验逻辑就又是两张表（D2）。
 _EVIDENCE_HINT_BY_DOMAIN = {
-    "railway": (
-        'submit_trip_evidence(run_id, evidence={"action_id": "railway", '
-        '"value": {"outbound": {...五个字段...}, "return": {...}}, '
-        '"sources": [{"provider": "中国铁路12306", '
-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
-    ),
-    "map": (
-        'submit_trip_evidence(run_id, evidence={"action_id": "map", '
-        f'"value": {MAP_SEGMENT_EXAMPLE}, '
-        '"sources": [{"provider": "<出处>", '
-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
-    ),
-    "web": (
-        'submit_trip_evidence(run_id, evidence={"action_id": "web", '
-        f'"value": {WEB_EXAMPLE}, '
-        '"sources": [{"provider": "<出处>", '
-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
-    ),
+    domain: "submit_trip_evidence(run_id, evidence="
+    + json.dumps(example, ensure_ascii=False)
+    + ")"
+    for domain, example in {
+        "railway": RAILWAY_MANUAL_EXAMPLE,
+        "map": MAP_SEGMENT_EXAMPLE,
+        "web": WEB_EXAMPLE,
+    }.items()
 }
 
 #: 不知道宿主想提交哪个域时的通用提示。**先看 missing** 比猜一个域有用。

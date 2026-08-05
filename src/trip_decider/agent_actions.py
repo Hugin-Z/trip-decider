@@ -101,6 +101,35 @@ RAILWAY_MANUAL_OPTIONAL_FIELDS: tuple[str, ...] = tuple(
     for field in ("second_class_fare_cny_per_person", "second_class_availability")
 )
 
+#: 可直接作为 ``submit_trip_evidence(..., evidence=...)`` 参数回喂的完整示例。
+#: ``value`` 的嵌套层、action_id 与来源都在同一个对象里；missing 视图不再只
+#: 公布一段需要宿主自行猜包装方式的 JSON 字符串（I12 / D20）。
+RAILWAY_MANUAL_EXAMPLE: dict[str, object] = {
+    "action_id": "railway",
+    "value": {
+        "outbound": {
+            "train_code": "G100",
+            "departure_at": "2026-08-11T09:00",
+            "arrival_at": "2026-08-11T12:00",
+            "origin_station": "<出发站全称>",
+            "destination_station": "<到达站全称>",
+        },
+        "return": {
+            "train_code": "G101",
+            "departure_at": "2026-08-14T18:00",
+            "arrival_at": "2026-08-14T21:00",
+            "origin_station": "<到达站全称>",
+            "destination_station": "<出发站全称>",
+        },
+    },
+    "sources": [
+        {
+            "provider": "中国铁路12306",
+            "retrieved_at": "2026-08-05T13:30:00+08:00",
+        }
+    ],
+}
+
 
 @dataclass
 class _LoopState:
@@ -585,6 +614,65 @@ def get_next_actions(
         return _get_next_actions_unlocked(run_id, store=store)
 
 
+def pending_action_schemas(actions: object) -> list[dict[str, object]]:
+    """Project executable/manual actions into the one published evidence schema.
+
+    Both the blocked action snapshot and ``read_trip(view="missing")`` call this
+    function.  Keeping the record wrapper (action_id/value/sources), field scope,
+    and examples in one projection prevents a read-model copy from drifting away
+    from the parser contract again (D2/D5).
+    """
+
+    if not isinstance(actions, list):
+        return []
+    seen: set[str] = set()
+    schemas: list[dict[str, object]] = []
+    for action in actions:
+        if not isinstance(action, Mapping):
+            continue
+        action_id = str(action.get("action_id") or "")
+        if not action_id or action_id in seen:
+            continue
+        seen.add(action_id)
+        submit_action_id = str(
+            action.get("submit_action_id", action.get("action_id")) or ""
+        )
+        gate_schema = _evidence_gate_schema(submit_action_id)
+        required_fields = list(action.get("required_fields") or [])
+        optional_fields = list(action.get("optional_fields") or [])
+        example = action.get("example")
+        if gate_schema is not None:
+            # registered_tool / codex_web_research 也会成为宿主可回喂的证据门，
+            # 不能因为动作构造器没重复写说明书就投影出空 schema。域级提交门
+            # 是唯一兜底表；手工动作可在其上收窄字段，但不得把说明书清空。
+            if not required_fields:
+                required_fields = list(gate_schema["required_fields"])
+            if not optional_fields:
+                optional_fields = list(gate_schema["optional_fields"])
+            if not example:
+                example = gate_schema["example"]
+        schemas.append(
+            {
+                "action_id": action_id,
+                "submit_action_id": submit_action_id,
+                "title": action.get("title"),
+                "required_fields": required_fields,
+                "optional_fields": optional_fields,
+                **(
+                    {
+                        # required/optional 都是 example.value 内部的业务路径；
+                        # 外层 action_id/value/sources 由完整 example 直接示形。
+                        "field_scope": "example.value",
+                        "example": deepcopy(example),
+                    }
+                    if example
+                    else {}
+                ),
+            }
+        )
+    return schemas
+
+
 def _pending_evidence_schemas(
     run_id: str,
     run: object,
@@ -607,7 +695,7 @@ def _pending_evidence_schemas(
     if intent is None:
         return []
     actions: list[Mapping[str, object]] = []
-    for action_id in ("railway", "web", "map"):
+    for action_id in _DOMAINS:
         if state.action_status.get(action_id) in {"waiting", "blocked", "failed"}:
             try:
                 actions.append(_registered_action(action_id, intent, state))
@@ -619,30 +707,7 @@ def _pending_evidence_schemas(
         actions.extend(_plan_followup_actions(intent, state))
     except Exception:  # noqa: BLE001
         pass
-    seen: set[str] = set()
-    schemas: list[dict[str, object]] = []
-    for action in actions:
-        action_id = str(action.get("action_id") or "")
-        if not action_id or action_id in seen:
-            continue
-        seen.add(action_id)
-        schemas.append(
-            {
-                "action_id": action_id,
-                "submit_action_id": action.get(
-                    "submit_action_id", action.get("action_id")
-                ),
-                "title": action.get("title"),
-                "required_fields": list(action.get("required_fields") or []),
-                "optional_fields": list(action.get("optional_fields") or []),
-                **(
-                    {"example": deepcopy(action["example"])}
-                    if action.get("example")
-                    else {}
-                ),
-            }
-        )
-    return schemas
+    return pending_action_schemas(actions)
 
 
 def _get_next_actions_unlocked(
@@ -1142,16 +1207,32 @@ def _submit_evidence_unlocked(
             state.action_status["planner"] = "waiting"
             state.result = None
         _persist_loop_state(run_id, state, store)
-        store.append_event(
-            run_id,
-            event_type="tool.completed",
-            status="completed",
-            message=f"{_action_title(action_id)}取得有效证据。",
-            details={
-                "tool": action_id,
-                "support": "sourced",
-            },
-        )
+        submitted_values = usable_fact_values(item.facts)
+        if submitted_values:
+            store.append_event(
+                run_id,
+                event_type="tool.completed",
+                status="completed",
+                message=f"{_action_title(action_id)}取得有效证据。",
+                details={
+                    "tool": action_id,
+                    "support": "sourced",
+                },
+            )
+        else:
+            # accepted/stored 是记录级事实，sourced 是字段级结论。旧实现只看
+            # item.status，于是一个 0-fact 记录也会对外宣布 sourced（D22）。
+            store.append_event(
+                run_id,
+                event_type="tool.completed",
+                status="completed",
+                message=f"{_action_title(action_id)}未解析出字段级事实。",
+                details={
+                    "tool": action_id,
+                    "support": "unknown",
+                    "parsed_facts_count": 0,
+                },
+            )
         return get_next_actions(run_id, store=store)
 
     if action_id in state.last_sourced_evidence:
@@ -1550,6 +1631,7 @@ def _manual_railway_action(
         # 仍然 KeyError（D2）。
         "required_fields": list(RAILWAY_MANUAL_REQUIRED_FIELDS),
         "optional_fields": list(RAILWAY_MANUAL_OPTIONAL_FIELDS),
+        "example": deepcopy(RAILWAY_MANUAL_EXAMPLE),
     }
 
 
@@ -2415,7 +2497,7 @@ def _plan_followup_actions(
                         *WEB_REQUIRED_FIELDS,
                         WEB_ACCOMMODATION_FIELD,
                     ],
-                    "example": WEB_EXAMPLE,
+                    "example": deepcopy(WEB_EXAMPLE),
                 },
             )
         )
@@ -2447,7 +2529,7 @@ def _plan_followup_actions(
                     f"local_transit[].{field}"
                     for field in MAP_SEGMENT_OPTIONAL_FIELDS
                 ],
-                "example": MAP_SEGMENT_EXAMPLE,
+                "example": deepcopy(MAP_SEGMENT_EXAMPLE),
             }
         )
     return actions
@@ -2519,15 +2601,40 @@ MAP_SEGMENT_OPTIONAL_FIELDS = (
     "last_departure",
 )
 
-#: 报错时给宿主看的「最近的合法形状」。只用于提示，不参与校验。
-MAP_SEGMENT_EXAMPLE = (
-    '{"local_transit": [{"from": "<起点>", "to": "<终点>", '
-    '"duration_seconds": 1800, '
-    '"services": [{"service": "<线路名>", "board_at": "<上车站>", '
-    '"alight_at": "<下车站>"}], '
-    '"fare": {"status": "sourced", "amount_cny": 15.0}, '
-    '"headway_minutes": 25, "first_departure": "06:30"}]}'
-)
+#: 报错与 missing 视图共用的「最近合法形状」。这是完整提交记录，不是
+#: 序列化后的 value 片段；调用方可以把它原样传给 evidence 参数。
+MAP_SEGMENT_EXAMPLE: dict[str, object] = {
+    "action_id": "map",
+    "value": {
+        "local_transit": [
+            {
+                "from": "<起点>",
+                "to": "<终点>",
+                "duration_seconds": 1800,
+                "services": [
+                    {
+                        "service": "<线路名>",
+                        "board_at": "<上车站>",
+                        "alight_at": "<下车站>",
+                    }
+                ],
+                "fare": {"status": "sourced", "amount_cny": 15.0},
+                "headway_minutes": 25,
+                "first_departure": "06:30",
+            }
+        ]
+    },
+    "sources": [
+        {
+            "provider": "<出处>",
+            "retrieved_at": "2026-08-05T13:30:00+08:00",
+        }
+    ],
+}
+
+
+def _example_text(example: Mapping[str, object]) -> str:
+    return json.dumps(example, ensure_ascii=False, separators=(",", ":"))
 
 
 def _validate_map_value(value: object) -> None:
@@ -2554,7 +2661,7 @@ def _validate_map_value(value: object) -> None:
     if not isinstance(routes, list) or not routes:
         raise TravelAgentError(
             "local_transit 必须是非空数组；"
-            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
+            f"最近的合法形状：{_example_text(MAP_SEGMENT_EXAMPLE)}"
         )
     problems: list[str] = []
     for index, route in enumerate(routes):
@@ -2586,7 +2693,7 @@ def _validate_map_value(value: object) -> None:
             "；".join(problems)
             + f"。每一段都要能回答「从哪到哪、要多久」——"
             f"线路名、上下车站、票价是可选的补充。"
-            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
+            f"最近的合法形状：{_example_text(MAP_SEGMENT_EXAMPLE)}"
         )
 
 
@@ -2596,16 +2703,87 @@ def _validate_map_value(value: object) -> None:
 #: `verified_facts`，宿主照着声明填必被拒，且报错不说全套要什么。
 WEB_REQUIRED_FIELDS = ("destination_official_name", "verified_facts")
 
+#: 景点列表进入规划器的最小形状。只有 ``name`` 没有稳定 id 时，编译器会
+#: 如实跳过该项；这正是第九次宿主实测 accepted=true 但 attraction_count=0
+#: 的消费层差异。
+WEB_ATTRACTION_REQUIRED_FIELDS = (
+    "attractions[].attraction_id",
+    "attractions[].name",
+)
+
 #: 补住宿片区时**额外**要的。它是 `accommodation_base` 这个需求的专属要件，
 #: 不是每份 web 证据都得有。
 WEB_ACCOMMODATION_FIELD = "hotel_area.name"
 
-WEB_EXAMPLE = (
-    '{"destination_official_name": "<行政区全称>", '
-    '"verified_facts": [{"claim": "<一句可核对的事实>", '
-    '"source_url": "<出处链接>"}], '
-    '"hotel_area": {"name": "<住宿片区名>"}}'
-)
+WEB_EXAMPLE: dict[str, object] = {
+    "action_id": "web",
+    "value": {
+        "destination_official_name": "<行政区全称>",
+        "verified_facts": [
+            {
+                "claim": "<一句可核对的事实>",
+                "source_url": "<出处链接>",
+            }
+        ],
+        "attractions": [
+            {
+                "attraction_id": "<稳定景点ID>",
+                "name": "<景点名称>",
+                "route_query_name": "<地图检索名称>",
+                "visit_minutes": 120,
+            }
+        ],
+        "hotel_area": {"name": "<住宿片区名>"},
+    },
+    "sources": [
+        {
+            "provider": "<出处>",
+            "retrieved_at": "2026-08-05T13:30:00+08:00",
+        }
+    ],
+}
+
+
+def _evidence_gate_schema(action_id: str) -> dict[str, object] | None:
+    """Return the sole published, directly replayable schema for a gate.
+
+    ``_DOMAINS`` is the submission-gate inventory.  This function deliberately
+    has one branch for every member, so a new gate cannot silently inherit an
+    empty pending action: the scanning meta-test feeds every projected example
+    back through the real parser.
+    """
+
+    if action_id == "railway":
+        return {
+            "required_fields": RAILWAY_MANUAL_REQUIRED_FIELDS,
+            "optional_fields": RAILWAY_MANUAL_OPTIONAL_FIELDS,
+            "example": RAILWAY_MANUAL_EXAMPLE,
+        }
+    if action_id == "web":
+        return {
+            # web 的统一研究动作同时承担目的地、景点与住宿三个展示 gate；
+            # example 必须让三者都能增长，而不只是通过通用 web 校验。
+            "required_fields": (
+                *WEB_REQUIRED_FIELDS,
+                *WEB_ATTRACTION_REQUIRED_FIELDS,
+                WEB_ACCOMMODATION_FIELD,
+            ),
+            "optional_fields": (),
+            "example": WEB_EXAMPLE,
+        }
+    if action_id == "map":
+        return {
+            "required_fields": tuple(
+                f"local_transit[].{field}"
+                for field in MAP_SEGMENT_REQUIRED_FIELDS
+            ),
+            "optional_fields": tuple(
+                f"local_transit[].{field}"
+                for field in MAP_SEGMENT_OPTIONAL_FIELDS
+            ),
+            "example": MAP_SEGMENT_EXAMPLE,
+        }
+    return None
 
 
 def _validate_web_value(value: object) -> None:
@@ -2618,7 +2796,8 @@ def _validate_web_value(value: object) -> None:
 
     if not isinstance(value, Mapping):
         raise TravelAgentError(
-            f"web evidence value must be an object。形状：{WEB_EXAMPLE}"
+            "web evidence value must be an object。形状："
+            f"{_example_text(WEB_EXAMPLE)}"
         )
     absent: list[str] = []
     official_name = value.get("destination_official_name")
@@ -2635,7 +2814,8 @@ def _validate_web_value(value: object) -> None:
         raise TravelAgentError(
             "web 证据缺：" + "、".join(absent)
             + f"。景点、住宿片区这些都放在 verified_facts 里或与之并列，"
-            f"但上面两项是每份 web 证据都要有的。形状：{WEB_EXAMPLE}"
+            "但上面两项是每份 web 证据都要有的。形状："
+            f"{_example_text(WEB_EXAMPLE)}"
         )
 
 
@@ -3159,6 +3339,7 @@ __all__ = [
     "action_loop_started",
     "ACTION_STALL_SECONDS",
     "get_next_actions",
+    "pending_action_schemas",
     "restart_action_loop_for_intent",
     "resume_missing_action_loop",
     "run_until_blocked",

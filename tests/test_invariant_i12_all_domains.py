@@ -28,6 +28,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from trip_decider.agent_actions import (
@@ -396,11 +397,9 @@ class DeclarationMatchesConsumptionCase(unittest.TestCase):
     def test_the_example_satisfies_the_gate(self) -> None:
         """给宿主看的示例必须真的能过门，否则是在骗它。"""
 
-        import json
-
         from trip_decider.agent_actions import _validate_map_value
 
-        _validate_map_value(json.loads(MAP_SEGMENT_EXAMPLE))
+        _validate_map_value(MAP_SEGMENT_EXAMPLE["value"])
 
 
 if __name__ == "__main__":
@@ -495,7 +494,10 @@ class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
         with self.assertRaises(TripMCPError) as caught:
             self._submit(dict(HOST_WEB_SUBMISSIONS["宿主自然写法：景点列表"]))
 
-        self.assertIn(WEB_EXAMPLE, str(caught.exception))
+        self.assertIn(
+            json.dumps(WEB_EXAMPLE, ensure_ascii=False, separators=(",", ":")),
+            str(caught.exception),
+        )
 
     def test_the_declared_required_fields_match_what_the_gate_enforces(
         self,
@@ -518,11 +520,9 @@ class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
     def test_the_example_itself_passes_the_gate(self) -> None:
         """给宿主看的示例必须真的能过门，否则是在骗它。"""
 
-        import json
-
         from trip_decider.agent_actions import WEB_EXAMPLE, _validate_web_value
 
-        _validate_web_value(json.loads(WEB_EXAMPLE))
+        _validate_web_value(WEB_EXAMPLE["value"])
 
 
 #: 宿主第六次实测的三份真实提交形状（脱敏：地名换占位，其余原样）。
