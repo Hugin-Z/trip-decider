@@ -69,7 +69,12 @@ def _badge_styles(html: str) -> dict[str, str]:
     return result
 
 
-def _render_resource(payload: dict[str, object]) -> dict[str, object]:
+def _render_resource(
+    payload: dict[str, object] | None,
+    *,
+    delivery: str = "openai",
+    app_config: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Execute the shipped MCP App script against a minimal deterministic DOM."""
 
     node = shutil.which("node")
@@ -77,6 +82,19 @@ def _render_resource(payload: dict[str, object]) -> dict[str, object]:
         raise AssertionError("content-level MCP App tests require Node.js")
     html = load_trip_mcp_app_html()
     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    openai_global = (
+        f"openai: {{toolOutput: {payload_json}}},"
+        if delivery == "openai"
+        else ""
+    )
+    app_config_global = (
+        "tripDeciderAppConfig: "
+        + json.dumps(app_config, ensure_ascii=False)
+        + ","
+        if app_config is not None
+        else ""
+    )
     harness = f"""
 class FakeNode {{
   constructor(tag) {{
@@ -104,6 +122,12 @@ class FakeNode {{
   get childElementCount() {{ return this.children.length; }}
 }}
 const app = new FakeNode("main");
+app.dataset.renderState = "degraded";
+const initialFallback = new FakeNode("section");
+initialFallback.className = "panel local-fallback";
+initialFallback.textContent = "完整结构化结果仍保留在本次工具返回中。";
+app.append(initialFallback);
+const listeners = {{}};
 global.document = {{
   getElementById: () => app,
   createElement: (tag) => new FakeNode(tag),
@@ -112,24 +136,71 @@ global.document = {{
 }};
 global.window = {{
   parent: null,
-  addEventListener() {{}},
+  addEventListener(name, callback) {{
+    (listeners[name] ||= []).push(callback);
+  }},
   innerWidth: 900,
-  openai: {{toolOutput: {json.dumps(payload, ensure_ascii=False)}}},
+  {app_config_global}
+  {openai_global}
 }};
 window.parent = window;
-window.postMessage = () => {{}};
+const dispatch = (name, data) => {{
+  (listeners[name] || []).forEach((callback) => callback({{
+    source: window.parent,
+    data,
+  }}));
+}};
+window.postMessage = (message) => {{
+  if ({json.dumps(delivery)} !== "mcp") return;
+  if (message.method === "ui/initialize") {{
+    dispatch("message", {{
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {{hostCapabilities: {{}}, hostContext: {{}}}},
+    }});
+  }} else if (message.method === "ui/notifications/initialized") {{
+    dispatch("message", {{
+      jsonrpc: "2.0",
+      method: "ui/notifications/tool-result",
+      params: {{structuredContent: {payload_json}}},
+    }});
+  }}
+}};
 global.requestAnimationFrame = () => {{}};
 global.ResizeObserver = class {{ observe() {{}} }};
+const timers = [];
+global.setTimeout = (callback) => {{
+  const timer = {{callback, active: true}};
+  timers.push(timer);
+  return timer;
+}};
+global.clearTimeout = (timer) => {{ if (timer) timer.active = false; }};
 {script}
 const serialize = (node) => ({{
   tag: node.tagName,
   className: node.className,
   text: node._text,
-  dataset: node.dataset,
-  attributes: node.attributes,
+  dataset: {{...node.dataset}},
+  attributes: {{...node.attributes}},
   children: node.children.map(serialize),
 }});
-process.stdout.write(JSON.stringify(serialize(app)));
+setImmediate(() => {{
+  timers.filter((timer) => timer.active).forEach((timer) => timer.callback());
+  const afterTimeout = serialize(app);
+  if ({json.dumps(delivery)} === "late-mcp") {{
+    dispatch("message", {{
+      jsonrpc: "2.0",
+      method: "ui/notifications/tool-result",
+      params: {{structuredContent: {payload_json}}},
+    }});
+    setImmediate(() => process.stdout.write(JSON.stringify({{
+      after_timeout: afterTimeout,
+      after_payload: serialize(app),
+    }})));
+  }} else {{
+    setImmediate(() => process.stdout.write(JSON.stringify(serialize(app))));
+  }}
+}});
 """
     completed = subprocess.run(
         [node, "-"],
@@ -144,6 +215,24 @@ process.stdout.write(JSON.stringify(serialize(app)));
             "MCP App resource did not render:\n" + completed.stderr
         )
     return json.loads(completed.stdout)
+
+
+def _assert_first_screen_finished(
+    testcase: unittest.TestCase,
+    rendered: dict[str, object],
+    *,
+    state: str = "ready",
+) -> None:
+    testcase.assertEqual(state, rendered["dataset"].get("renderState"))
+    testcase.assertEqual(
+        [],
+        [
+            node
+            for node in _walk(rendered)
+            if node.get("dataset", {}).get("loading") == "true"
+            or _has_class(node, "loading-state")
+        ],
+    )
 
 
 def _rail_item() -> dict[str, object]:
@@ -366,6 +455,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
         }
 
         rendered = _render_resource(payload)
+        _assert_first_screen_finished(self, rendered)
 
         badges = _nodes(rendered, tag="span", class_name="token")
         self.assertEqual(tokens, [badge["dataset"]["token"] for badge in badges])
@@ -455,6 +545,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
         )
 
         rendered = _render_resource(payload)
+        _assert_first_screen_finished(self, rendered)
 
         subtitles = [
             _node_text(node)
@@ -485,6 +576,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
         self.assertNotIn("缺坐标景点", {marker["name"] for marker in markers})
 
         rendered = _render_resource(payload)
+        _assert_first_screen_finished(self, rendered)
         points = _nodes(rendered, tag="circle", class_name="map-point")
         labels = {
             _node_text(node)
@@ -501,6 +593,93 @@ class MCPAppResourceShapeCase(unittest.TestCase):
         for renderer in ("renderCandidates", "renderPlan", "renderVerification"):
             self.assertIn(renderer, html)
         self.assertIn("mapFigure", html)
+        self.assertIn('data-render-state="degraded"', html)
+        self.assertIn("完整结构化结果仍保留在本次工具返回中", html)
+        self.assertNotIn("loading-state", html)
+        self.assertNotIn("data-loading", html)
+
+    def test_standard_mcp_notification_renders_without_network_or_globals(
+        self,
+    ) -> None:
+        payload = {
+            "view": "candidates",
+            "run_id": "run-mcp-notification",
+            "candidates": {
+                "candidates": [
+                    {"destination_id": "candidate-one", "name": "候选甲"}
+                ]
+            },
+            "candidate_maps": {},
+        }
+
+        rendered = _render_resource(payload, delivery="mcp")
+
+        _assert_first_screen_finished(self, rendered)
+        self.assertIn("候选甲", _node_text(rendered))
+
+    def test_no_bridge_or_payload_reaches_an_explicit_local_degraded_view(
+        self,
+    ) -> None:
+        rendered = _render_resource(None, delivery="none")
+
+        _assert_first_screen_finished(self, rendered, state="degraded")
+        fallback = _nodes(rendered, tag="section", class_name="local-fallback")
+        self.assertEqual(1, len(fallback))
+        self.assertIn("完整结构化结果", _node_text(fallback[0]))
+        self.assertIn("若数据稍后到达将自动刷新", _node_text(fallback[0]))
+        self.assertEqual("5000", rendered["dataset"]["firstRenderTimeoutMs"])
+
+    def test_first_render_timeout_is_host_configurable(self) -> None:
+        rendered = _render_resource(
+            None,
+            delivery="none",
+            app_config={"firstRenderTimeoutMs": 7500},
+        )
+
+        _assert_first_screen_finished(self, rendered, state="degraded")
+        self.assertEqual("7500", rendered["dataset"]["firstRenderTimeoutMs"])
+        self.assertIn("7.5 秒内", _node_text(rendered))
+
+    def test_late_payload_replaces_degraded_view_and_renders_all_content(
+        self,
+    ) -> None:
+        payload = {
+            "view": "candidates",
+            "run_id": "run-late-payload",
+            "candidates": {
+                "candidates": [
+                    {
+                        "destination_id": "candidate-late",
+                        "name": "晚到但完整的候选",
+                        "recommendation": "真实 payload 到达后必须覆盖降级页",
+                    }
+                ]
+            },
+            "candidate_maps": {},
+        }
+
+        states = _render_resource(payload, delivery="late-mcp")
+        degraded = states["after_timeout"]
+        ready = states["after_payload"]
+
+        _assert_first_screen_finished(self, degraded, state="degraded")
+        self.assertEqual(
+            1,
+            len(_nodes(degraded, tag="section", class_name="local-fallback")),
+        )
+        _assert_first_screen_finished(self, ready)
+        self.assertIn("晚到但完整的候选", _node_text(ready))
+        self.assertIn("选择并生成详细行程", _node_text(ready))
+        self.assertEqual(
+            [],
+            _nodes(ready, tag="section", class_name="local-fallback"),
+        )
+        self.assertNotIn("旅行视图暂未收到宿主数据", _node_text(ready))
+        self.assertEqual("mcp-tool-result", ready["dataset"]["payloadChannel"])
+        self.assertRegex(
+            ready["dataset"]["payloadArrivedAt"],
+            r"^\d{4}-\d{2}-\d{2}T",
+        )
 
 
 if __name__ == "__main__":

@@ -109,8 +109,12 @@
   </style>
 </head>
 <body>
-  <main id="app" class="app" aria-live="polite">
-    <div class="notice">正在连接旅行任务…</div>
+  <main id="app" class="app" aria-live="polite" data-render-state="degraded">
+    <section class="panel local-fallback">
+      <h2 class="title">旅行视图暂未收到宿主数据</h2>
+      <p class="subtitle">完整结构化结果仍保留在本次工具返回中。</p>
+      <p class="subtitle">若数据稍后到达将自动刷新。</p>
+    </section>
   </main>
   <script>
     (() => {
@@ -119,7 +123,27 @@
       let busy = false;
       let rpcId = 0;
       let hostContext = null;
+      let hasRendered = false;
       const pending = new Map();
+      const appConfig = (
+        window.tripDeciderAppConfig
+        && typeof window.tripDeciderAppConfig === "object"
+      ) ? window.tripDeciderAppConfig : {};
+      const timeoutOr = (value, fallback) => (
+        typeof value === "number" && Number.isFinite(value) && value > 0
+          ? value
+          : fallback
+      );
+      const DEFAULT_FIRST_RENDER_TIMEOUT_MS = 5000;
+      const FIRST_RENDER_TIMEOUT_MS = timeoutOr(
+        appConfig.firstRenderTimeoutMs,
+        DEFAULT_FIRST_RENDER_TIMEOUT_MS,
+      );
+      const BRIDGE_TIMEOUT_MS = timeoutOr(
+        appConfig.bridgeTimeoutMs,
+        FIRST_RENDER_TIMEOUT_MS,
+      );
+      app.dataset.firstRenderTimeoutMs = String(FIRST_RENDER_TIMEOUT_MS);
 
       const element = (tag, className, text) => {
         const node = document.createElement(tag);
@@ -150,10 +174,27 @@
         PLAN_READY: "行程已生成",
       };
 
-      const request = (method, params) => new Promise((resolve, reject) => {
+      const request = (method, params, timeoutMs = 0) => new Promise((resolve, reject) => {
         const id = ++rpcId;
-        pending.set(id, {resolve, reject});
-        window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
+        let timer = null;
+        const finish = (callback) => (value) => {
+          if (timer !== null) clearTimeout(timer);
+          callback(value);
+        };
+        pending.set(id, {resolve: finish(resolve), reject: finish(reject)});
+        if (timeoutMs > 0) {
+          timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error(`${method} timed out`));
+          }, timeoutMs);
+        }
+        try {
+          window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
+        } catch (error) {
+          pending.delete(id);
+          if (timer !== null) clearTimeout(timer);
+          reject(error);
+        }
       });
       const notify = (method, params) => {
         const message = {jsonrpc: "2.0", method};
@@ -172,7 +213,11 @@
           return;
         }
         if (message.method === "ui/notifications/tool-result") {
-          renderPayload(message.params?.structuredContent);
+          renderPayload(
+            message.params?.structuredContent
+            || message.params?.structured_content,
+            "mcp-tool-result",
+          );
         }
       };
 
@@ -185,7 +230,10 @@
         const report = () => {
           if (scheduled) return;
           scheduled = true;
-          requestAnimationFrame(() => {
+          const schedule = typeof requestAnimationFrame === "function"
+            ? requestAnimationFrame
+            : (callback) => setTimeout(callback, 0);
+          schedule(() => {
             scheduled = false;
             notify("ui/notifications/size-changed", {
               width: Math.ceil(window.innerWidth),
@@ -194,20 +242,25 @@
           });
         };
         report();
-        new ResizeObserver(report).observe(document.documentElement);
+        if (typeof ResizeObserver === "function") {
+          new ResizeObserver(report).observe(document.documentElement);
+        }
       };
       const initialize = async () => {
-        const result = await request("ui/initialize", {
-          appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
-          appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]},
-          protocolVersion: "2026-01-26",
-        });
+        const result = await request("ui/initialize",
+          {
+            appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
+            appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]},
+            protocolVersion: "2026-01-26",
+          },
+          BRIDGE_TIMEOUT_MS,
+        );
         hostContext = result?.hostContext || null;
         notify("ui/notifications/initialized");
         startSizeNotifications();
         return result;
       };
-      const bridgeReady = initialize().catch(() => null);
+      let bridgeReady = Promise.resolve(null);
 
       const structured = (response) => response?.structuredContent || response?.structured_content || null;
       const callTool = async (name, args) => {
@@ -440,7 +493,7 @@
               await callTool("advance_trip_task", {run_id: payload.run_id, wait_seconds: 10});
               const response = await callTool("show_trip_plan", {run_id: payload.run_id});
               const next = structured(response);
-              if (next) renderPayload(next);
+              if (next) renderPayload(next, "app-tool-call:show_trip_plan");
             } catch (_) {
               const notice = element("div", "notice error", "暂时无法继续该方案。可以在对话中继续推进同一任务。");
               card.append(notice);
@@ -640,7 +693,10 @@
               // revise 的结构化结果仍是失败时可保留的完整业务回退。
               try {
                 const refreshed = structured(await callTool("show_trip_plan", {run_id: payload.run_id}));
-                if (refreshed) renderPayload(refreshed);
+                if (refreshed) renderPayload(
+                  refreshed,
+                  "app-tool-call:show_trip_plan",
+                );
                 else renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
               } catch (_) {
                 renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
@@ -782,14 +838,52 @@
         app.append(panel, element("p", "muted", payload.scope_note || ""));
       };
 
-      const renderPayload = (payload) => {
-        if (!payload || typeof payload !== "object") return;
+      const renderPayload = (payload, channel = "unspecified") => {
+        app.dataset.payloadArrivedAt = new Date().toISOString();
+        app.dataset.payloadChannel = channel;
+        if (!payload || typeof payload !== "object") return false;
         if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
         else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
         else if (payload.view === "verification" || payload.artifact_kind === "ItineraryVerification") renderVerification(payload);
+        else return false;
+        hasRendered = true;
+        app.dataset.renderState = "ready";
+        return true;
       };
 
-      if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);
+      const renderLocalFallback = () => {
+        if (hasRendered) return;
+        const panel = element("section", "panel local-fallback");
+        panel.append(
+          element("h2", "title", "旅行视图暂未收到宿主数据"),
+          element(
+            "p",
+            "subtitle",
+            `交互桥接未在 ${FIRST_RENDER_TIMEOUT_MS / 1000} 秒内就绪；`
+              + "完整结构化结果仍保留在本次工具返回中。",
+          ),
+          element("p", "subtitle", "若数据稍后到达将自动刷新。"),
+        );
+        app.replaceChildren(panel);
+        app.dataset.renderState = "degraded";
+      };
+
+      // 首屏只消费工具已经返回的数据，不等待 initialize，也不发网络请求。
+      // 标准 MCP Apps 通知负责 Claude Desktop；openai:set_globals/toolOutput 是
+      // 跨宿主的本地注入通道。桥接只影响后续按钮，不再决定首屏能否收工。
+      window.addEventListener("openai:set_globals", (event) => {
+        renderPayload(
+          event.detail?.globals?.toolOutput
+          || event.detail?.toolOutput
+          || event.detail?.structuredContent,
+          "openai-set-globals",
+        );
+      });
+      if (window.openai?.toolOutput) {
+        renderPayload(window.openai.toolOutput, "openai-tool-output");
+      }
+      setTimeout(renderLocalFallback, FIRST_RENDER_TIMEOUT_MS);
+      bridgeReady = initialize().catch(() => null);
     })();
   </script>
 </body>
