@@ -20,6 +20,7 @@ import threading
 from typing import Any
 
 from trip_decider.agent_actions import (
+    ACTION_STALL_SECONDS,
     action_loop_started,
     execute_registered_action,
     get_next_actions,
@@ -65,6 +66,17 @@ from trip_decider.travel_agent import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+#: 后台线程一轮驱动动作循环的预算。**必须严格大于**看门狗阈值。
+#:
+#: 此前这里是裸写的 30.0，与 `ACTION_STALL_SECONDS` 恰好相等——于是真正卡住的
+#: 动作会和预算耗尽赛跑：预算先到就被判成「还在飞」，run 于是永远 RUNNING，
+#: 看门狗一次也响不了。这是第五次实测那个偏差的镜像版本（那边是预算太小把好
+#: 动作误杀，这边是预算不够大让坏动作永远逃脱）。
+#:
+#: 从阈值派生而不是另写一个数：两者的大小关系是这段代码成立的前提，
+#: 写成两个独立字面量就等着有人只改一个。
+BACKGROUND_DRIVE_BUDGET_SECONDS = ACTION_STALL_SECONDS + 15.0
 
 
 
@@ -1062,7 +1074,7 @@ class TripApplicationService:
                     run_id,
                     store=self.store,
                     evidence_broker=self.evidence_broker,
-                    max_wait_seconds=30.0,
+                    max_wait_seconds=BACKGROUND_DRIVE_BUDGET_SECONDS,
                 ),
             )
         except Exception as error:

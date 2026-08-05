@@ -359,6 +359,41 @@ def resume_missing_action_loop(
         return get_next_actions(run_id, store=store)
 
 
+#: 并发：`_LOCK` 保护，全部读写都在锁内。
+#:
+#: 「这个 run 的哪些动作**此刻正在飞**」。键是 run_id，值是 action_id 集合。
+#:
+#: 第五次实测的死锁需要两个条件同时成立：超时误判（已由 `ACTION_STALL_SECONDS`
+#: 修掉），以及**重发不去重**。只修前者不够——真有一次动作慢过阈值时，旧的还在
+#: 飞、新的又发出去，两份结果互相覆盖，而循环永远看不到「已经有人在做了」。
+#:
+#: 记在内存而不落盘是对的：进程一死，在飞的动作也随之消失，重启后本就该重发。
+#: 落盘反而会留下一个永远清不掉的「假在飞」。
+_IN_FLIGHT: dict[str, set[str]] = {}
+
+#: 同一个动作连续超时多少次就熔断。
+#:
+#: 与 WORKER_LOST 同族：失败要说出来，不静默转圈。到达上限就落
+#: `{DOMAIN}_ACTION_FAILED`，宿主拿到明确结论与下一步，而不是看着它转到天荒地老。
+MAX_CONSECUTIVE_TIMEOUTS = 3
+
+#: 并发：`_LOCK` 保护，全部读写都在锁内。
+#: 每个 (run_id, action_id) 连续超时了几次。成功一次就清零。
+_TIMEOUT_STRIKES: dict[tuple[str, str], int] = {}
+
+
+#: 一个动作多久没进展算「卡住」。**这是看门狗阈值的唯一出处**——判定用它、
+#: 报文也用它。
+#:
+#: 与 `max_wait_seconds`（本次调用还能花多久）是**两个不同的数**，此前被同一个
+#: `min()` 合并，于是 MCP 传进来的 5 秒调用预算把看门狗一起缩成了 5 秒，而报文
+#: 里写死的 30 纹丝不动——宿主看到「超过30秒没有新进展」发生在第 5 秒
+#: （第五次实测，2026-08-04）。
+#:
+#: 预算用完只说明「这次没等到」，动作还在飞；只有真的超过本阈值才是卡住。
+ACTION_STALL_SECONDS = 30.0
+
+
 def run_until_blocked(
     run_id: str,
     *,
@@ -456,9 +491,10 @@ def run_until_blocked(
                     )
                     for action in batch
                 ]
+                dispatched_at = time.monotonic()
                 completed, pending = wait(
                     futures,
-                    timeout=min(30.0, remaining),
+                    timeout=min(ACTION_STALL_SECONDS, remaining),
                 )
                 for future in completed:
                     future.result()
@@ -469,18 +505,27 @@ def run_until_blocked(
                 ):
                     executed.discard(("planner", "initial"))
                 if pending:
-                    for future in pending:
-                        future.cancel()
                     pending_ids = [
                         str(batch[futures.index(future)]["action_id"])
                         for future in pending
                     ]
-                    _timeout_actions(
+                    if _is_real_stall(dispatched_at):
+                        for future in pending:
+                            future.cancel()
+                        _timeout_actions(
+                            run_id,
+                            pending_ids,
+                            store=store,
+                        )
+                        return get_next_actions(run_id, store=store)
+                    # 预算用完而已，动作还在飞。**不取消、不判超时**——取消它
+                    # 才是死锁的源头：结果永远没人收，下一轮又重发一个新的。
+                    return _budget_exhausted(
                         run_id,
                         pending_ids,
+                        max_wait_seconds,
                         store=store,
                     )
-                    return get_next_actions(run_id, store=store)
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
             continue
@@ -500,18 +545,26 @@ def run_until_blocked(
                 store=store,
                 evidence_broker=evidence_broker,
             )
+            dispatched_at = time.monotonic()
             completed, pending = wait(
                 (future,),
-                timeout=min(30.0, remaining),
+                timeout=min(ACTION_STALL_SECONDS, remaining),
             )
             if pending:
-                future.cancel()
-                _timeout_actions(
+                if _is_real_stall(dispatched_at):
+                    future.cancel()
+                    _timeout_actions(
+                        run_id,
+                        [action_id],
+                        store=store,
+                    )
+                    return get_next_actions(run_id, store=store)
+                return _budget_exhausted(
                     run_id,
                     [action_id],
+                    max_wait_seconds,
                     store=store,
                 )
-                return get_next_actions(run_id, store=store)
             next(iter(completed)).result()
             if action_id != "planner":
                 executed.discard(("planner", "initial"))
@@ -680,6 +733,32 @@ def execute_registered_action(
     )
     store = store if store is not None else default_agent_store()
 
+    # 在飞去重：同一个动作已经有人在跑，就不再发第二个。**这一步必须在任何
+    # 状态变更之前**——第五次实测的死锁正是「旧的还在飞、新的又发出去」。
+    if not _claim_in_flight(run_id, action_id):
+        raise ActionAlreadyInFlight(
+            f"{action_id} 已在执行中，本次不重复派发"
+        )
+    try:
+        return _execute_registered_action_claimed(
+            run_id,
+            action_id,
+            store=store,
+            evidence_broker=evidence_broker,
+        )
+    finally:
+        _release_in_flight(run_id, action_id)
+
+
+def _execute_registered_action_claimed(
+    run_id: str,
+    action_id: str,
+    *,
+    store: InMemoryAgentStore,
+    evidence_broker: EvidenceBroker,
+) -> dict[str, object]:
+    """真正执行。调用方必须已经通过 `_claim_in_flight` 占位。"""
+
     run_lock = _run_lock(run_id)
     with run_lock:
         run = store.get_run(run_id)
@@ -766,6 +845,8 @@ def execute_registered_action(
             result = deepcopy(dict(outcome))
             live_state.result = result
             live_state.action_status[action_id] = "completed"
+            # 成功一次就清零——「连续」超时才该熔断，累计的不算。
+            _clear_timeout_strikes(run_id, action_id)
             # §13.1 的写入顺序：run.json 先落权威，action-loop.json 后落。
             # 反过来会开出一个恢复不了的中断窗口——action-loop 说 planner 已完成，
             # run.json 里却还没有 result，重启后状态自相矛盾。
@@ -886,14 +967,29 @@ def _submit_evidence_unlocked(
     *,
     store: InMemoryAgentStore,
 ) -> dict[str, object]:
+    """收下一条证据。
 
-    run = store.get_run(run_id)
-    if run.status is not RunStatus.RUNNING:
-        raise TravelAgentError("run is not accepting evidence")
+    **BLOCKED 的 run 仍收自己在飞动作的迟到结果**（第五次实测）：看门狗判超时
+    会把 run 打成 BLOCKED，而那次采集其实还在跑；26 秒后它带着一份完全合法的
+    证据回来，此前会被这道门以「run is not accepting evidence」挡掉、直接丢弃。
+    下一轮于是只能重查——这正是死循环的最后一环。
+
+    「超时」的意思是**这次没等到**，不是**结果作废**。所以放行条件收得很窄：
+    只有仍登记在 `_IN_FLIGHT` 里的那个动作（也就是我们自己派出去、还没回来的
+    那一次）才准在 BLOCKED 态下交货。宿主的手工提交不受影响——它不在飞，
+    仍然按原规则要求 run 处于 RUNNING。
+    """
+
     raw = evidence.to_dict() if isinstance(evidence, EvidenceItem) else dict(evidence)
     action_id = raw.pop("action_id", None)
     if not isinstance(action_id, str) or action_id not in _ACTION_ORDER:
         raise TravelAgentError("evidence action_id is invalid")
+    run = store.get_run(run_id)
+    if run.status is not RunStatus.RUNNING and not (
+        run.status is RunStatus.BLOCKED
+        and action_id in in_flight_actions(run_id)
+    ):
+        raise TravelAgentError("run is not accepting evidence")
     if action_id == "planner":
         raise TravelAgentError("planner does not accept evidence submission")
     item = (
@@ -909,7 +1005,11 @@ def _submit_evidence_unlocked(
         "running",
         "failed",
         "completed",
-    }:
+    } and action_id not in in_flight_actions(run_id):
+        # 第二道门，与上面那道同因（第五次实测）：看门狗判超时会把动作状态
+        # 从 waiting 翻成 blocked，于是那次采集真正回来时被这里挡掉、结果丢弃。
+        # 仍在飞的动作是我们自己派出去、还没回来的那一次，它的结果必须收下——
+        # 「超时」是这次没等到，不是结果作废。
         raise TravelAgentError("evidence action is not accepting a result")
     if action_id == "web" and state.action_status[action_id] == "waiting":
         state.action_status[action_id] = "running"
@@ -2484,35 +2584,133 @@ def _block_run(
         )
 
 
+class ActionAlreadyInFlight(TravelAgentError):
+    """这个动作已经在飞了，本次不重复派发。
+
+    单独一个类型而不是复用 `TravelAgentError`：调用方要能分辨「这次没派出去是
+    因为已经有人在做」（正常，等着即可）与「派发失败了」（异常）。
+    """
+
+
+def _claim_in_flight(run_id: str, action_id: str) -> bool:
+    """把动作登记为在飞。已经在飞就返回 False，调用方不该重复派发。"""
+
+    with _LOCK:
+        flying = _IN_FLIGHT.setdefault(run_id, set())
+        if action_id in flying:
+            return False
+        flying.add(action_id)
+        return True
+
+
+def _release_in_flight(run_id: str, action_id: str) -> None:
+    with _LOCK:
+        flying = _IN_FLIGHT.get(run_id)
+        if flying is None:
+            return
+        flying.discard(action_id)
+        if not flying:
+            _IN_FLIGHT.pop(run_id, None)
+
+
+def in_flight_actions(run_id: str) -> frozenset[str]:
+    """这个 run 此刻有哪些动作在飞。供调用方避开重复派发。"""
+
+    with _LOCK:
+        return frozenset(_IN_FLIGHT.get(run_id, ()))
+
+
+def _record_timeout_strike(run_id: str, action_id: str) -> int:
+    with _LOCK:
+        key = (run_id, action_id)
+        _TIMEOUT_STRIKES[key] = _TIMEOUT_STRIKES.get(key, 0) + 1
+        return _TIMEOUT_STRIKES[key]
+
+
+def _clear_timeout_strikes(run_id: str, action_id: str) -> None:
+    with _LOCK:
+        _TIMEOUT_STRIKES.pop((run_id, action_id), None)
+
+
+def _is_real_stall(dispatched_at: float) -> bool:
+    """这次等不到，是动作卡住了，还是本次调用的预算先花完了？
+
+    只有前者才是超时。把后者也算成超时，就是第五次实测那个死循环的成因：
+    5 秒预算 → 判超时 → 重发 → 又 5 秒 → 再重发，而真实耗时 26 秒，永远走不完。
+    """
+
+    return time.monotonic() - dispatched_at >= ACTION_STALL_SECONDS
+
+
+def _budget_exhausted(
+    run_id: str,
+    pending_ids: Sequence[str],
+    budget_seconds: float,
+    *,
+    store: InMemoryAgentStore,
+) -> dict[str, object]:
+    """预算用完：如实说「还在飞」，不动 run 状态、不取消在飞的动作。
+
+    与 `_timeout_actions` 的区别就是本轮事故的全部要害——那个把动作打成
+    ``blocked`` 并阻塞 run，这个什么都不改，只告诉调用方过会儿再来。
+    """
+
+    snapshot = get_next_actions(run_id, store=store)
+    return {
+        **snapshot,
+        "status": "NEED_USER_INPUT",
+        "reason": "time_budget_exhausted",
+        "in_flight": list(pending_ids),
+        "elapsed_seconds": float(budget_seconds),
+    }
+
+
 def _timeout_actions(
     run_id: str,
     action_ids: list[str],
     *,
     store: InMemoryAgentStore,
 ) -> None:
-    """Close actions that made no observable progress for 30 seconds."""
+    """Close actions that made no observable progress for ACTION_STALL_SECONDS."""
 
     with _run_lock(run_id):
         state = _state(run_id, store)
+        tripped: list[str] = []
         for action_id in action_ids:
+            strikes = _record_timeout_strike(run_id, action_id)
             if action_id in state.action_status:
-                state.action_status[action_id] = "blocked"
+                # 熔断之后标 failed 而不是 blocked：failed 才会在动作快照里带出
+                # requery 与手工提交两条出路，blocked 只是「再等等」。
+                state.action_status[action_id] = (
+                    "failed" if strikes >= MAX_CONSECUTIVE_TIMEOUTS else "blocked"
+                )
+            if strikes >= MAX_CONSECUTIVE_TIMEOUTS:
+                tripped.append(action_id)
             store.append_event(
                 run_id,
                 event_type="tool.timeout",
                 status="failed",
-                message=f"{_action_title(action_id)}超过30秒没有新进展。",
+                message=(
+                    f"{_action_title(action_id)}超过 "
+                    f"{ACTION_STALL_SECONDS:g} 秒没有新进展。"
+                ),
                 details={
                     "tool": action_id,
-                    "timeout_seconds": 30,
+                    # 与判定用的是同一个常量。此前这里是写死的 30，而真正生效
+                    # 的是 min(30, remaining)——数字都在，就是对不上。
+                    "timeout_seconds": ACTION_STALL_SECONDS,
+                    "consecutive_timeouts": strikes,
+                    "max_consecutive_timeouts": MAX_CONSECUTIVE_TIMEOUTS,
                 },
             )
         _persist_loop_state(run_id, state, store)
+        # 熔断：连续超时到上限就说出「这个域失败了」，不再无限转圈。与
+        # WORKER_LOST 同族——失败要有明确结论和下一步，不是静默重试到天荒地老。
         _block_run(
             run_id,
             action_ids[0],
             store=store,
-            stalled=True,
+            stalled=not tripped,
         )
 
 
@@ -2861,6 +3059,7 @@ def _runtime_json_object(path: Path) -> dict[str, object]:
 __all__ = [
     "execute_registered_action",
     "action_loop_started",
+    "ACTION_STALL_SECONDS",
     "get_next_actions",
     "restart_action_loop_for_intent",
     "resume_missing_action_loop",

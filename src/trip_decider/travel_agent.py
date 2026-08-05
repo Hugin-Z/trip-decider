@@ -90,7 +90,8 @@ _ACTION_DOMAINS: tuple[str, ...] = ("RAILWAY", "WEB", "MAP", "PLANNER")
 
 RUN_ERROR_CODES: frozenset[str] = frozenset(
     {
-        # 动作超时：等满 30 秒没有新进展，我们不再等了
+        # 动作超时：超过 agent_actions.ACTION_STALL_SECONDS 没有新进展，
+        # 我们不再等了（阈值的唯一出处在那里，这里不重复数字）
         *(f"{domain}_ACTION_STALLED" for domain in _ACTION_DOMAINS),
         # 动作执行失败：注册工具抛了业务异常，这个域没有下一步可试
         *(f"{domain}_ACTION_FAILED" for domain in _ACTION_DOMAINS),

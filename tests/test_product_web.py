@@ -233,9 +233,23 @@ class ProductWebContractTests(unittest.TestCase):
         self.assertEqual(paused["status"], "NEED_USER_INPUT")
         self.assertEqual(paused["paused_at"], ["codex_web_research"])
 
-    def test_action_without_progress_is_blocked_instead_of_staying_running(
+    def test_budget_exhaustion_does_not_masquerade_as_an_action_stall(
         self,
     ) -> None:
+        """预算用完 ≠ 动作卡住。
+
+        **这条用例原来断言的正是缺陷本身。** 它给 0.02 秒预算配一个 2 秒的
+        handler，然后要求 run 落 BLOCKED + RAILWAY_ACTION_STALLED——也就是把
+        「本次调用的时间花完了」直接判成「这个动作卡住了」。
+
+        生产上这就是第五次实测那一幕：MCP 给同步推进 5 秒预算，高德 26 秒正常
+        返回，看门狗却在第 5 秒宣判超时（还印着「超过30秒」），主循环于是反复
+        重发、永远等不到结果。
+
+        原用例想守的东西是对的——**run 不许停在 RUNNING 没人推**。那一条保留在
+        下面：预算用完之后动作仍在飞，等它回来结果照样入库，循环能继续。
+        改掉的只是「用什么理由结束这一轮」。
+        """
         store = InMemoryAgentStore()
         run = create_run(
             {
@@ -278,12 +292,30 @@ class ProductWebContractTests(unittest.TestCase):
         finally:
             release.set()
             agent_actions._TOOL_REGISTRY["railway"]["handler"] = original
-        self.assertEqual(snapshot["status"], "BLOCKED")
-        blocked = store.get_run(run.run_id)
-        self.assertEqual(blocked.status, RunStatus.BLOCKED)
-        self.assertEqual(
-            blocked.error_code,
+        # 预算用完：如实说「还在飞」，不怪动作、不动 run 状态。
+        self.assertEqual(snapshot["reason"], "time_budget_exhausted")
+        self.assertIn("railway", snapshot.get("in_flight", []))
+        after = store.get_run(run.run_id)
+        self.assertNotEqual(
+            after.error_code,
             "RAILWAY_ACTION_STALLED",
+            "预算用完被判成了动作超时——第五次实测那个误判",
+        )
+
+        # 原用例真正要守的：动作回来之后结果入库，循环推得动，不会永远挂着。
+        def railway_landed() -> bool:
+            snapshot = agent_actions.get_next_actions(run.run_id, store=store)
+            return "railway" not in {
+                str(action.get("action_id"))
+                for action in snapshot.get("actions") or []
+            }
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and not railway_landed():
+            time.sleep(0.05)
+        self.assertTrue(
+            railway_landed(),
+            "迟到的结果没有入库——railway 仍被列为待办，下一轮只能重查",
         )
 
     def test_plan_audit_does_not_require_planning_intent_fields(self) -> None:
