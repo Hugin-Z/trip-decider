@@ -497,7 +497,13 @@ def run_until_blocked(
                     timeout=min(ACTION_STALL_SECONDS, remaining),
                 )
                 for future in completed:
-                    future.result()
+                    # 「已经有人在做」不是错误，是进度：另一条路径正在跑同一个
+                    # 动作，本次不必也不能再发一遍。把它当异常抛出去，宿主看到的
+                    # 就是硬错误（疲劳测试首跑 20 轮里 4 轮死在这儿）。
+                    try:
+                        future.result()
+                    except ActionAlreadyInFlight:
+                        continue
                 if any(
                     str(batch[futures.index(future)].get("action_id"))
                     != "planner"
@@ -565,7 +571,16 @@ def run_until_blocked(
                     max_wait_seconds,
                     store=store,
                 )
-            next(iter(completed)).result()
+            try:
+                next(iter(completed)).result()
+            except ActionAlreadyInFlight:
+                # 同上：在飞不是失败，下一轮轮询会看到它的结果。
+                return _budget_exhausted(
+                    run_id,
+                    [action_id],
+                    max_wait_seconds,
+                    store=store,
+                )
             if action_id != "planner":
                 executed.discard(("planner", "initial"))
         finally:
@@ -582,6 +597,66 @@ def get_next_actions(
     store = store if store is not None else default_agent_store()
     with _run_lock(run_id):
         return _get_next_actions_unlocked(run_id, store=store)
+
+
+def _pending_evidence_schemas(
+    run_id: str,
+    run: object,
+    store: InMemoryAgentStore,
+) -> list[dict[str, object]]:
+    """阻塞态下「还缺哪些证据、各自什么形状」。
+
+    复用**同一套**动作构造函数（`_registered_action` / `_manual_railway_action`
+    / `_plan_followup_actions`），不另写一份清单——写第二份就等着它和门不一致
+    （D2/D5）。这里只是把它们在阻塞态也拿出来，而不是重新定义一遍。
+    """
+
+    try:
+        state = _load_loop_state(run_id, store)
+    except TravelAgentError:
+        return []
+    if state is None:
+        return []
+    intent = getattr(run, "intent", None)
+    if intent is None:
+        return []
+    actions: list[Mapping[str, object]] = []
+    for action_id in ("railway", "web", "map"):
+        if state.action_status.get(action_id) in {"waiting", "blocked", "failed"}:
+            try:
+                actions.append(_registered_action(action_id, intent, state))
+            except Exception:  # noqa: BLE001
+                continue
+    if state.action_status.get("railway") in {"blocked", "failed"}:
+        actions.append(_manual_railway_action(intent))
+    try:
+        actions.extend(_plan_followup_actions(intent, state))
+    except Exception:  # noqa: BLE001
+        pass
+    seen: set[str] = set()
+    schemas: list[dict[str, object]] = []
+    for action in actions:
+        action_id = str(action.get("action_id") or "")
+        if not action_id or action_id in seen:
+            continue
+        seen.add(action_id)
+        schemas.append(
+            {
+                "action_id": action_id,
+                "submit_action_id": action.get(
+                    "submit_action_id", action.get("action_id")
+                ),
+                "title": action.get("title"),
+                "required_fields": list(action.get("required_fields") or []),
+                "optional_fields": list(action.get("optional_fields") or []),
+                **(
+                    {"example": deepcopy(action["example"])}
+                    if action.get("example")
+                    else {}
+                ),
+            }
+        )
+    return schemas
 
 
 def _get_next_actions_unlocked(
@@ -623,6 +698,17 @@ def _get_next_actions_unlocked(
             ),
             reason=run.error_code,
             recovery=_blocked_recovery(run, result),
+            # 阻塞态**照样要说清还缺什么**。
+            #
+            # `actions` 保持为空是对的：阻塞时没有可以立刻派发的动作，那是行为
+            # 契约，调用方靠它判断「能不能推」。但「现在推不动」与「还缺哪些
+            # 证据、各自什么形状」是两个问题，此前只答了前一个——于是 run 报
+            # USER_INPUT_REQUIRED，却一个字段名都给不出来（疲劳测试首跑撞出，
+            # 也是第六次实测那条抱怨没修干净的那一半）。
+            #
+            # 分成两个键而不是把它们塞进 `actions`：两者语义不同，合一个键就会
+            # 让「有 actions」不再等价于「能推」。
+            pending_actions=_pending_evidence_schemas(run_id, run, store),
         )
     if run.status is RunStatus.FAILED:
         return _snapshot(

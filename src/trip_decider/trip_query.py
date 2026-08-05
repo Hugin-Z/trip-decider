@@ -530,7 +530,9 @@ class TripQueryService:
             snapshot = self.application_service.next_actions(run_id)
         except (TravelAgentError, TripQueryError):
             return []
-        actions = snapshot.get("actions")
+        # 阻塞态的 `actions` 恒为空（没有可立刻派发的动作），但它另带一份
+        # `pending_actions`——「还缺什么」与「能不能推」是两个问题。
+        actions = snapshot.get("actions") or snapshot.get("pending_actions")
         if not isinstance(actions, list):
             return []
         pending: list[dict[str, object]] = []

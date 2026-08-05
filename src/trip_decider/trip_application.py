@@ -21,7 +21,9 @@ from typing import Any
 
 from trip_decider.agent_actions import (
     ACTION_STALL_SECONDS,
+    ActionAlreadyInFlight,
     action_loop_started,
+    in_flight_actions,
     execute_registered_action,
     get_next_actions,
     restart_action_loop_for_intent,
@@ -254,12 +256,34 @@ class TripApplicationService:
                     action_loop=progress,
                 )
             if action_id is not None:
-                action_state = execute_registered_action(
-                    run_id,
-                    action_id,
-                    store=self.store,
-                    evidence_broker=self.evidence_broker,
-                )
+                try:
+                    action_state = execute_registered_action(
+                        run_id,
+                        action_id,
+                        store=self.store,
+                        evidence_broker=self.evidence_broker,
+                    )
+                except ActionAlreadyInFlight:
+                    # 「已经有人在做」不是错误，是**进度**。
+                    #
+                    # 疲劳测试首跑 20 轮里有 4 轮死在这里：宿主补完证据接着
+                    # advance，那一域的采集还在飞，于是收到一个硬错误。它重试，
+                    # 还在飞，又一个硬错误——这就是第七次实测「重试两次无效」
+                    # 的形状。
+                    #
+                    # 在飞去重本身是对的（它掐掉了重发死循环），错的是把这个
+                    # 内部状态当异常抛给宿主。同一个毛病这几轮反复出现：
+                    # 内部状态不该以错误的形式泄漏到宿主面前。
+                    return ApplicationOutcome(
+                        run_id,
+                        accepted=True,
+                        action_loop={
+                            "run_id": run_id,
+                            "status": "ACTION_IN_FLIGHT",
+                            "in_flight": sorted(in_flight_actions(run_id)),
+                            "reason": "action_already_running",
+                        },
+                    )
             else:
                 action_state = run_until_blocked(
                     run_id,
