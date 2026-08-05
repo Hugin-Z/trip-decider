@@ -88,7 +88,7 @@
 
 | data_type | status | tolerance_seconds | max_reuse_seconds | stale_allowed | on_stale | feasibility_critical | planned_for |
 |---|---|---|---|---|---|---|---|
-| `hotel_price` | `planned` | `0` | `0` | `False` | `block` | 是 | P5 |
+| `hotel_price` | `active` | `0` | `0` | `False` | `block` | 是 | — |
 | `railway_schedule_fare` | `active` | `21600` | `21600` | `True` | `auto_refetch` | 是 | — |
 | `route_duration` | `active` | `21600` | `86400` | `True` | `auto_refetch` | 是 | — |
 | `poi_coordinate` | `active` | `2592000` | `15552000` | `True` | `flag_for_confirmation` | 否 | — |
@@ -100,7 +100,9 @@
 
 **注 1：`seat_availability` 已删除。** 裁决依据：余票属订票域，`PLAN.md` v4 §2 明确「不做订票」。它不再是本产品的 data_type，不出现在本表中。`src/trip_decider/evidence_broker.py:39-41` 中的登记与 `tests/test_evidence_broker.py:35` 中的断言在 P5 一并移除。
 
-**注 2：`hotel_price` 为 `planned`。** 裁决依据：不做订房与比价，但价格区间是预算硬约束的必需输入，因此它必须留在契约里并保持 `feasibility_critical`。当前无生产者，`planned_for = P5`。
+**注 2：`hotel_price` 已于 2026-08-05 转为 `active`。** 生产者只读取高德
+POI 明确返回的住宿参考价；它不是实时可订价格，因此字段级 support 恒为
+`estimated`，字段缺席恒为 `unknown`。不做订房与比价的产品边界不变。
 
 **注 3：`opening_hours` 与 `ticket_price` 为 `reserved`。** 二者当前无生产者，且不在任何已裁决的近期范围内。转为 `active` 需要先有生产者。`opening_hours` 的 `feasibility_critical` 保留为「是」——景点开放时间直接决定活动能否排入某一天，一旦有生产者档位即生效。
 

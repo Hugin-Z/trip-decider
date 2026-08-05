@@ -123,6 +123,7 @@ class ParsedAmapPoi:
     province_code: str | None
     city_code: str | None
     district_code: str | None
+    reference_price_cny: float | None
 
 @dataclass(frozen=True)
 class ParsedAmapDistrictResponse:
@@ -262,6 +263,7 @@ def parse_amap_poi_response(
                     province_code=_optional_provider_text(item.get("pcode")),
                     city_code=_optional_provider_text(item.get("citycode")),
                     district_code=_optional_provider_text(item.get("adcode")),
+                    reference_price_cny=_optional_provider_price(item),
                 )
             )
     except _ProviderIssue:
@@ -509,6 +511,37 @@ def _optional_provider_text(value: object) -> str | None:
         return None
     if not isinstance(value, str):
         raise _ProviderIssue("optional provider text is invalid")
+    return value
+
+
+def _optional_provider_price(item: Mapping[str, object]) -> float | None:
+    """Read only an explicitly returned AMap POI reference price.
+
+    POI Search 2.0 exposes the field under ``business.cost``; older AMap
+    responses used ``biz_ext.cost``.  Both are provider-reported reference
+    prices, not live bookable hotel rates.  Missing, zero/non-positive,
+    non-numeric, and non-finite values stay absent instead of being inferred
+    from ratings or other POI metadata.
+    """
+
+    raw: object = None
+    for container_name in ("business", "biz_ext"):
+        container = item.get(container_name)
+        if isinstance(container, Mapping) and container.get("cost") not in (
+            None,
+            "",
+            [],
+        ):
+            raw = container.get("cost")
+            break
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
     return value
 
 def _freeze_value(value: object) -> object:

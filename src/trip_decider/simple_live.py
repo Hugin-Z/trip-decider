@@ -631,9 +631,10 @@ def search_live_places(
 ) -> dict[str, object]:
     """Search provider POIs without persisting raw response bytes.
 
-    This is the generic discovery/profile boundary.  It intentionally returns
-    only parsed provider fields and GCJ-02 coordinates; opening hours, prices
-    and editorial recommendations are not inferred from a POI response.
+    This is the generic discovery/profile boundary.  It returns parsed
+    provider fields, GCJ-02 coordinates, and an explicitly reported POI
+    reference price when present.  Opening hours, live bookable prices, and
+    editorial recommendations are never inferred from a POI response.
     """
 
     normalized_keyword = keyword.strip()
@@ -701,6 +702,7 @@ def search_live_places(
                 "city_code": poi.city_code,
                 "district_code": poi.district_code,
                 "location": location,
+                "reference_price_cny": poi.reference_price_cny,
             }
         )
     return {

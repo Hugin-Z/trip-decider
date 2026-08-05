@@ -2,7 +2,8 @@
 
 The static destination catalog is deliberately absent from this module.  All
 production candidates and planning facts originate in the current run's AMap
-queries; missing opening hours, ticket prices and hotel prices stay unknown.
+queries; missing opening hours and ticket prices stay unknown.  Hotel POI
+reference prices are estimates when explicitly returned and unknown otherwise.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import datetime
 import re
 
 from trip_decider.adapters.contracts import stable_identifier
+from trip_decider.evidence_core import derive_facts
 from trip_decider.simple_live import (
     list_live_top_level_regions,
     search_live_places,
@@ -459,12 +461,17 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
         for _kind, response in sourced
         if isinstance(response.get("source"), Mapping)
     )
+    priced_hotels = sum(
+        1
+        for hotel in hotels
+        if isinstance(hotel.get("price"), Mapping)
+        and hotel["price"].get("amount_cny") is not None
+    )
     value: dict[str, object] = {
         "destination_official_name": destination,
         "retrieved_at": retrieved_at,
         "attractions": attractions,
         "hotel_candidates": hotels,
-        "hotel_price_status": "UNKNOWN",
         "hotel_area": base,
         "route_sequence": (
             [str(base["route_query_name"]), *[
@@ -500,21 +507,60 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
             },
             {
                 "field": "hotel_price",
-                "support": "unknown_no_price_source",
+                "support": (
+                    "estimated_amap_poi_reference_price"
+                    if priced_hotels
+                    else "unknown_no_price_field"
+                ),
                 "retrieved_at": retrieved_at,
             },
         ],
         "missing_fields": [
-            "酒店实时价格与可订状态",
+            "酒店实时可订状态（高德参考价不是实时报价）",
             "景点开放时间的一手来源",
             "景点门票价格的一手来源",
         ],
+    }
+    # 住宿 POI 参考价与画像里的其余字段不是同一种证据：前者是服务商
+    # 估算且绝不允许缓存复用，后者是 POI 直接观测。直接落字段级 facts，
+    # 让同一 EvidenceItem 内两种 support/data_type 可以并存；UI 与判定层都
+    # 只读这份事实，不从 ``price`` 的存在与否另算一套状态。
+    facts = [
+        dict(fact)
+        for fact in derive_facts(
+            value,
+            "web-live-profile",
+            "web",
+            item_support="sourced",
+            data_type="destination_profile",
+            retrieved_at=retrieved_at,
+        )
+    ]
+    for fact in facts:
+        field = str(fact.get("field") or "")
+        if not re.fullmatch(
+            r"hotel_candidates\[\d+\]\.price\.amount_cny",
+            field,
+        ):
+            continue
+        _mark_hotel_price_fact(fact)
+        if fact.get("value") is None:
+            fact["support"] = "unknown"
+            fact["reason"] = "no_source_found"
+        else:
+            fact["support"] = "estimated"
+            fact.pop("reason", None)
+    persisted_value: dict[str, object] = {
+        "retrieved_at": retrieved_at,
+        "facts": facts,
     }
     if not attractions:
         return EvidenceItem(
             evidence_id="web-live-profile",
             domain="web",
             status=EvidenceStatus.MISSING,
+            # 保留既有 item 级失败语义：景点一个都没取到时整条画像为
+            # missing，EvidenceItem 会把所有字段下调为 unknown。
             value=value,
             sources=sources,
             missing_reason="no_live_attraction_candidates",
@@ -523,9 +569,19 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
         evidence_id="web-live-profile",
         domain="web",
         status=EvidenceStatus.SOURCED,
-        value=value,
+        value=persisted_value,
         sources=sources,
     )
+
+
+def _mark_hotel_price_fact(
+    fact: dict[str, object],
+    *,
+    data_type="hotel_price",
+) -> None:
+    """Bind one explicit hotel price leaf to the zero-reuse policy type."""
+
+    fact["data_type"] = data_type
 
 
 def _discovery_queries(intent: TravelIntent) -> tuple[str, ...]:
@@ -730,7 +786,7 @@ def _profile_hotels(
                 "area": place.get("district"),
                 "address": place.get("address"),
                 "location": deepcopy(place.get("location")),
-                "price": {"status": "UNKNOWN", "amount_cny": None},
+                "price": {"amount_cny": place.get("reference_price_cny")},
                 "source": "高德地图 POI Search 2.0",
             }
         )

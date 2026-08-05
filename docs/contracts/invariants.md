@@ -174,7 +174,11 @@ B1（五态在产品路径不存在）、M2（STALE 不暴露刷新信号）、M
 
 三条必须全测。只测第 1 条不足以证明不变式贯穿到判定层。
 
-### 优先级重估（2026-08-04，第五次实测后）
+### 已作废的优先级重估（2026-08-04，第五次实测后）
+
+> **2026-08-05 更正：** 更大样本确认高德 POI 的 `business.cost`（旧响应为
+> `biz_ext.cost`）在约六成住宿 POI 中可得。下面十条样本恰好全缺，因而把
+> “该批次未返回”误写成了“字段不存在”。本段只保留为历史记录，不再是裁决。
 
 hotel_price 五次实测五次被宿主点名「无可靠数据源」，因此实查了一次高德 POI 的
 可得性，看够不够支撑「价格区间」这个粒度。
@@ -203,7 +207,14 @@ business / indoor / navi / photos / children 全要上）：
 hotel_price 一旦可得，`I4` 的第 2、3 条断言才第一次有机会跑起来。建议不要在
 冻结前塞。
 
-### 当前状态：部分成立，但未被贯穿核对
+### 当前状态：已收尾（2026-08-05）
+
+高德 POI 明确返回的住宿参考价现在产出字段级
+`support=estimated` / `data_type=hotel_price`；字段缺席产出 `unknown`，绝不从
+评分、星级或地区均价推导。该字段不是实时可订价格，零容忍与禁止缓存复用策略
+保持不变。I4 的登记红项已删除。
+
+#### 历史阻塞说明（已失效）
 
 `evidence_broker.py:190-192` 的 `stale_after_failure()` 对 `not policy.stale_allowed` 直接 `return None`，即缓存层行为正确。但现有测试 `tests/test_evidence_broker.py:113-129`（`test_expired_or_never_stale_values_are_not_reused`）只断言上述第 1 条，第 2、3 条无覆盖。且 `hotel_price` 当前在产品路径中无生产者（`status == planned`，`freshness-policy.md` §2.2），因此第 2、3 条**在 P5 生产者落地前无法构造场景**——该部分测试登记为阻塞项。
 

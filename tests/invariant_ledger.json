@@ -3,15 +3,7 @@
   "established_at": "2026-08-02",
   "purpose": "P1-P5 期间不变式测试套件长期为红。本文件登记当前允许失败的测试；tests/test_invariant_ledger.py 断言实际失败集合与本登记逐条相等。多出失败是回归，少了失败是悄悄转绿未记录，两者都失败。",
   "maintenance": "每个阶段闸门都要求同步本文件：转绿的条目删除，新增的不变式测试补登记。登记只接受断言失败——无法构造场景的阻塞项必须用 assertXxx 表达阻塞原因，不得让异常逃逸。",
-  "entries": [
-    {
-      "test_id": "tests.test_invariant_i4_non_stale_types_blocked.NonStaleTypesBlockedCase.test_i4_non_stale_type_reaches_feasibility_as_unknown",
-      "invariant": "I4",
-      "expected_green_at": "P5",
-      "failing_assertion": "assertEqual([], ['hotel_price'])：唯一的 stale_allowed=False 类型在 src/ 中没有生产者，无法构造端到端场景",
-      "blocked_on": "P5：hotel_price 的 status 为 planned（planned_for=P5，freshness-policy.md §2.2 注 2）。生产者落地前只能核对缓存层（第 1 条），第 2、3 条无法执行。"
-    }
-  ],
+  "entries": [],
   "current_phase": "P5",
   "phase_order": [
     "P0",
@@ -26,9 +18,7 @@
   ],
   "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
   "exemptions": [],
-  "still_red_invariants": [
-    "I4"
-  ],
+  "still_red_invariants": [],
   "green_invariants": [
     "I2",
     "I3a",
@@ -40,9 +30,10 @@
     "I11",
     "I1",
     "I9",
-    "I12"
+    "I12",
+    "I4"
   ],
-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1；I12 于 P5 轮 3（增列即绿，见下）。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。余下只有 I4，等 hotel_price 生产者。",
+  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1；I12 于 P5 轮 3（增列即绿，见下）；I4 于 2026-08-05 由高德 POI 参考价字段级生产者收尾。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。ledger 全绿。",
   "lifecycle": {
     "I1": {
       "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
