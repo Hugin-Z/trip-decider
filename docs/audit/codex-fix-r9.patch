@@ -1,0 +1,1552 @@
+diff --git a/scripts/soak_full_loop.py b/scripts/soak_full_loop.py
+index bb6bb8f..fd93b83 100644
+--- a/scripts/soak_full_loop.py
++++ b/scripts/soak_full_loop.py
+@@ -32,7 +32,9 @@
+ from __future__ import annotations
+ 
+ import argparse
++from collections.abc import Mapping
+ from contextlib import contextmanager
++from copy import deepcopy
+ from dataclasses import dataclass, field
+ import json
+ import os
+@@ -47,6 +49,7 @@ from typing import Any
+ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+ 
+ from trip_decider.evidence_broker import EvidenceBroker  # noqa: E402
++from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE  # noqa: E402
+ from trip_decider.mcp_adapter import (  # noqa: E402
+     TripMCPAdapter,
+     TripMCPError,
+@@ -262,7 +265,7 @@ class _Soak:
+                 supplied = False
+                 for action in pending:
+                     domain = str(action.get("submit_action_id") or "")
+-                    payload = _synthetic_evidence(domain)
++                    payload = _synthetic_evidence(action)
+                     if payload is None:
+                         continue
+                     try:
+@@ -301,33 +304,16 @@ class _Soak:
+         return checkpoint
+ 
+     def _submit_probe(self, run_id: str, result: RoundResult) -> None:
+-        """提交一份形状合法的 map 证据，核对 accepted 与解析条数。"""
++        """原样采用公布的 map example，核对 accepted 与解析条数。"""
+ 
+         try:
++            payload = deepcopy(MAP_SEGMENT_EXAMPLE)
++            payload["sources"] = [
++                {"provider": "soak-probe", "retrieved_at": _now_iso()}
++            ]
+             response = self.adapter.submit_trip_evidence(
+                 run_id,
+-                {
+-                    "action_id": "map",
+-                    "value": {
+-                        "local_transit": [
+-                            {
+-                                "from": "住宿片区",
+-                                "to": "景区入口",
+-                                "duration_seconds": 1800,
+-                                "line": "景区班车",
+-                                "board_at": "住宿片区",
+-                                "alight_at": "景区入口",
+-                                "fare": 10.0,
+-                            }
+-                        ]
+-                    },
+-                    "sources": [
+-                        {
+-                            "provider": "soak-probe",
+-                            "retrieved_at": _now_iso(),
+-                        }
+-                    ],
+-                },
++                payload,
+             )
+         except TripMCPError as error:
+             # 被拒是允许的，但必须带理由（本轮新立的规矩）
+@@ -381,44 +367,24 @@ class _Soak:
+         return result
+ 
+ 
+-def _synthetic_evidence(domain: str) -> dict[str, Any] | None:
+-    """替宿主补一份形状合法的证据。
++def _synthetic_evidence(
++    action: Mapping[str, object],
++) -> dict[str, Any] | None:
++    """把 missing 公布的 example 原样变成宿主提交。
+ 
+     **不是在造事实**——soak 要验的是链路走不走得通，不是数据对不对；这些提交
+-    全部带 `provider: soak-probe`，一眼看得出不是真实来源。真实性由别的测试守。
++    只把来源标成 `soak-probe`、时间换成当前时刻。value 结构完全来自产品公布的
++    example；说明书一旦与机器解析器分叉，soak 与元用例会同时红。
+     """
+ 
+-    stamp = _now_iso()
+-    source = [{"provider": "soak-probe", "retrieved_at": stamp}]
+-    if domain == "web":
+-        return {
+-            "action_id": "web",
+-            "value": {
+-                "destination_official_name": "疲劳测试目的地",
+-                "hotel_area": {"name": "老城片区"},
+-                "verified_facts": [
+-                    {"claim": "片区集中了多数住宿",
+-                     "source_url": "https://example.invalid/a"},
+-                    {"claim": "有两处主要景点",
+-                     "source_url": "https://example.invalid/b"},
+-                ],
+-            },
+-            "sources": source,
+-        }
+-    if domain == "map":
+-        return {
+-            "action_id": "map",
+-            "value": {
+-                "local_transit": [
+-                    {"from": "住宿片区", "to": "景区入口",
+-                     "duration_seconds": 1800, "line": "景区班车",
+-                     "board_at": "住宿片区", "alight_at": "景区入口",
+-                     "fare": 10.0}
+-                ]
+-            },
+-            "sources": source,
+-        }
+-    return None
++    example = action.get("example")
++    if not isinstance(example, Mapping):
++        return None
++    payload = deepcopy(dict(example))
++    payload["sources"] = [
++        {"provider": "soak-probe", "retrieved_at": _now_iso()}
++    ]
++    return payload
+ 
+ 
+ def _day(offset: int, clock: str) -> str:
+diff --git a/src/trip_decider/agent_actions.py b/src/trip_decider/agent_actions.py
+index e110010..8f060c8 100644
+--- a/src/trip_decider/agent_actions.py
++++ b/src/trip_decider/agent_actions.py
+@@ -101,6 +101,35 @@ RAILWAY_MANUAL_OPTIONAL_FIELDS: tuple[str, ...] = tuple(
+     for field in ("second_class_fare_cny_per_person", "second_class_availability")
+ )
+ 
++#: 可直接作为 ``submit_trip_evidence(..., evidence=...)`` 参数回喂的完整示例。
++#: ``value`` 的嵌套层、action_id 与来源都在同一个对象里；missing 视图不再只
++#: 公布一段需要宿主自行猜包装方式的 JSON 字符串（I12 / D20）。
++RAILWAY_MANUAL_EXAMPLE: dict[str, object] = {
++    "action_id": "railway",
++    "value": {
++        "outbound": {
++            "train_code": "G100",
++            "departure_at": "2026-08-11T09:00",
++            "arrival_at": "2026-08-11T12:00",
++            "origin_station": "<出发站全称>",
++            "destination_station": "<到达站全称>",
++        },
++        "return": {
++            "train_code": "G101",
++            "departure_at": "2026-08-14T18:00",
++            "arrival_at": "2026-08-14T21:00",
++            "origin_station": "<到达站全称>",
++            "destination_station": "<出发站全称>",
++        },
++    },
++    "sources": [
++        {
++            "provider": "中国铁路12306",
++            "retrieved_at": "2026-08-05T13:30:00+08:00",
++        }
++    ],
++}
++
+ 
+ @dataclass
+ class _LoopState:
+@@ -585,6 +614,65 @@ def get_next_actions(
+         return _get_next_actions_unlocked(run_id, store=store)
+ 
+ 
++def pending_action_schemas(actions: object) -> list[dict[str, object]]:
++    """Project executable/manual actions into the one published evidence schema.
++
++    Both the blocked action snapshot and ``read_trip(view="missing")`` call this
++    function.  Keeping the record wrapper (action_id/value/sources), field scope,
++    and examples in one projection prevents a read-model copy from drifting away
++    from the parser contract again (D2/D5).
++    """
++
++    if not isinstance(actions, list):
++        return []
++    seen: set[str] = set()
++    schemas: list[dict[str, object]] = []
++    for action in actions:
++        if not isinstance(action, Mapping):
++            continue
++        action_id = str(action.get("action_id") or "")
++        if not action_id or action_id in seen:
++            continue
++        seen.add(action_id)
++        submit_action_id = str(
++            action.get("submit_action_id", action.get("action_id")) or ""
++        )
++        gate_schema = _evidence_gate_schema(submit_action_id)
++        required_fields = list(action.get("required_fields") or [])
++        optional_fields = list(action.get("optional_fields") or [])
++        example = action.get("example")
++        if gate_schema is not None:
++            # registered_tool / codex_web_research 也会成为宿主可回喂的证据门，
++            # 不能因为动作构造器没重复写说明书就投影出空 schema。域级提交门
++            # 是唯一兜底表；手工动作可在其上收窄字段，但不得把说明书清空。
++            if not required_fields:
++                required_fields = list(gate_schema["required_fields"])
++            if not optional_fields:
++                optional_fields = list(gate_schema["optional_fields"])
++            if not example:
++                example = gate_schema["example"]
++        schemas.append(
++            {
++                "action_id": action_id,
++                "submit_action_id": submit_action_id,
++                "title": action.get("title"),
++                "required_fields": required_fields,
++                "optional_fields": optional_fields,
++                **(
++                    {
++                        # required/optional 都是 example.value 内部的业务路径；
++                        # 外层 action_id/value/sources 由完整 example 直接示形。
++                        "field_scope": "example.value",
++                        "example": deepcopy(example),
++                    }
++                    if example
++                    else {}
++                ),
++            }
++        )
++    return schemas
++
++
+ def _pending_evidence_schemas(
+     run_id: str,
+     run: object,
+@@ -607,7 +695,7 @@ def _pending_evidence_schemas(
+     if intent is None:
+         return []
+     actions: list[Mapping[str, object]] = []
+-    for action_id in ("railway", "web", "map"):
++    for action_id in _DOMAINS:
+         if state.action_status.get(action_id) in {"waiting", "blocked", "failed"}:
+             try:
+                 actions.append(_registered_action(action_id, intent, state))
+@@ -619,30 +707,7 @@ def _pending_evidence_schemas(
+         actions.extend(_plan_followup_actions(intent, state))
+     except Exception:  # noqa: BLE001
+         pass
+-    seen: set[str] = set()
+-    schemas: list[dict[str, object]] = []
+-    for action in actions:
+-        action_id = str(action.get("action_id") or "")
+-        if not action_id or action_id in seen:
+-            continue
+-        seen.add(action_id)
+-        schemas.append(
+-            {
+-                "action_id": action_id,
+-                "submit_action_id": action.get(
+-                    "submit_action_id", action.get("action_id")
+-                ),
+-                "title": action.get("title"),
+-                "required_fields": list(action.get("required_fields") or []),
+-                "optional_fields": list(action.get("optional_fields") or []),
+-                **(
+-                    {"example": deepcopy(action["example"])}
+-                    if action.get("example")
+-                    else {}
+-                ),
+-            }
+-        )
+-    return schemas
++    return pending_action_schemas(actions)
+ 
+ 
+ def _get_next_actions_unlocked(
+@@ -1142,16 +1207,32 @@ def _submit_evidence_unlocked(
+             state.action_status["planner"] = "waiting"
+             state.result = None
+         _persist_loop_state(run_id, state, store)
+-        store.append_event(
+-            run_id,
+-            event_type="tool.completed",
+-            status="completed",
+-            message=f"{_action_title(action_id)}取得有效证据。",
+-            details={
+-                "tool": action_id,
+-                "support": "sourced",
+-            },
+-        )
++        submitted_values = usable_fact_values(item.facts)
++        if submitted_values:
++            store.append_event(
++                run_id,
++                event_type="tool.completed",
++                status="completed",
++                message=f"{_action_title(action_id)}取得有效证据。",
++                details={
++                    "tool": action_id,
++                    "support": "sourced",
++                },
++            )
++        else:
++            # accepted/stored 是记录级事实，sourced 是字段级结论。旧实现只看
++            # item.status，于是一个 0-fact 记录也会对外宣布 sourced（D22）。
++            store.append_event(
++                run_id,
++                event_type="tool.completed",
++                status="completed",
++                message=f"{_action_title(action_id)}未解析出字段级事实。",
++                details={
++                    "tool": action_id,
++                    "support": "unknown",
++                    "parsed_facts_count": 0,
++                },
++            )
+         return get_next_actions(run_id, store=store)
+ 
+     if action_id in state.last_sourced_evidence:
+@@ -1550,6 +1631,7 @@ def _manual_railway_action(
+         # 仍然 KeyError（D2）。
+         "required_fields": list(RAILWAY_MANUAL_REQUIRED_FIELDS),
+         "optional_fields": list(RAILWAY_MANUAL_OPTIONAL_FIELDS),
++        "example": deepcopy(RAILWAY_MANUAL_EXAMPLE),
+     }
+ 
+ 
+@@ -2415,7 +2497,7 @@ def _plan_followup_actions(
+                         *WEB_REQUIRED_FIELDS,
+                         WEB_ACCOMMODATION_FIELD,
+                     ],
+-                    "example": WEB_EXAMPLE,
++                    "example": deepcopy(WEB_EXAMPLE),
+                 },
+             )
+         )
+@@ -2447,7 +2529,7 @@ def _plan_followup_actions(
+                     f"local_transit[].{field}"
+                     for field in MAP_SEGMENT_OPTIONAL_FIELDS
+                 ],
+-                "example": MAP_SEGMENT_EXAMPLE,
++                "example": deepcopy(MAP_SEGMENT_EXAMPLE),
+             }
+         )
+     return actions
+@@ -2519,15 +2601,40 @@ MAP_SEGMENT_OPTIONAL_FIELDS = (
+     "last_departure",
+ )
+ 
+-#: 报错时给宿主看的「最近的合法形状」。只用于提示，不参与校验。
+-MAP_SEGMENT_EXAMPLE = (
+-    '{"local_transit": [{"from": "<起点>", "to": "<终点>", '
+-    '"duration_seconds": 1800, '
+-    '"services": [{"service": "<线路名>", "board_at": "<上车站>", '
+-    '"alight_at": "<下车站>"}], '
+-    '"fare": {"status": "sourced", "amount_cny": 15.0}, '
+-    '"headway_minutes": 25, "first_departure": "06:30"}]}'
+-)
++#: 报错与 missing 视图共用的「最近合法形状」。这是完整提交记录，不是
++#: 序列化后的 value 片段；调用方可以把它原样传给 evidence 参数。
++MAP_SEGMENT_EXAMPLE: dict[str, object] = {
++    "action_id": "map",
++    "value": {
++        "local_transit": [
++            {
++                "from": "<起点>",
++                "to": "<终点>",
++                "duration_seconds": 1800,
++                "services": [
++                    {
++                        "service": "<线路名>",
++                        "board_at": "<上车站>",
++                        "alight_at": "<下车站>",
++                    }
++                ],
++                "fare": {"status": "sourced", "amount_cny": 15.0},
++                "headway_minutes": 25,
++                "first_departure": "06:30",
++            }
++        ]
++    },
++    "sources": [
++        {
++            "provider": "<出处>",
++            "retrieved_at": "2026-08-05T13:30:00+08:00",
++        }
++    ],
++}
++
++
++def _example_text(example: Mapping[str, object]) -> str:
++    return json.dumps(example, ensure_ascii=False, separators=(",", ":"))
+ 
+ 
+ def _validate_map_value(value: object) -> None:
+@@ -2554,7 +2661,7 @@ def _validate_map_value(value: object) -> None:
+     if not isinstance(routes, list) or not routes:
+         raise TravelAgentError(
+             "local_transit 必须是非空数组；"
+-            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
++            f"最近的合法形状：{_example_text(MAP_SEGMENT_EXAMPLE)}"
+         )
+     problems: list[str] = []
+     for index, route in enumerate(routes):
+@@ -2586,7 +2693,7 @@ def _validate_map_value(value: object) -> None:
+             "；".join(problems)
+             + f"。每一段都要能回答「从哪到哪、要多久」——"
+             f"线路名、上下车站、票价是可选的补充。"
+-            f"最近的合法形状：{MAP_SEGMENT_EXAMPLE}"
++            f"最近的合法形状：{_example_text(MAP_SEGMENT_EXAMPLE)}"
+         )
+ 
+ 
+@@ -2596,16 +2703,87 @@ def _validate_map_value(value: object) -> None:
+ #: `verified_facts`，宿主照着声明填必被拒，且报错不说全套要什么。
+ WEB_REQUIRED_FIELDS = ("destination_official_name", "verified_facts")
+ 
++#: 景点列表进入规划器的最小形状。只有 ``name`` 没有稳定 id 时，编译器会
++#: 如实跳过该项；这正是第九次宿主实测 accepted=true 但 attraction_count=0
++#: 的消费层差异。
++WEB_ATTRACTION_REQUIRED_FIELDS = (
++    "attractions[].attraction_id",
++    "attractions[].name",
++)
++
+ #: 补住宿片区时**额外**要的。它是 `accommodation_base` 这个需求的专属要件，
+ #: 不是每份 web 证据都得有。
+ WEB_ACCOMMODATION_FIELD = "hotel_area.name"
+ 
+-WEB_EXAMPLE = (
+-    '{"destination_official_name": "<行政区全称>", '
+-    '"verified_facts": [{"claim": "<一句可核对的事实>", '
+-    '"source_url": "<出处链接>"}], '
+-    '"hotel_area": {"name": "<住宿片区名>"}}'
+-)
++WEB_EXAMPLE: dict[str, object] = {
++    "action_id": "web",
++    "value": {
++        "destination_official_name": "<行政区全称>",
++        "verified_facts": [
++            {
++                "claim": "<一句可核对的事实>",
++                "source_url": "<出处链接>",
++            }
++        ],
++        "attractions": [
++            {
++                "attraction_id": "<稳定景点ID>",
++                "name": "<景点名称>",
++                "route_query_name": "<地图检索名称>",
++                "visit_minutes": 120,
++            }
++        ],
++        "hotel_area": {"name": "<住宿片区名>"},
++    },
++    "sources": [
++        {
++            "provider": "<出处>",
++            "retrieved_at": "2026-08-05T13:30:00+08:00",
++        }
++    ],
++}
++
++
++def _evidence_gate_schema(action_id: str) -> dict[str, object] | None:
++    """Return the sole published, directly replayable schema for a gate.
++
++    ``_DOMAINS`` is the submission-gate inventory.  This function deliberately
++    has one branch for every member, so a new gate cannot silently inherit an
++    empty pending action: the scanning meta-test feeds every projected example
++    back through the real parser.
++    """
++
++    if action_id == "railway":
++        return {
++            "required_fields": RAILWAY_MANUAL_REQUIRED_FIELDS,
++            "optional_fields": RAILWAY_MANUAL_OPTIONAL_FIELDS,
++            "example": RAILWAY_MANUAL_EXAMPLE,
++        }
++    if action_id == "web":
++        return {
++            # web 的统一研究动作同时承担目的地、景点与住宿三个展示 gate；
++            # example 必须让三者都能增长，而不只是通过通用 web 校验。
++            "required_fields": (
++                *WEB_REQUIRED_FIELDS,
++                *WEB_ATTRACTION_REQUIRED_FIELDS,
++                WEB_ACCOMMODATION_FIELD,
++            ),
++            "optional_fields": (),
++            "example": WEB_EXAMPLE,
++        }
++    if action_id == "map":
++        return {
++            "required_fields": tuple(
++                f"local_transit[].{field}"
++                for field in MAP_SEGMENT_REQUIRED_FIELDS
++            ),
++            "optional_fields": tuple(
++                f"local_transit[].{field}"
++                for field in MAP_SEGMENT_OPTIONAL_FIELDS
++            ),
++            "example": MAP_SEGMENT_EXAMPLE,
++        }
++    return None
+ 
+ 
+ def _validate_web_value(value: object) -> None:
+@@ -2618,7 +2796,8 @@ def _validate_web_value(value: object) -> None:
+ 
+     if not isinstance(value, Mapping):
+         raise TravelAgentError(
+-            f"web evidence value must be an object。形状：{WEB_EXAMPLE}"
++            "web evidence value must be an object。形状："
++            f"{_example_text(WEB_EXAMPLE)}"
+         )
+     absent: list[str] = []
+     official_name = value.get("destination_official_name")
+@@ -2635,7 +2814,8 @@ def _validate_web_value(value: object) -> None:
+         raise TravelAgentError(
+             "web 证据缺：" + "、".join(absent)
+             + f"。景点、住宿片区这些都放在 verified_facts 里或与之并列，"
+-            f"但上面两项是每份 web 证据都要有的。形状：{WEB_EXAMPLE}"
++            "但上面两项是每份 web 证据都要有的。形状："
++            f"{_example_text(WEB_EXAMPLE)}"
+         )
+ 
+ 
+@@ -3159,6 +3339,7 @@ __all__ = [
+     "action_loop_started",
+     "ACTION_STALL_SECONDS",
+     "get_next_actions",
++    "pending_action_schemas",
+     "restart_action_loop_for_intent",
+     "resume_missing_action_loop",
+     "run_until_blocked",
+diff --git a/src/trip_decider/mcp_adapter.py b/src/trip_decider/mcp_adapter.py
+index 182f2fd..f5fa4ee 100644
+--- a/src/trip_decider/mcp_adapter.py
++++ b/src/trip_decider/mcp_adapter.py
+@@ -19,7 +19,11 @@ from trip_decider.trip_application import (
+     TripApplicationError,
+     TripApplicationService,
+ )
+-from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
++from trip_decider.agent_actions import (
++    MAP_SEGMENT_EXAMPLE,
++    RAILWAY_MANUAL_EXAMPLE,
++    WEB_EXAMPLE,
++)
+ from trip_decider.evidence_projection import usable_fact_values
+ from trip_decider.itinerary_verification import (
+     split_by_shape,
+@@ -100,24 +104,14 @@ _SYNCHRONOUS_DRIVE_BUDGET_SECONDS = 5.0
+ #: `itinerary_planner.RAIL_EVENT_REQUIRED_TRAIN_FIELDS` 派生）。这里再抄一份
+ #: 校验逻辑就又是两张表（D2）。
+ _EVIDENCE_HINT_BY_DOMAIN = {
+-    "railway": (
+-        'submit_trip_evidence(run_id, evidence={"action_id": "railway", '
+-        '"value": {"outbound": {...五个字段...}, "return": {...}}, '
+-        '"sources": [{"provider": "中国铁路12306", '
+-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+-    ),
+-    "map": (
+-        'submit_trip_evidence(run_id, evidence={"action_id": "map", '
+-        f'"value": {MAP_SEGMENT_EXAMPLE}, '
+-        '"sources": [{"provider": "<出处>", '
+-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+-    ),
+-    "web": (
+-        'submit_trip_evidence(run_id, evidence={"action_id": "web", '
+-        f'"value": {WEB_EXAMPLE}, '
+-        '"sources": [{"provider": "<出处>", '
+-        '"retrieved_at": "2026-08-04T10:00:00+08:00"}]})'
+-    ),
++    domain: "submit_trip_evidence(run_id, evidence="
++    + json.dumps(example, ensure_ascii=False)
++    + ")"
++    for domain, example in {
++        "railway": RAILWAY_MANUAL_EXAMPLE,
++        "map": MAP_SEGMENT_EXAMPLE,
++        "web": WEB_EXAMPLE,
++    }.items()
+ }
+ 
+ #: 不知道宿主想提交哪个域时的通用提示。**先看 missing** 比猜一个域有用。
+diff --git a/src/trip_decider/mcp_app_workspace_v1.html b/src/trip_decider/mcp_app_workspace_v1.html
+index d8f4247..62707ef 100644
+--- a/src/trip_decider/mcp_app_workspace_v1.html
++++ b/src/trip_decider/mcp_app_workspace_v1.html
+@@ -109,8 +109,12 @@
+   </style>
+ </head>
+ <body>
+-  <main id="app" class="app" aria-live="polite">
+-    <div class="notice">正在连接旅行任务…</div>
++  <main id="app" class="app" aria-live="polite" data-render-state="degraded">
++    <section class="panel local-fallback">
++      <h2 class="title">旅行视图暂未收到宿主数据</h2>
++      <p class="subtitle">完整结构化结果仍保留在本次工具返回中。</p>
++      <p class="subtitle">若数据稍后到达将自动刷新。</p>
++    </section>
+   </main>
+   <script>
+     (() => {
+@@ -119,7 +123,27 @@
+       let busy = false;
+       let rpcId = 0;
+       let hostContext = null;
++      let hasRendered = false;
+       const pending = new Map();
++      const appConfig = (
++        window.tripDeciderAppConfig
++        && typeof window.tripDeciderAppConfig === "object"
++      ) ? window.tripDeciderAppConfig : {};
++      const timeoutOr = (value, fallback) => (
++        typeof value === "number" && Number.isFinite(value) && value > 0
++          ? value
++          : fallback
++      );
++      const DEFAULT_FIRST_RENDER_TIMEOUT_MS = 5000;
++      const FIRST_RENDER_TIMEOUT_MS = timeoutOr(
++        appConfig.firstRenderTimeoutMs,
++        DEFAULT_FIRST_RENDER_TIMEOUT_MS,
++      );
++      const BRIDGE_TIMEOUT_MS = timeoutOr(
++        appConfig.bridgeTimeoutMs,
++        FIRST_RENDER_TIMEOUT_MS,
++      );
++      app.dataset.firstRenderTimeoutMs = String(FIRST_RENDER_TIMEOUT_MS);
+ 
+       const element = (tag, className, text) => {
+         const node = document.createElement(tag);
+@@ -150,10 +174,27 @@
+         PLAN_READY: "行程已生成",
+       };
+ 
+-      const request = (method, params) => new Promise((resolve, reject) => {
++      const request = (method, params, timeoutMs = 0) => new Promise((resolve, reject) => {
+         const id = ++rpcId;
+-        pending.set(id, {resolve, reject});
+-        window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
++        let timer = null;
++        const finish = (callback) => (value) => {
++          if (timer !== null) clearTimeout(timer);
++          callback(value);
++        };
++        pending.set(id, {resolve: finish(resolve), reject: finish(reject)});
++        if (timeoutMs > 0) {
++          timer = setTimeout(() => {
++            pending.delete(id);
++            reject(new Error(`${method} timed out`));
++          }, timeoutMs);
++        }
++        try {
++          window.parent.postMessage({jsonrpc: "2.0", id, method, params}, "*");
++        } catch (error) {
++          pending.delete(id);
++          if (timer !== null) clearTimeout(timer);
++          reject(error);
++        }
+       });
+       const notify = (method, params) => {
+         const message = {jsonrpc: "2.0", method};
+@@ -172,7 +213,11 @@
+           return;
+         }
+         if (message.method === "ui/notifications/tool-result") {
+-          renderPayload(message.params?.structuredContent);
++          renderPayload(
++            message.params?.structuredContent
++            || message.params?.structured_content,
++            "mcp-tool-result",
++          );
+         }
+       };
+ 
+@@ -185,7 +230,10 @@
+         const report = () => {
+           if (scheduled) return;
+           scheduled = true;
+-          requestAnimationFrame(() => {
++          const schedule = typeof requestAnimationFrame === "function"
++            ? requestAnimationFrame
++            : (callback) => setTimeout(callback, 0);
++          schedule(() => {
+             scheduled = false;
+             notify("ui/notifications/size-changed", {
+               width: Math.ceil(window.innerWidth),
+@@ -194,20 +242,25 @@
+           });
+         };
+         report();
+-        new ResizeObserver(report).observe(document.documentElement);
++        if (typeof ResizeObserver === "function") {
++          new ResizeObserver(report).observe(document.documentElement);
++        }
+       };
+       const initialize = async () => {
+-        const result = await request("ui/initialize", {
+-          appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
+-          appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]},
+-          protocolVersion: "2026-01-26",
+-        });
++        const result = await request("ui/initialize",
++          {
++            appInfo: {name: "trip-decider-workspace", version: "1.0.0"},
++            appCapabilities: {availableDisplayModes: ["inline", "fullscreen"]},
++            protocolVersion: "2026-01-26",
++          },
++          BRIDGE_TIMEOUT_MS,
++        );
+         hostContext = result?.hostContext || null;
+         notify("ui/notifications/initialized");
+         startSizeNotifications();
+         return result;
+       };
+-      const bridgeReady = initialize().catch(() => null);
++      let bridgeReady = Promise.resolve(null);
+ 
+       const structured = (response) => response?.structuredContent || response?.structured_content || null;
+       const callTool = async (name, args) => {
+@@ -440,7 +493,7 @@
+               await callTool("advance_trip_task", {run_id: payload.run_id, wait_seconds: 10});
+               const response = await callTool("show_trip_plan", {run_id: payload.run_id});
+               const next = structured(response);
+-              if (next) renderPayload(next);
++              if (next) renderPayload(next, "app-tool-call:show_trip_plan");
+             } catch (_) {
+               const notice = element("div", "notice error", "暂时无法继续该方案。可以在对话中继续推进同一任务。");
+               card.append(notice);
+@@ -640,7 +693,10 @@
+               // revise 的结构化结果仍是失败时可保留的完整业务回退。
+               try {
+                 const refreshed = structured(await callTool("show_trip_plan", {run_id: payload.run_id}));
+-                if (refreshed) renderPayload(refreshed);
++                if (refreshed) renderPayload(
++                  refreshed,
++                  "app-tool-call:show_trip_plan",
++                );
+                 else renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
+               } catch (_) {
+                 renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
+@@ -782,14 +838,52 @@
+         app.append(panel, element("p", "muted", payload.scope_note || ""));
+       };
+ 
+-      const renderPayload = (payload) => {
+-        if (!payload || typeof payload !== "object") return;
++      const renderPayload = (payload, channel = "unspecified") => {
++        app.dataset.payloadArrivedAt = new Date().toISOString();
++        app.dataset.payloadChannel = channel;
++        if (!payload || typeof payload !== "object") return false;
+         if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
+         else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
+         else if (payload.view === "verification" || payload.artifact_kind === "ItineraryVerification") renderVerification(payload);
++        else return false;
++        hasRendered = true;
++        app.dataset.renderState = "ready";
++        return true;
+       };
+ 
+-      if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);
++      const renderLocalFallback = () => {
++        if (hasRendered) return;
++        const panel = element("section", "panel local-fallback");
++        panel.append(
++          element("h2", "title", "旅行视图暂未收到宿主数据"),
++          element(
++            "p",
++            "subtitle",
++            `交互桥接未在 ${FIRST_RENDER_TIMEOUT_MS / 1000} 秒内就绪；`
++              + "完整结构化结果仍保留在本次工具返回中。",
++          ),
++          element("p", "subtitle", "若数据稍后到达将自动刷新。"),
++        );
++        app.replaceChildren(panel);
++        app.dataset.renderState = "degraded";
++      };
++
++      // 首屏只消费工具已经返回的数据，不等待 initialize，也不发网络请求。
++      // 标准 MCP Apps 通知负责 Claude Desktop；openai:set_globals/toolOutput 是
++      // 跨宿主的本地注入通道。桥接只影响后续按钮，不再决定首屏能否收工。
++      window.addEventListener("openai:set_globals", (event) => {
++        renderPayload(
++          event.detail?.globals?.toolOutput
++          || event.detail?.toolOutput
++          || event.detail?.structuredContent,
++          "openai-set-globals",
++        );
++      });
++      if (window.openai?.toolOutput) {
++        renderPayload(window.openai.toolOutput, "openai-tool-output");
++      }
++      setTimeout(renderLocalFallback, FIRST_RENDER_TIMEOUT_MS);
++      bridgeReady = initialize().catch(() => null);
+     })();
+   </script>
+ </body>
+diff --git a/src/trip_decider/mcp_server.py b/src/trip_decider/mcp_server.py
+index be90d5c..537feb2 100644
+--- a/src/trip_decider/mcp_server.py
++++ b/src/trip_decider/mcp_server.py
+@@ -205,7 +205,9 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+             "【view 取值】\n"
+             '"overview"（默认）任务全貌 + 各域证据的新鲜度；\n'
+             '"plan" 当前已安装行程（含每段的证据依赖）；\n'
+-            '"missing" 还缺什么、每一项该由谁补——**要补证据前先看这个**；\n'
++            '"missing" 还缺什么、每一项该由谁补——**要补证据前先看这个**。'
++            "其中 required_fields/optional_fields 均相对 example.value，example "
++            "本身是可直接作为 submit_trip_evidence 的 evidence 参数回喂的完整对象；\n"
+             '"candidates" 候选比较结果；\n'
+             '"map" 地图标记与路线；\n'
+             '"audit" 审计结论。\n'
+diff --git a/src/trip_decider/trip_application.py b/src/trip_decider/trip_application.py
+index 99fb568..1280bac 100644
+--- a/src/trip_decider/trip_application.py
++++ b/src/trip_decider/trip_application.py
+@@ -82,19 +82,6 @@ BACKGROUND_DRIVE_BUDGET_SECONDS = ACTION_STALL_SECONDS + 15.0
+ 
+ 
+ 
+-def _submitted_domain(evidence: object) -> str | None:
+-    """这次提交的是哪个域。用于回报解析出的事实条数。"""
+-
+-    if isinstance(evidence, EvidenceItem):
+-        return evidence.domain
+-    if isinstance(evidence, Mapping):
+-        for key in ("action_id", "domain"):
+-            value = evidence.get(key)
+-            if isinstance(value, str) and value.strip():
+-                return value.strip()
+-    return None
+-
+-
+ class TripApplicationError(ValueError):
+     """A caller supplied an invalid application command."""
+ 
+@@ -574,17 +561,19 @@ class TripApplicationService:
+         所以这里逐层防御取值，任何一层缺失都归 0，而不是让读取本身炸掉。
+         """
+ 
+-        domain = _submitted_domain(evidence)
+-        if not domain:
+-            return 0
+-        stored = self.current_run_evidence(run_id).get(domain)
+-        if not isinstance(stored, Mapping):
+-            return 0
+-        value = stored.get("value")
+-        if not isinstance(value, Mapping):
++        del run_id
++        try:
++            if isinstance(evidence, EvidenceItem):
++                item = evidence
++            else:
++                raw = dict(evidence)
++                raw.pop("action_id", None)
++                item = EvidenceItem.from_mapping(raw)
++        except (TypeError, ValueError, TravelAgentError):
+             return 0
+-        facts = value.get("facts")
+-        return len(facts) if isinstance(facts, list) else 0
++        # 只报**本次记录**解析出的事实，不读合并后的整域累计值。否则一条
++        # 0-fact 提交会借旧记录的 facts 对外报非零（D22）。
++        return len(item.facts)
+ 
+     def select_hotel(
+         self,
+diff --git a/src/trip_decider/trip_query.py b/src/trip_decider/trip_query.py
+index 626aae1..38b07ec 100644
+--- a/src/trip_decider/trip_query.py
++++ b/src/trip_decider/trip_query.py
+@@ -17,6 +17,7 @@ from trip_decider.trip_application import (
+     default_trip_application_service,
+     TripApplicationService,
+ )
++from trip_decider.agent_actions import pending_action_schemas
+ from trip_decider.trip_read_model import (
+     _map_payload_contract,
+     _planning_draft_read_model,
+@@ -546,23 +547,7 @@ class TripQueryService:
+         actions = snapshot.get("actions") or snapshot.get("pending_actions")
+         if not isinstance(actions, list):
+             return []
+-        pending: list[dict[str, object]] = []
+-        for action in actions:
+-            if not isinstance(action, Mapping):
+-                continue
+-            entry: dict[str, object] = {
+-                "action_id": action.get("action_id"),
+-                "submit_action_id": action.get(
+-                    "submit_action_id", action.get("action_id")
+-                ),
+-                "title": action.get("title"),
+-                "required_fields": list(action.get("required_fields") or []),
+-                "optional_fields": list(action.get("optional_fields") or []),
+-            }
+-            if action.get("example"):
+-                entry["example"] = deepcopy(action["example"])
+-            pending.append(entry)
+-        return pending
++        return pending_action_schemas(actions)
+ 
+     def audit_result(self, run_id: str) -> dict[str, object]:
+         run = self.store.get_run(run_id)
+diff --git a/tests/test_invariant_i12_all_domains.py b/tests/test_invariant_i12_all_domains.py
+index 7d6601e..d6607a0 100644
+--- a/tests/test_invariant_i12_all_domains.py
++++ b/tests/test_invariant_i12_all_domains.py
+@@ -28,6 +28,7 @@ from copy import deepcopy
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from tempfile import TemporaryDirectory
++import json
+ import unittest
+ 
+ from trip_decider.agent_actions import (
+@@ -396,11 +397,9 @@ class DeclarationMatchesConsumptionCase(unittest.TestCase):
+     def test_the_example_satisfies_the_gate(self) -> None:
+         """给宿主看的示例必须真的能过门，否则是在骗它。"""
+ 
+-        import json
+-
+         from trip_decider.agent_actions import _validate_map_value
+ 
+-        _validate_map_value(json.loads(MAP_SEGMENT_EXAMPLE))
++        _validate_map_value(MAP_SEGMENT_EXAMPLE["value"])
+ 
+ 
+ if __name__ == "__main__":
+@@ -495,7 +494,10 @@ class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
+         with self.assertRaises(TripMCPError) as caught:
+             self._submit(dict(HOST_WEB_SUBMISSIONS["宿主自然写法：景点列表"]))
+ 
+-        self.assertIn(WEB_EXAMPLE, str(caught.exception))
++        self.assertIn(
++            json.dumps(WEB_EXAMPLE, ensure_ascii=False, separators=(",", ":")),
++            str(caught.exception),
++        )
+ 
+     def test_the_declared_required_fields_match_what_the_gate_enforces(
+         self,
+@@ -518,11 +520,9 @@ class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
+     def test_the_example_itself_passes_the_gate(self) -> None:
+         """给宿主看的示例必须真的能过门，否则是在骗它。"""
+ 
+-        import json
+-
+         from trip_decider.agent_actions import WEB_EXAMPLE, _validate_web_value
+ 
+-        _validate_web_value(json.loads(WEB_EXAMPLE))
++        _validate_web_value(WEB_EXAMPLE["value"])
+ 
+ 
+ #: 宿主第六次实测的三份真实提交形状（脱敏：地名换占位，其余原样）。
+diff --git a/tests/test_mcp_app_views.py b/tests/test_mcp_app_views.py
+index 7fba9db..5417aac 100644
+--- a/tests/test_mcp_app_views.py
++++ b/tests/test_mcp_app_views.py
+@@ -69,7 +69,12 @@ def _badge_styles(html: str) -> dict[str, str]:
+     return result
+ 
+ 
+-def _render_resource(payload: dict[str, object]) -> dict[str, object]:
++def _render_resource(
++    payload: dict[str, object] | None,
++    *,
++    delivery: str = "openai",
++    app_config: dict[str, object] | None = None,
++) -> dict[str, object]:
+     """Execute the shipped MCP App script against a minimal deterministic DOM."""
+ 
+     node = shutil.which("node")
+@@ -77,6 +82,19 @@ def _render_resource(payload: dict[str, object]) -> dict[str, object]:
+         raise AssertionError("content-level MCP App tests require Node.js")
+     html = load_trip_mcp_app_html()
+     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
++    payload_json = json.dumps(payload, ensure_ascii=False)
++    openai_global = (
++        f"openai: {{toolOutput: {payload_json}}},"
++        if delivery == "openai"
++        else ""
++    )
++    app_config_global = (
++        "tripDeciderAppConfig: "
++        + json.dumps(app_config, ensure_ascii=False)
++        + ","
++        if app_config is not None
++        else ""
++    )
+     harness = f"""
+ class FakeNode {{
+   constructor(tag) {{
+@@ -104,6 +122,12 @@ class FakeNode {{
+   get childElementCount() {{ return this.children.length; }}
+ }}
+ const app = new FakeNode("main");
++app.dataset.renderState = "degraded";
++const initialFallback = new FakeNode("section");
++initialFallback.className = "panel local-fallback";
++initialFallback.textContent = "完整结构化结果仍保留在本次工具返回中。";
++app.append(initialFallback);
++const listeners = {{}};
+ global.document = {{
+   getElementById: () => app,
+   createElement: (tag) => new FakeNode(tag),
+@@ -112,24 +136,71 @@ global.document = {{
+ }};
+ global.window = {{
+   parent: null,
+-  addEventListener() {{}},
++  addEventListener(name, callback) {{
++    (listeners[name] ||= []).push(callback);
++  }},
+   innerWidth: 900,
+-  openai: {{toolOutput: {json.dumps(payload, ensure_ascii=False)}}},
++  {app_config_global}
++  {openai_global}
+ }};
+ window.parent = window;
+-window.postMessage = () => {{}};
++const dispatch = (name, data) => {{
++  (listeners[name] || []).forEach((callback) => callback({{
++    source: window.parent,
++    data,
++  }}));
++}};
++window.postMessage = (message) => {{
++  if ({json.dumps(delivery)} !== "mcp") return;
++  if (message.method === "ui/initialize") {{
++    dispatch("message", {{
++      jsonrpc: "2.0",
++      id: message.id,
++      result: {{hostCapabilities: {{}}, hostContext: {{}}}},
++    }});
++  }} else if (message.method === "ui/notifications/initialized") {{
++    dispatch("message", {{
++      jsonrpc: "2.0",
++      method: "ui/notifications/tool-result",
++      params: {{structuredContent: {payload_json}}},
++    }});
++  }}
++}};
+ global.requestAnimationFrame = () => {{}};
+ global.ResizeObserver = class {{ observe() {{}} }};
++const timers = [];
++global.setTimeout = (callback) => {{
++  const timer = {{callback, active: true}};
++  timers.push(timer);
++  return timer;
++}};
++global.clearTimeout = (timer) => {{ if (timer) timer.active = false; }};
+ {script}
+ const serialize = (node) => ({{
+   tag: node.tagName,
+   className: node.className,
+   text: node._text,
+-  dataset: node.dataset,
+-  attributes: node.attributes,
++  dataset: {{...node.dataset}},
++  attributes: {{...node.attributes}},
+   children: node.children.map(serialize),
+ }});
+-process.stdout.write(JSON.stringify(serialize(app)));
++setImmediate(() => {{
++  timers.filter((timer) => timer.active).forEach((timer) => timer.callback());
++  const afterTimeout = serialize(app);
++  if ({json.dumps(delivery)} === "late-mcp") {{
++    dispatch("message", {{
++      jsonrpc: "2.0",
++      method: "ui/notifications/tool-result",
++      params: {{structuredContent: {payload_json}}},
++    }});
++    setImmediate(() => process.stdout.write(JSON.stringify({{
++      after_timeout: afterTimeout,
++      after_payload: serialize(app),
++    }})));
++  }} else {{
++    setImmediate(() => process.stdout.write(JSON.stringify(serialize(app))));
++  }}
++}});
+ """
+     completed = subprocess.run(
+         [node, "-"],
+@@ -146,6 +217,24 @@ process.stdout.write(JSON.stringify(serialize(app)));
+     return json.loads(completed.stdout)
+ 
+ 
++def _assert_first_screen_finished(
++    testcase: unittest.TestCase,
++    rendered: dict[str, object],
++    *,
++    state: str = "ready",
++) -> None:
++    testcase.assertEqual(state, rendered["dataset"].get("renderState"))
++    testcase.assertEqual(
++        [],
++        [
++            node
++            for node in _walk(rendered)
++            if node.get("dataset", {}).get("loading") == "true"
++            or _has_class(node, "loading-state")
++        ],
++    )
++
++
+ def _rail_item() -> dict[str, object]:
+     return EvidenceItem(
+         evidence_id="rail-live",
+@@ -366,6 +455,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
+         }
+ 
+         rendered = _render_resource(payload)
++        _assert_first_screen_finished(self, rendered)
+ 
+         badges = _nodes(rendered, tag="span", class_name="token")
+         self.assertEqual(tokens, [badge["dataset"]["token"] for badge in badges])
+@@ -455,6 +545,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
+         )
+ 
+         rendered = _render_resource(payload)
++        _assert_first_screen_finished(self, rendered)
+ 
+         subtitles = [
+             _node_text(node)
+@@ -485,6 +576,7 @@ class MCPAppEnvelopeCase(unittest.TestCase):
+         self.assertNotIn("缺坐标景点", {marker["name"] for marker in markers})
+ 
+         rendered = _render_resource(payload)
++        _assert_first_screen_finished(self, rendered)
+         points = _nodes(rendered, tag="circle", class_name="map-point")
+         labels = {
+             _node_text(node)
+@@ -501,6 +593,93 @@ class MCPAppResourceShapeCase(unittest.TestCase):
+         for renderer in ("renderCandidates", "renderPlan", "renderVerification"):
+             self.assertIn(renderer, html)
+         self.assertIn("mapFigure", html)
++        self.assertIn('data-render-state="degraded"', html)
++        self.assertIn("完整结构化结果仍保留在本次工具返回中", html)
++        self.assertNotIn("loading-state", html)
++        self.assertNotIn("data-loading", html)
++
++    def test_standard_mcp_notification_renders_without_network_or_globals(
++        self,
++    ) -> None:
++        payload = {
++            "view": "candidates",
++            "run_id": "run-mcp-notification",
++            "candidates": {
++                "candidates": [
++                    {"destination_id": "candidate-one", "name": "候选甲"}
++                ]
++            },
++            "candidate_maps": {},
++        }
++
++        rendered = _render_resource(payload, delivery="mcp")
++
++        _assert_first_screen_finished(self, rendered)
++        self.assertIn("候选甲", _node_text(rendered))
++
++    def test_no_bridge_or_payload_reaches_an_explicit_local_degraded_view(
++        self,
++    ) -> None:
++        rendered = _render_resource(None, delivery="none")
++
++        _assert_first_screen_finished(self, rendered, state="degraded")
++        fallback = _nodes(rendered, tag="section", class_name="local-fallback")
++        self.assertEqual(1, len(fallback))
++        self.assertIn("完整结构化结果", _node_text(fallback[0]))
++        self.assertIn("若数据稍后到达将自动刷新", _node_text(fallback[0]))
++        self.assertEqual("5000", rendered["dataset"]["firstRenderTimeoutMs"])
++
++    def test_first_render_timeout_is_host_configurable(self) -> None:
++        rendered = _render_resource(
++            None,
++            delivery="none",
++            app_config={"firstRenderTimeoutMs": 7500},
++        )
++
++        _assert_first_screen_finished(self, rendered, state="degraded")
++        self.assertEqual("7500", rendered["dataset"]["firstRenderTimeoutMs"])
++        self.assertIn("7.5 秒内", _node_text(rendered))
++
++    def test_late_payload_replaces_degraded_view_and_renders_all_content(
++        self,
++    ) -> None:
++        payload = {
++            "view": "candidates",
++            "run_id": "run-late-payload",
++            "candidates": {
++                "candidates": [
++                    {
++                        "destination_id": "candidate-late",
++                        "name": "晚到但完整的候选",
++                        "recommendation": "真实 payload 到达后必须覆盖降级页",
++                    }
++                ]
++            },
++            "candidate_maps": {},
++        }
++
++        states = _render_resource(payload, delivery="late-mcp")
++        degraded = states["after_timeout"]
++        ready = states["after_payload"]
++
++        _assert_first_screen_finished(self, degraded, state="degraded")
++        self.assertEqual(
++            1,
++            len(_nodes(degraded, tag="section", class_name="local-fallback")),
++        )
++        _assert_first_screen_finished(self, ready)
++        self.assertIn("晚到但完整的候选", _node_text(ready))
++        self.assertIn("选择并生成详细行程", _node_text(ready))
++        self.assertEqual(
++            [],
++            _nodes(ready, tag="section", class_name="local-fallback"),
++        )
++        self.assertNotIn("旅行视图暂未收到宿主数据", _node_text(ready))
++        self.assertEqual("mcp-tool-result", ready["dataset"]["payloadChannel"])
++        self.assertRegex(
++            ready["dataset"]["payloadArrivedAt"],
++            r"^\d{4}-\d{2}-\d{2}T",
++        )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/test_submit_tells_the_truth.py b/tests/test_submit_tells_the_truth.py
+index 4932264..14794e4 100644
+--- a/tests/test_submit_tells_the_truth.py
++++ b/tests/test_submit_tells_the_truth.py
+@@ -28,11 +28,17 @@
+ 
+ from __future__ import annotations
+ 
++from copy import deepcopy
+ from pathlib import Path
+ from tempfile import TemporaryDirectory
+ import unittest
+ 
+-from trip_decider.agent_actions import submit_evidence
++from trip_decider.agent_actions import (
++    _DOMAINS,
++    execute_registered_action,
++    pending_action_schemas,
++    submit_evidence,
++)
+ from trip_decider.evidence_broker import EvidenceBroker
+ from trip_decider.evidence_projection import usable_fact_values
+ from trip_decider.mcp_adapter import TripMCPAdapter
+@@ -151,6 +157,267 @@ class NoHalfAcceptanceCase(_Harness):
+             len(usable_fact_values(stored_facts).get("local_transit") or []),
+         )
+ 
++    def test_published_local_transit_example_completes_the_full_chain(
++        self,
++    ) -> None:
++        """决定性测试 v2：外部方只照 missing 公布的形状回喂。
++
++        v1 把 live-query 的内部对象交给 user_supply，只证明两条入口共用
++        extractor；这条不读任何内部 value 结构，只消费 pending_action 的
++        ``submit_action_id`` 与 ``example``，再看字段级事实与 read model。
++        """
++
++        for item in (controlled_railway(), controlled_web()):
++            self.adapter.submit_trip_evidence(
++                self.run_id,
++                {
++                    "action_id": item.domain,
++                    "value": dict(item.value),
++                    "sources": [dict(source) for source in item.sources],
++                },
++            )
++        self.adapter.submit_trip_evidence(
++            self.run_id,
++            {
++                "action_id": "map",
++                "status": "missing",
++                "missing_reason": "宿主地图查询没有返回路线",
++            },
++        )
++        execute_registered_action(self.run_id, "planner", store=self.store)
++
++        missing = self.adapter.read_trip(self.run_id, view="missing")
++        action = next(
++            item
++            for item in missing["pending_actions"]
++            if item["action_id"] == "local_transit_manual"
++        )
++        before = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["local_transit_count"]
++
++        # 旧说明书只公布一个 JSON 字符串。外部方没有内部结构可参考，只能把
++        # example 原值作为工具 schema 所说的 value 提交；修复后的完整 example
++        # 则应当能够不加解释地原样提交。
++        example = action["example"]
++        submission = (
++            dict(example)
++            if isinstance(example, dict)
++            else {
++                "action_id": action["submit_action_id"],
++                "value": example,
++                "sources": [
++                    {
++                        "provider": "external-host",
++                        "retrieved_at": "2026-08-05T13:30:00+08:00",
++                    }
++                ],
++            }
++        )
++        response = self.adapter.submit_trip_evidence(
++            self.run_id,
++            submission,
++        )
++
++        self.assertGreater(
++            response["parsed_facts_count"],
++            0,
++            "missing 公布的 example 被 accepted，却没有解析出字段级事实",
++        )
++        execute_registered_action(self.run_id, "planner", store=self.store)
++        after = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["local_transit_count"]
++        self.assertGreater(
++            after,
++            before,
++            "照 example 提交后，collected_information.local_transit_count 没增长",
++        )
++
++    def test_published_accommodation_example_completes_the_full_chain(
++        self,
++    ) -> None:
++        rail = controlled_railway()
++        self.adapter.submit_trip_evidence(
++            self.run_id,
++            {
++                "action_id": "railway",
++                "value": dict(rail.value),
++                "sources": [dict(source) for source in rail.sources],
++            },
++        )
++        for action_id in ("web", "map"):
++            self.adapter.submit_trip_evidence(
++                self.run_id,
++                {
++                    "action_id": action_id,
++                    "status": "missing",
++                    "missing_reason": f"{action_id} 查询没有返回结果",
++                },
++            )
++        execute_registered_action(self.run_id, "planner", store=self.store)
++
++        action = next(
++            item
++            for item in self.adapter.read_trip(
++                self.run_id,
++                view="missing",
++            )["pending_actions"]
++            if item["action_id"] == "accommodation_base_manual"
++        )
++        before = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["accommodation_base"]
++        response = self.adapter.submit_trip_evidence(
++            self.run_id,
++            deepcopy(action["example"]),
++        )
++
++        self.assertGreater(response["parsed_facts_count"], 0)
++        execute_registered_action(self.run_id, "planner", store=self.store)
++        after = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["accommodation_base"]
++        self.assertFalse(before)
++        self.assertTrue(
++            after,
++            "照住宿 example 提交后，collected_information.accommodation_base 未增长",
++        )
++
++    def test_published_attraction_example_completes_the_full_chain(
++        self,
++    ) -> None:
++        """外部方只读 attraction pending schema 也能补进景点事实。"""
++
++        rail = controlled_railway()
++        self.adapter.submit_trip_evidence(
++            self.run_id,
++            {
++                "action_id": "railway",
++                "value": dict(rail.value),
++                "sources": [dict(source) for source in rail.sources],
++            },
++        )
++        for action_id in ("web", "map"):
++            self.adapter.submit_trip_evidence(
++                self.run_id,
++                {
++                    "action_id": action_id,
++                    "status": "missing",
++                    "missing_reason": f"{action_id} 查询没有返回结果",
++                },
++            )
++        execute_registered_action(self.run_id, "planner", store=self.store)
++
++        action = next(
++            item
++            for item in self.adapter.read_trip(
++                self.run_id,
++                view="missing",
++            )["pending_actions"]
++            if item["submit_action_id"] == "web"
++        )
++        before = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["attraction_count"]
++        response = self.adapter.submit_trip_evidence(
++            self.run_id,
++            deepcopy(action["example"]),
++        )
++
++        self.assertGreater(response["parsed_facts_count"], 0)
++        execute_registered_action(self.run_id, "planner", store=self.store)
++        after = self.adapter.read_trip(self.run_id)["presentation"][
++            "planning_draft"
++        ]["collected_information"]["attraction_count"]
++        self.assertEqual(0, before)
++        self.assertGreater(
++            after,
++            before,
++            "照 attraction example 提交后，attraction_count 仍为 0",
++        )
++
++    def test_every_published_user_supply_example_is_directly_replayable(
++        self,
++    ) -> None:
++        """扫描式契约：missing 公布多少 example，机器就原样吃多少。"""
++
++        for action_id in _DOMAINS:
++            self.adapter.submit_trip_evidence(
++                self.run_id,
++                {
++                    "action_id": action_id,
++                    "status": "missing",
++                    "missing_reason": f"{action_id} 查询没有返回结果",
++                },
++            )
++        execute_registered_action(self.run_id, "planner", store=self.store)
++        pending = self.adapter.read_trip(
++            self.run_id,
++            view="missing",
++        )["pending_actions"]
++        documented = list(pending)
++        self.assertTrue(documented, "pending_actions 没有可回喂的证据动作")
++
++        for action in documented:
++            with self.subTest(action_id=action["action_id"]):
++                self.assertTrue(
++                    action.get("required_fields"),
++                    "gate 依赖动作必须公布非空 required_fields",
++                )
++                self.assertIn(
++                    "example",
++                    action,
++                    "公布 required_fields 的动作必须同时给完整 example",
++                )
++                example = action["example"]
++                self.assertIsInstance(
++                    example,
++                    dict,
++                    "example 必须是结构化提交记录，不得是待二次解析的字符串",
++                )
++                self.assertEqual("example.value", action.get("field_scope"))
++                self.assertEqual(
++                    action["submit_action_id"],
++                    example.get("action_id"),
++                    "公布动作与可回喂 example 的 action_id 必须一致",
++                )
++                response = self.adapter.submit_trip_evidence(
++                    self.run_id,
++                    deepcopy(example),
++                )
++                self.assertGreater(
++                    response["parsed_facts_count"],
++                    0,
++                    "pending_action.example 原样回喂没有产生事实",
++                )
++
++    def test_every_submission_gate_has_a_nonempty_published_schema(self) -> None:
++        """按真实 gate 清单反推，不等某个域先在宿主里撞红。"""
++
++        schemas = pending_action_schemas(
++            [
++                {
++                    "action_id": domain,
++                    "submit_action_id": domain,
++                    "title": f"{domain} gate probe",
++                }
++                for domain in _DOMAINS
++            ]
++        )
++        self.assertEqual(set(_DOMAINS), {
++            schema["submit_action_id"] for schema in schemas
++        })
++        for schema in schemas:
++            with self.subTest(domain=schema["submit_action_id"]):
++                self.assertTrue(schema.get("required_fields"))
++                self.assertIsInstance(schema.get("example"), dict)
++                self.assertTrue(schema["example"])
++                self.assertEqual(
++                    schema["submit_action_id"],
++                    schema["example"].get("action_id"),
++                )
++
+     def test_a_negative_acceptance_must_carry_a_reason(self) -> None:
+         """D20：收活的命令报 accepted=False 而不给理由，在形状上不可能。"""
+ 
+@@ -229,6 +496,33 @@ class EventsAndStateAgreeCase(_Harness):
+                     f"{domain} 域声称 sourced 却解析出 0 条事实",
+                 )
+ 
++    def test_zero_fact_record_does_not_emit_a_sourced_event(self) -> None:
++        response = self.adapter.submit_trip_evidence(
++            self.run_id,
++            {
++                "action_id": "map",
++                "value": {},
++                "sources": [
++                    {
++                        "provider": "empty-map-result",
++                        "retrieved_at": "2026-08-05T13:30:00+08:00",
++                    }
++                ],
++            },
++        )
++
++        self.assertTrue(response["accepted"])
++        self.assertEqual(0, response["parsed_facts_count"])
++        self.assertEqual(
++            [],
++            [
++                event
++                for event in self._sourced_events()
++                if event.get("tool") == "map"
++            ],
++            "记录被接受不等于解析出了 sourced 字段；0 facts 不得发 sourced",
++        )
++
+ 
+ class MissingViewKeepsItsPromiseCase(_Harness):
+     """描述里承诺的字段，missing 返回体必须在场。

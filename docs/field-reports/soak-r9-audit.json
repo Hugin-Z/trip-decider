@@ -1,0 +1,332 @@
+[
+  {
+    "index": 1,
+    "seed": "武汉->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.02,
+      "confirm": 0.0,
+      "compare": 5.76,
+      "supply_and_assemble": 0.0,
+      "verify": 12.0
+    },
+    "events": {},
+    "total_seconds": 17.78
+  },
+  {
+    "index": 2,
+    "seed": "上海->黄山",
+    "reached_terminal": true,
+    "terminal": "NO_FEASIBLE_CANDIDATE",
+    "error": null,
+    "stages": {
+      "create": 0.03,
+      "confirm": 0.0,
+      "compare": 22.08,
+      "select": 0.0
+    },
+    "events": {},
+    "total_seconds": 22.11
+  },
+  {
+    "index": 3,
+    "seed": "南京->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.02,
+      "compare": 5.59,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 5.62
+  },
+  {
+    "index": 4,
+    "seed": "杭州->黄山",
+    "reached_terminal": true,
+    "terminal": "NO_FEASIBLE_CANDIDATE",
+    "error": null,
+    "stages": {
+      "create": 0.0,
+      "confirm": 0.01,
+      "compare": 30.28,
+      "select": 0.0
+    },
+    "events": {},
+    "total_seconds": 30.3
+  },
+  {
+    "index": 5,
+    "seed": "武汉->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.0,
+      "confirm": 0.01,
+      "compare": 14.7,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 14.72
+  },
+  {
+    "index": 6,
+    "seed": "上海->黄山",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.03,
+      "confirm": 0.0,
+      "compare": 26.78,
+      "select": 0.05,
+      "assemble": 5.03,
+      "reassemble": 0.02,
+      "supply_and_assemble": 0.09,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 31.99
+  },
+  {
+    "index": 7,
+    "seed": "南京->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.02,
+      "compare": 6.41,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 6.44
+  },
+  {
+    "index": 8,
+    "seed": "杭州->黄山",
+    "reached_terminal": true,
+    "terminal": "NO_FEASIBLE_CANDIDATE",
+    "error": null,
+    "stages": {
+      "create": 0.02,
+      "confirm": 0.01,
+      "compare": 26.78,
+      "select": 0.0
+    },
+    "events": {},
+    "total_seconds": 26.81
+  },
+  {
+    "index": 9,
+    "seed": "武汉->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.02,
+      "compare": 6.27,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 6.3
+  },
+  {
+    "index": 10,
+    "seed": "上海->黄山",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.0,
+      "compare": 28.8,
+      "select": 0.06,
+      "assemble": 0.09,
+      "reassemble": 0.11,
+      "supply_and_assemble": 1.56,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 30.53
+  },
+  {
+    "index": 11,
+    "seed": "南京->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.0,
+      "confirm": 0.02,
+      "compare": 6.84,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 6.86
+  },
+  {
+    "index": 12,
+    "seed": "杭州->黄山",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.02,
+      "compare": 35.23,
+      "select": 0.06,
+      "assemble": 5.03,
+      "reassemble": 0.02,
+      "supply_and_assemble": 0.09,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 40.45
+  },
+  {
+    "index": 13,
+    "seed": "武汉->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.0,
+      "compare": 7.59,
+      "supply_and_assemble": 0.02,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 7.62
+  },
+  {
+    "index": 14,
+    "seed": "上海->黄山",
+    "reached_terminal": true,
+    "terminal": "NO_FEASIBLE_CANDIDATE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.0,
+      "compare": 25.16,
+      "select": 0.0
+    },
+    "events": {},
+    "total_seconds": 25.17
+  },
+  {
+    "index": 15,
+    "seed": "南京->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.03,
+      "confirm": 0.0,
+      "compare": 6.69,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 6.72
+  },
+  {
+    "index": 16,
+    "seed": "杭州->黄山",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.02,
+      "confirm": 0.0,
+      "compare": 25.67,
+      "select": 0.05,
+      "assemble": 5.05,
+      "reassemble": 0.06,
+      "supply_and_assemble": 0.19,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 30.97
+  },
+  {
+    "index": 17,
+    "seed": "武汉->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.03,
+      "confirm": 0.02,
+      "compare": 6.25,
+      "supply_and_assemble": 0.01,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 6.31
+  },
+  {
+    "index": 18,
+    "seed": "上海->黄山",
+    "reached_terminal": true,
+    "terminal": "NO_FEASIBLE_CANDIDATE",
+    "error": null,
+    "stages": {
+      "create": 0.02,
+      "confirm": 0.02,
+      "compare": 24.59,
+      "select": 0.0
+    },
+    "events": {},
+    "total_seconds": 24.62
+  },
+  {
+    "index": 19,
+    "seed": "南京->婺源",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.02,
+      "confirm": 0.02,
+      "compare": 19.03,
+      "supply_and_assemble": 0.0,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 19.06
+  },
+  {
+    "index": 20,
+    "seed": "杭州->黄山",
+    "reached_terminal": true,
+    "terminal": "NEED_USER_INPUT_OR_EVIDENCE",
+    "error": null,
+    "stages": {
+      "create": 0.01,
+      "confirm": 0.0,
+      "compare": 28.27,
+      "select": 0.09,
+      "assemble": 0.16,
+      "reassemble": 0.2,
+      "supply_and_assemble": 2.91,
+      "verify": 0.0
+    },
+    "events": {},
+    "total_seconds": 31.44
+  }
+]
