@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import unittest
 
 from tests.invariant_support import (
@@ -33,6 +34,146 @@ RENDERING_WHITELIST: frozenset[str] = frozenset(
 )
 
 LEDGER_PATH = Path(__file__).with_name("invariant_ledger.json")
+
+UI_TOKEN_LITERALS: tuple[str, ...] = (
+    "verified",
+    "sourced_stale",
+    "sourced_undated",
+    "estimated",
+    "estimated_stale",
+    "estimated_undated",
+    "conflicting",
+    "unknown",
+)
+_TOKEN_ALTERNATION = "|".join(
+    re.escape(token)
+    for token in sorted(UI_TOKEN_LITERALS, key=len, reverse=True)
+)
+_QUOTED_TOKEN = rf'(?:"(?:{_TOKEN_ALTERNATION})"|\'(?:{_TOKEN_ALTERNATION})\')'
+_TOKEN_CONDITIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "comparison",
+        re.compile(
+            rf'(?:{_QUOTED_TOKEN}\s*(?:===|!==|==|!=)|'
+            rf'(?:===|!==|==|!=)\s*{_QUOTED_TOKEN})'
+        ),
+    ),
+    ("switch-case", re.compile(rf'\bcase\s+{_QUOTED_TOKEN}\s*:')),
+    (
+        "membership",
+        re.compile(rf'\.(?:includes|has)\s*\([^)]*{_QUOTED_TOKEN}'),
+    ),
+    (
+        "literal-list-membership",
+        re.compile(
+            rf'\[[^\]]*{_QUOTED_TOKEN}[^\]]*\]'
+            rf'\s*\.(?:includes|has)\s*\('
+        ),
+    ),
+    (
+        "literal-set-membership",
+        re.compile(
+            rf'new\s+Set\s*\(\s*\[[^\]]*{_QUOTED_TOKEN}[^\]]*\]'
+            rf'\s*\)\s*\.has\s*\('
+        ),
+    ),
+)
+
+# 呈现层唯一允许含 token 词表字面量的形状：徽章的 CSS 样式选择器。
+# 它只决定颜色，不参与 support/freshness 或 token 判定。
+BADGE_STYLE_SELECTOR = re.compile(
+    rf'\.token\[data-token=(?P<quote>["\'])'
+    rf'(?P<token>{_TOKEN_ALTERNATION})(?P=quote)\]'
+)
+
+
+def _mcp_app_frontend_sources() -> list[tuple[str, str]]:
+    """Return inline scripts and local JS referenced by MCP App templates."""
+
+    sources: list[tuple[str, str]] = []
+    root = REPO_ROOT / "src" / "trip_decider"
+    for template in sorted(root.glob("mcp_app*.html")):
+        text = template.read_text(encoding="utf-8")
+        relative = template.relative_to(REPO_ROOT).as_posix()
+        for index, script in enumerate(
+            re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", text, re.S),
+            start=1,
+        ):
+            sources.append((f"{relative}#inline-script-{index}", script))
+        for raw_source in re.findall(
+            r'<script[^>]+src=["\']([^"\']+)["\'][^>]*>',
+            text,
+            re.S,
+        ):
+            if "://" in raw_source or raw_source.startswith("//"):
+                continue
+            path = (template.parent / raw_source).resolve()
+            try:
+                path.relative_to(REPO_ROOT.resolve())
+            except ValueError:
+                continue
+            if path.is_file():
+                sources.append(
+                    (
+                        path.relative_to(REPO_ROOT).as_posix(),
+                        path.read_text(encoding="utf-8"),
+                    )
+                )
+    return sources
+
+
+def _token_condition_hits() -> list[tuple[str, int, str, str]]:
+    hits: list[tuple[str, int, str, str]] = []
+    for path, source in _mcp_app_frontend_sources():
+        for kind, pattern in _TOKEN_CONDITIONS:
+            for match in pattern.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                snippet = source.splitlines()[line - 1].strip()
+                hits.append((path, line, kind, snippet))
+    return hits
+
+
+def _non_badge_style_literal_hits() -> list[tuple[str, str]]:
+    """Every presentation token literal must be one badge-style selector."""
+
+    hits: list[tuple[str, str]] = []
+    root = REPO_ROOT / "src" / "trip_decider"
+    quoted_token = re.compile(rf'["\'](?:{_TOKEN_ALTERNATION})["\']')
+    for path, source in _mcp_app_frontend_sources():
+        for literal in quoted_token.finditer(source):
+            line = source.count("\n", 0, literal.start()) + 1
+            hits.append((path, source.splitlines()[line - 1].strip()))
+    for template in sorted(root.glob("mcp_app*.html")):
+        text = template.read_text(encoding="utf-8")
+        relative = template.relative_to(REPO_ROOT).as_posix()
+        for style in re.findall(r"<style(?:\s[^>]*)?>(.*?)</style>", text, re.S):
+            for selectors, declarations in re.findall(
+                r"([^{}]+)\{([^{}]*)\}",
+                style,
+            ):
+                if quoted_token.search(declarations):
+                    hits.append((relative, declarations.strip()))
+                for literal in quoted_token.finditer(selectors):
+                    containing_selector = selectors[
+                        selectors.rfind(",", 0, literal.start()) + 1:
+                        selectors.find(",", literal.end())
+                        if selectors.find(",", literal.end()) >= 0
+                        else len(selectors)
+                    ]
+                    if BADGE_STYLE_SELECTOR.search(containing_selector) is None:
+                        hits.append((relative, containing_selector.strip()))
+        outside_resources = re.sub(
+            r"<(?:style|script)(?:\s[^>]*)?>.*?</(?:style|script)>",
+            "",
+            text,
+            flags=re.S,
+        )
+        for literal in quoted_token.finditer(outside_resources):
+            line = outside_resources.count("\n", 0, literal.start()) + 1
+            hits.append(
+                (relative, outside_resources.splitlines()[line - 1].strip())
+            )
+    return hits
 
 
 def _exempt_paths() -> dict[str, str]:
@@ -107,6 +248,33 @@ class SingleTokenImplementationCase(unittest.TestCase):
             [],
             surviving,
             "以下读取层映射实现仍在产出展示态字面量：\n  " + "\n  ".join(surviving),
+        )
+
+    def test_i6_mcp_app_token_conditionals_are_zero(self) -> None:
+        """呈现资源只透传 token；不得按词表分支或重新定级。"""
+
+        hits = _token_condition_hits()
+        formatted = [
+            f"{path}:{line} [{kind}] {snippet}"
+            for path, line, kind, snippet in hits
+        ]
+        self.assertEqual(
+            [],
+            hits,
+            "MCP App 模板或其前端资源出现 token 词表条件判定；"
+            "呈现层只许透传，样式映射不在脚本里分支：\n  "
+            + "\n  ".join(formatted),
+        )
+
+    def test_i6_rendering_literal_exemption_is_badge_style_only(self) -> None:
+        """CSS 中的 token 字面量只允许出现在徽章样式选择器。"""
+
+        hits = _non_badge_style_literal_hits()
+        self.assertEqual(
+            [],
+            hits,
+            "呈现模板中的 token 字面量超出 badge_style 单点豁免：\n  "
+            + "\n  ".join(f"{path}: {snippet}" for path, snippet in hits),
         )
 
 
