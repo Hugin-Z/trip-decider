@@ -29,6 +29,7 @@ import unittest
 from unittest.mock import patch
 
 from trip_decider.agent_actions import (
+    ActionAlreadyInFlight,
     action_loop_started,
     execute_registered_action,
     start_action_loop,
@@ -171,8 +172,13 @@ class ProgrammingErrorsCase(unittest.TestCase):
             thread = threading.Thread(target=execute_first, daemon=True)
             thread.start()
             self.assertTrue(collector_entered.wait(timeout=5.0))
-            with self.assertRaisesRegex(TravelAgentError, "not waiting"):
+            # 第二次派发现在被**在飞去重**挡在更前面：不再是走到状态检查才
+            # 撞上「not waiting」，而是一个专门的类型，调用方分得清「已经有人
+            # 在做」与「派发失败了」。ActionAlreadyInFlight 仍是 TravelAgentError
+            # 的子类，原来的「稳定的状态错误」这一层保证没有减弱。
+            with self.assertRaises(ActionAlreadyInFlight) as caught:
                 execute_registered_action(run_id, "railway", store=self.store)
+            self.assertIsInstance(caught.exception, TravelAgentError)
             release_collector.set()
             thread.join(timeout=5.0)
 
