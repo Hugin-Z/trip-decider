@@ -239,3 +239,127 @@ class ConstructorCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NegativeBooleansCarryAnExplanationCase(unittest.TestCase):
+    """一切否定语义的布尔，都必须伴随解释结构。
+
+    **扩展理由**（第六次实测，2026-08-05）：上一轮把「错误必带 next_call」做成
+    了形状，但事故这次绕过了错误通道——`submit_trip_evidence` 返回的是一个
+    **正常返回体**，里面 `accepted: false`，没有异常、没有 next_call、没有任何
+    理由字段。宿主连交三轮，每轮都拿到同一个裸 false，只能止损。
+
+    「错误要解释」不够，得是「**否定要解释**」：`accepted` / `valid` / `allowed`
+    这类布尔一旦为假，就必须同时给出为什么。裸 false 是本产品最贵的一种沉默。
+    """
+
+    #: 否定语义的布尔字段名。为假时必须有解释同行。
+    _NEGATABLE = ("accepted", "valid", "allowed", "complete")
+
+    #: 可以充当解释的字段。任意一个在场即可。
+    _EXPLANATIONS = (
+        "rejection_reason",
+        "reason",
+        "next_call",
+        "missing_keys",
+        "schema_ref",
+        "error",
+        "blockers",
+    )
+
+    def test_the_submit_response_never_returns_a_bare_false(self) -> None:
+        """跑真实路径：被拒的提交必须带得出理由。"""
+
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from trip_decider.evidence_broker import EvidenceBroker
+        from trip_decider.mcp_adapter import TripMCPAdapter, TripMCPError
+        from trip_decider.travel_agent import InMemoryAgentStore
+        from trip_decider.trip_application import TripApplicationService
+        from trip_decider.trip_query import TripQueryService
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sessions"
+            store = InMemoryAgentStore(root)
+
+            class _NoBackground(TripApplicationService):
+                @staticmethod
+                def _spawn(*, target: object, args: object, name: str) -> None:
+                    del target, args, name
+
+            application = _NoBackground(
+                store=store,
+                evidence_broker=EvidenceBroker(root.parent / "cache"),
+                railway_collector=noop_collector,
+                map_collector=noop_collector,
+                web_collector=noop_collector,
+            )
+            query = TripQueryService(
+                store=store, application_service=application
+            )
+            adapter = TripMCPAdapter(application, query)
+            run_id = str(
+                adapter.create_trip_task(
+                    {
+                        "task_mode": "DIRECT_PLAN",
+                        "origin": "甲地",
+                        "destination_anchor": "乙地",
+                        "destination_expression": "确定乙地",
+                        "earliest_departure_at": "2026-08-11T08:00",
+                        "latest_return_at": "2026-08-14T22:00",
+                        "travelers": 2,
+                        "total_budget_cny": 6000,
+                        "pace": "relaxed",
+                        "transport_preferences": ["rail"],
+                    }
+                )["run"]["run_id"]
+            )
+            adapter.confirm_trip_intent(run_id)
+            application.execute_trip(run_id)
+
+            # 形状不合的 map 提交：要么在门口被拒（带理由），要么被收下。
+            try:
+                response = adapter.submit_trip_evidence(
+                    run_id,
+                    {
+                        "action_id": "map",
+                        "value": {"local_transit": [{"line": "只有线路名"}]},
+                        "sources": [
+                            {
+                                "provider": "x",
+                                "retrieved_at": "2026-08-05T09:00:00+08:00",
+                            }
+                        ],
+                    },
+                )
+            except TripMCPError as error:
+                # 走错误通道：上一轮的守卫已经保证它带 next_call。
+                self.assertTrue(str(error))
+                return
+
+            self._assert_explained(response)
+
+    def _assert_explained(self, payload: dict[str, object]) -> None:
+        for field in self._NEGATABLE:
+            if payload.get(field) is False:
+                explained = any(
+                    payload.get(key) for key in self._EXPLANATIONS
+                )
+                self.assertTrue(
+                    explained,
+                    f"返回体里 {field}=false 却没有任何解释字段"
+                    f"（可用的有 {list(self._EXPLANATIONS)}）——"
+                    "这正是宿主连试三轮后止损的那个裸 false",
+                )
+
+    def test_a_bare_false_payload_is_what_this_guard_catches(self) -> None:
+        """D6：确认这条守卫真的抓得住裸 false，而不是恒真。"""
+
+        with self.assertRaises(AssertionError):
+            self._assert_explained({"accepted": False})
+
+        # 带了解释就该放行
+        self._assert_explained(
+            {"accepted": False, "rejection_reason": "缺 duration_seconds"}
+        )

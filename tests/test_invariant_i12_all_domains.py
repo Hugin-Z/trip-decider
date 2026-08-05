@@ -24,6 +24,7 @@ I12 立于第一次宿主实测（railway 的 KeyError），但**只落了 railw
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -522,3 +523,199 @@ class WebSubmissionSaysEverythingAtOnceCase(unittest.TestCase):
         from trip_decider.agent_actions import WEB_EXAMPLE, _validate_web_value
 
         _validate_web_value(json.loads(WEB_EXAMPLE))
+
+
+#: 宿主第六次实测的三份真实提交形状（脱敏：地名换占位，其余原样）。
+#:
+#: 这三份是**同一扇门第三次翻车**的现场：第一次是 railway 的 KeyError，
+#: 第二次是 map 域没有门，第三次是门收下了却对外报 accepted:false。
+HOST_ROUND_SIX_SUBMISSIONS = {
+    # 1. 班车时刻——宿主按「线路」措辞写的，没有段要素
+    "shuttle_times_only": {
+        "action_id": "map",
+        "value": {
+            "local_transit": [
+                {
+                    "line": "景区班车",
+                    "first_departure": "06:30",
+                    "headway_minutes": 25,
+                    "fare": 15.0,
+                }
+            ]
+        },
+        "sources": [
+            {"provider": "景区官网", "retrieved_at": "2026-08-05T09:00:00+08:00"}
+        ],
+    },
+    # 2. 补齐段要素之后的同一份
+    "shuttle_complete": {
+        "action_id": "map",
+        "value": {
+            "local_transit": [
+                {
+                    "from": "甲村游客中心",
+                    "to": "丙村索道下站",
+                    "duration_seconds": 2400,
+                    "line": "景区班车",
+                    "board_at": "甲村游客中心",
+                    "alight_at": "丙村索道下站",
+                    "fare": 15.0,
+                    "first_departure": "06:30",
+                    "headway_minutes": 25,
+                }
+            ]
+        },
+        "sources": [
+            {"provider": "景区官网", "retrieved_at": "2026-08-05T09:00:00+08:00"}
+        ],
+    },
+    # 3. 住宿片区——accommodation_base 那一项
+    "accommodation_area": {
+        "action_id": "web",
+        "value": {
+            "destination_official_name": "乙地",
+            "hotel_area": {"name": "老城片区"},
+            "verified_facts": [
+                {
+                    "claim": "老城片区集中了多数住宿",
+                    "source_url": "https://example.invalid/a",
+                }
+            ],
+        },
+        "sources": [
+            {"provider": "官方站点", "retrieved_at": "2026-08-05T09:00:00+08:00"}
+        ],
+    },
+}
+
+
+class FourStageChainCase(unittest.TestCase):
+    """I12 的覆盖面画到「提交 → 入库 → 解析 → 消费」四段。
+
+    **同一扇门第三次翻车，所以覆盖面必须重画。** 前两轮各补了一段：
+    第一轮补「校验通过 = 消费不抛异常」，第二轮补「map 域也要有门」。
+    这一轮撞的是**中间那段**——门收下了、事实也解析了，但返回体说没收下。
+    只测两头（提交、消费）看不见它。
+
+    四段的定义：
+      1. 提交：不合契约要在门口被拒，且报错点名缺什么；
+      2. 入库：收下的要真的在 `current_run_evidence` 里；
+      3. 解析：入库的要产出字段级 facts（条数 > 0），投影能重建；
+      4. 消费：编译器读得动，不抛异常。
+
+    **任何一段不接都会红。**
+    """
+
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        root = Path(self._temporary.name) / "sessions"
+        self.store = InMemoryAgentStore(root)
+        self.application = _NoBackground(
+            store=self.store,
+            evidence_broker=EvidenceBroker(root.parent / "cache"),
+            railway_collector=noop_collector,
+            map_collector=noop_collector,
+            web_collector=noop_collector,
+        )
+        self.query = TripQueryService(
+            store=self.store, application_service=self.application
+        )
+        self.adapter = TripMCPAdapter(self.application, self.query)
+        self.run_id = str(
+            self.adapter.create_trip_task(dict(_INTENT))["run"]["run_id"]
+        )
+        self.adapter.confirm_trip_intent(self.run_id)
+        self.application.execute_trip(self.run_id)
+
+    def test_stage_one_a_malformed_submission_is_refused_by_name(self) -> None:
+        """第 1 段：宿主那份只有班车时刻的提交，要在门口被点名拒绝。"""
+
+        with self.assertRaises(TripMCPError) as caught:
+            self.adapter.submit_trip_evidence(
+                self.run_id,
+                deepcopy(HOST_ROUND_SIX_SUBMISSIONS["shuttle_times_only"]),
+            )
+
+        message = str(caught.exception)
+        self.assertIn("duration_seconds", message)
+
+    def test_stages_two_to_four_for_every_submittable_domain(self) -> None:
+        """第 2–4 段：逐域走完入库 → 解析 → 消费。"""
+
+        for label in ("shuttle_complete", "accommodation_area"):
+            with self.subTest(submission=label):
+                payload = deepcopy(HOST_ROUND_SIX_SUBMISSIONS[label])
+                domain = str(payload["action_id"])
+
+                # --- 提交 ---
+                response = self.adapter.submit_trip_evidence(
+                    self.run_id, payload
+                )
+                self.assertIs(
+                    True,
+                    response["accepted"],
+                    f"{domain}: 收下了却报 accepted=false（半接受）",
+                )
+
+                # --- 入库 ---
+                stored = self.application.current_run_evidence(
+                    self.run_id
+                ).get(domain)
+                self.assertIsNotNone(stored, f"{domain}: 没入库")
+
+                # --- 解析 ---
+                facts = stored.get("value", {}).get("facts") or []
+                self.assertGreater(
+                    len(facts), 0, f"{domain}: 入库了但解析出 0 条事实"
+                )
+                self.assertEqual(
+                    len(facts),
+                    response.get("parsed_facts_count"),
+                    f"{domain}: 返回体报的条数与实际落盘条数不一致",
+                )
+                rebuilt = usable_fact_values(facts)
+                self.assertTrue(
+                    rebuilt, f"{domain}: 投影重建不出任何业务字段"
+                )
+
+    def test_stage_four_the_compiler_consumes_what_the_gate_accepted(
+        self,
+    ) -> None:
+        """第 4 段：过了门的，编译器一定读得动。"""
+
+        for label in ("shuttle_complete", "accommodation_area"):
+            self.adapter.submit_trip_evidence(
+                self.run_id, deepcopy(HOST_ROUND_SIX_SUBMISSIONS[label])
+            )
+        self.adapter.submit_trip_evidence(
+            self.run_id,
+            {
+                **controlled_railway().to_dict(),
+                "action_id": "railway",
+            },
+        )
+
+        intent = TravelIntent.from_mapping(_INTENT)
+        evidence = self.application.current_run_evidence(self.run_id)
+        context = DestinationContext(
+            context_id="context-chain",
+            intent=intent,
+            evidence=(
+                EvidenceItem(
+                    evidence_id="user",
+                    domain="user_input",
+                    status=EvidenceStatus.SOURCED,
+                    value=intent.to_dict(),
+                    sources=({"source_type": "user_supplied"},),
+                ),
+                *(
+                    EvidenceItem.from_mapping(dict(item))
+                    for item in evidence.values()
+                ),
+            ),
+            built_at="2026-08-05T18:30:00+08:00",
+        )
+
+        compiled = PlanningInputCompiler().compile(context, now=READ_AT)
+        self.assertIn("status", compiled)
