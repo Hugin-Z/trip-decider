@@ -1,0 +1,1761 @@
+﻿diff --git a/docs/contracts/freshness-policy.md b/docs/contracts/freshness-policy.md
+index ed5b12d..7c0b3b2 100644
+--- a/docs/contracts/freshness-policy.md
++++ b/docs/contracts/freshness-policy.md
+@@ -88,7 +88,7 @@
+ 
+ | data_type | status | tolerance_seconds | max_reuse_seconds | stale_allowed | on_stale | feasibility_critical | planned_for |
+ |---|---|---|---|---|---|---|---|
+-| `hotel_price` | `planned` | `0` | `0` | `False` | `block` | 是 | P5 |
++| `hotel_price` | `active` | `0` | `0` | `False` | `block` | 是 | — |
+ | `railway_schedule_fare` | `active` | `21600` | `21600` | `True` | `auto_refetch` | 是 | — |
+ | `route_duration` | `active` | `21600` | `86400` | `True` | `auto_refetch` | 是 | — |
+ | `poi_coordinate` | `active` | `2592000` | `15552000` | `True` | `flag_for_confirmation` | 否 | — |
+@@ -100,7 +100,9 @@
+ 
+ **注 1：`seat_availability` 已删除。** 裁决依据：余票属订票域，`PLAN.md` v4 §2 明确「不做订票」。它不再是本产品的 data_type，不出现在本表中。`src/trip_decider/evidence_broker.py:39-41` 中的登记与 `tests/test_evidence_broker.py:35` 中的断言在 P5 一并移除。
+ 
+-**注 2：`hotel_price` 为 `planned`。** 裁决依据：不做订房与比价，但价格区间是预算硬约束的必需输入，因此它必须留在契约里并保持 `feasibility_critical`。当前无生产者，`planned_for = P5`。
++**注 2：`hotel_price` 已于 2026-08-05 转为 `active`。** 生产者只读取高德
++POI 明确返回的住宿参考价；它不是实时可订价格，因此字段级 support 恒为
++`estimated`，字段缺席恒为 `unknown`。不做订房与比价的产品边界不变。
+ 
+ **注 3：`opening_hours` 与 `ticket_price` 为 `reserved`。** 二者当前无生产者，且不在任何已裁决的近期范围内。转为 `active` 需要先有生产者。`opening_hours` 的 `feasibility_critical` 保留为「是」——景点开放时间直接决定活动能否排入某一天，一旦有生产者档位即生效。
+ 
+diff --git a/docs/contracts/invariants.md b/docs/contracts/invariants.md
+index 436e45a..a00bdce 100644
+--- a/docs/contracts/invariants.md
++++ b/docs/contracts/invariants.md
+@@ -174,7 +174,11 @@ B1（五态在产品路径不存在）、M2（STALE 不暴露刷新信号）、M
+ 
+ 三条必须全测。只测第 1 条不足以证明不变式贯穿到判定层。
+ 
+-### 优先级重估（2026-08-04，第五次实测后）
++### 已作废的优先级重估（2026-08-04，第五次实测后）
++
++> **2026-08-05 更正：** 更大样本确认高德 POI 的 `business.cost`（旧响应为
++> `biz_ext.cost`）在约六成住宿 POI 中可得。下面十条样本恰好全缺，因而把
++> “该批次未返回”误写成了“字段不存在”。本段只保留为历史记录，不再是裁决。
+ 
+ hotel_price 五次实测五次被宿主点名「无可靠数据源」，因此实查了一次高德 POI 的
+ 可得性，看够不够支撑「价格区间」这个粒度。
+@@ -203,7 +207,14 @@ business / indoor / navi / photos / children 全要上）：
+ hotel_price 一旦可得，`I4` 的第 2、3 条断言才第一次有机会跑起来。建议不要在
+ 冻结前塞。
+ 
+-### 当前状态：部分成立，但未被贯穿核对
++### 当前状态：已收尾（2026-08-05）
++
++高德 POI 明确返回的住宿参考价现在产出字段级
++`support=estimated` / `data_type=hotel_price`；字段缺席产出 `unknown`，绝不从
++评分、星级或地区均价推导。该字段不是实时可订价格，零容忍与禁止缓存复用策略
++保持不变。I4 的登记红项已删除。
++
++#### 历史阻塞说明（已失效）
+ 
+ `evidence_broker.py:190-192` 的 `stale_after_failure()` 对 `not policy.stale_allowed` 直接 `return None`，即缓存层行为正确。但现有测试 `tests/test_evidence_broker.py:113-129`（`test_expired_or_never_stale_values_are_not_reused`）只断言上述第 1 条，第 2、3 条无覆盖。且 `hotel_price` 当前在产品路径中无生产者（`status == planned`，`freshness-policy.md` §2.2），因此第 2、3 条**在 P5 生产者落地前无法构造场景**——该部分测试登记为阻塞项。
+ 
+diff --git a/src/trip_decider/amap_parsers.py b/src/trip_decider/amap_parsers.py
+index 6cdf5fe..ed92a81 100644
+--- a/src/trip_decider/amap_parsers.py
++++ b/src/trip_decider/amap_parsers.py
+@@ -123,6 +123,7 @@ class ParsedAmapPoi:
+     province_code: str | None
+     city_code: str | None
+     district_code: str | None
++    reference_price_cny: float | None
+ 
+ @dataclass(frozen=True)
+ class ParsedAmapDistrictResponse:
+@@ -262,6 +263,7 @@ def parse_amap_poi_response(
+                     province_code=_optional_provider_text(item.get("pcode")),
+                     city_code=_optional_provider_text(item.get("citycode")),
+                     district_code=_optional_provider_text(item.get("adcode")),
++                    reference_price_cny=_optional_provider_price(item),
+                 )
+             )
+     except _ProviderIssue:
+@@ -511,6 +513,37 @@ def _optional_provider_text(value: object) -> str | None:
+         raise _ProviderIssue("optional provider text is invalid")
+     return value
+ 
++
++def _optional_provider_price(item: Mapping[str, object]) -> float | None:
++    """Read only an explicitly returned AMap POI reference price.
++
++    POI Search 2.0 exposes the field under ``business.cost``; older AMap
++    responses used ``biz_ext.cost``.  Both are provider-reported reference
++    prices, not live bookable hotel rates.  Missing, zero/non-positive,
++    non-numeric, and non-finite values stay absent instead of being inferred
++    from ratings or other POI metadata.
++    """
++
++    raw: object = None
++    for container_name in ("business", "biz_ext"):
++        container = item.get(container_name)
++        if isinstance(container, Mapping) and container.get("cost") not in (
++            None,
++            "",
++            [],
++        ):
++            raw = container.get("cost")
++            break
++    if isinstance(raw, bool):
++        return None
++    try:
++        value = float(raw) if raw is not None else None
++    except (TypeError, ValueError):
++        return None
++    if value is None or not math.isfinite(value) or value <= 0:
++        return None
++    return value
++
+ def _freeze_value(value: object) -> object:
+     if isinstance(value, Mapping):
+         return MappingProxyType(
+diff --git a/src/trip_decider/dynamic_discovery.py b/src/trip_decider/dynamic_discovery.py
+index 9b5c9ba..aacaedb 100644
+--- a/src/trip_decider/dynamic_discovery.py
++++ b/src/trip_decider/dynamic_discovery.py
+@@ -2,7 +2,8 @@
+ 
+ The static destination catalog is deliberately absent from this module.  All
+ production candidates and planning facts originate in the current run's AMap
+-queries; missing opening hours, ticket prices and hotel prices stay unknown.
++queries; missing opening hours and ticket prices stay unknown.  Hotel POI
++reference prices are estimates when explicitly returned and unknown otherwise.
+ """
+ 
+ from __future__ import annotations
+@@ -15,6 +16,7 @@ from datetime import datetime
+ import re
+ 
+ from trip_decider.adapters.contracts import stable_identifier
++from trip_decider.evidence_core import derive_facts
+ from trip_decider.simple_live import (
+     list_live_top_level_regions,
+     search_live_places,
+@@ -459,12 +461,17 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
+         for _kind, response in sourced
+         if isinstance(response.get("source"), Mapping)
+     )
++    priced_hotels = sum(
++        1
++        for hotel in hotels
++        if isinstance(hotel.get("price"), Mapping)
++        and hotel["price"].get("amount_cny") is not None
++    )
+     value: dict[str, object] = {
+         "destination_official_name": destination,
+         "retrieved_at": retrieved_at,
+         "attractions": attractions,
+         "hotel_candidates": hotels,
+-        "hotel_price_status": "UNKNOWN",
+         "hotel_area": base,
+         "route_sequence": (
+             [str(base["route_query_name"]), *[
+@@ -500,21 +507,60 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
+             },
+             {
+                 "field": "hotel_price",
+-                "support": "unknown_no_price_source",
++                "support": (
++                    "estimated_amap_poi_reference_price"
++                    if priced_hotels
++                    else "unknown_no_price_field"
++                ),
+                 "retrieved_at": retrieved_at,
+             },
+         ],
+         "missing_fields": [
+-            "酒店实时价格与可订状态",
++            "酒店实时可订状态（高德参考价不是实时报价）",
+             "景点开放时间的一手来源",
+             "景点门票价格的一手来源",
+         ],
+     }
++    # 住宿 POI 参考价与画像里的其余字段不是同一种证据：前者是服务商
++    # 估算且绝不允许缓存复用，后者是 POI 直接观测。直接落字段级 facts，
++    # 让同一 EvidenceItem 内两种 support/data_type 可以并存；UI 与判定层都
++    # 只读这份事实，不从 ``price`` 的存在与否另算一套状态。
++    facts = [
++        dict(fact)
++        for fact in derive_facts(
++            value,
++            "web-live-profile",
++            "web",
++            item_support="sourced",
++            data_type="destination_profile",
++            retrieved_at=retrieved_at,
++        )
++    ]
++    for fact in facts:
++        field = str(fact.get("field") or "")
++        if not re.fullmatch(
++            r"hotel_candidates\[\d+\]\.price\.amount_cny",
++            field,
++        ):
++            continue
++        _mark_hotel_price_fact(fact)
++        if fact.get("value") is None:
++            fact["support"] = "unknown"
++            fact["reason"] = "no_source_found"
++        else:
++            fact["support"] = "estimated"
++            fact.pop("reason", None)
++    persisted_value: dict[str, object] = {
++        "retrieved_at": retrieved_at,
++        "facts": facts,
++    }
+     if not attractions:
+         return EvidenceItem(
+             evidence_id="web-live-profile",
+             domain="web",
+             status=EvidenceStatus.MISSING,
++            # 保留既有 item 级失败语义：景点一个都没取到时整条画像为
++            # missing，EvidenceItem 会把所有字段下调为 unknown。
+             value=value,
+             sources=sources,
+             missing_reason="no_live_attraction_candidates",
+@@ -523,11 +569,21 @@ def collect_live_destination_profile(intent: TravelIntent) -> EvidenceItem:
+         evidence_id="web-live-profile",
+         domain="web",
+         status=EvidenceStatus.SOURCED,
+-        value=value,
++        value=persisted_value,
+         sources=sources,
+     )
+ 
+ 
++def _mark_hotel_price_fact(
++    fact: dict[str, object],
++    *,
++    data_type="hotel_price",
++) -> None:
++    """Bind one explicit hotel price leaf to the zero-reuse policy type."""
++
++    fact["data_type"] = data_type
++
++
+ def _discovery_queries(intent: TravelIntent) -> tuple[str, ...]:
+     values: list[str] = []
+     for theme in intent.themes:
+@@ -730,7 +786,7 @@ def _profile_hotels(
+                 "area": place.get("district"),
+                 "address": place.get("address"),
+                 "location": deepcopy(place.get("location")),
+-                "price": {"status": "UNKNOWN", "amount_cny": None},
++                "price": {"amount_cny": place.get("reference_price_cny")},
+                 "source": "高德地图 POI Search 2.0",
+             }
+         )
+diff --git a/src/trip_decider/mcp_adapter.py b/src/trip_decider/mcp_adapter.py
+index 7852ed8..07c65b9 100644
+--- a/src/trip_decider/mcp_adapter.py
++++ b/src/trip_decider/mcp_adapter.py
+@@ -1,13 +1,15 @@
+ """Headless, protocol-neutral MCP-facing adapter.
+ 
+ This module intentionally knows only the application command boundary and the
+-query/read-model boundary.  It does not import HTTP, the run store, projection
+-helpers, planners, or provider tools.
++query/read-model boundary.  It does not import HTTP, the run store, planners,
++or provider tools.  MCP App enrichment may consume the existing evidence
++projection, but never derives an evidence token itself.
+ """
+ 
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping
++from copy import deepcopy
+ import hashlib
+ import json
+ import time
+@@ -18,6 +20,7 @@ from trip_decider.trip_application import (
+     TripApplicationService,
+ )
+ from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE, WEB_EXAMPLE
++from trip_decider.evidence_projection import usable_fact_values
+ from trip_decider.itinerary_verification import (
+     split_by_shape,
+     summarize_dicts,
+@@ -244,6 +247,217 @@ def _sweeten_local_transit(value: object) -> object:
+     return {**value, "local_transit": sweetened}
+ 
+ 
++def _coordinate(value: object) -> dict[str, object] | None:
++    """Return an explicitly supplied point; never geocode or guess one."""
++
++    if not isinstance(value, Mapping):
++        return None
++    for key in ("position", "coordinates", "location", "center"):
++        nested = value.get(key)
++        if isinstance(nested, Mapping):
++            point = _coordinate(nested)
++            if point is not None:
++                return point
++    longitude = value.get("longitude", value.get("lon"))
++    latitude = value.get("latitude", value.get("lat"))
++    if (
++        not isinstance(longitude, (int, float))
++        or isinstance(longitude, bool)
++        or not isinstance(latitude, (int, float))
++        or isinstance(latitude, bool)
++        or not -180 <= float(longitude) <= 180
++        or not -90 <= float(latitude) <= 90
++    ):
++        return None
++    return {
++        "longitude": float(longitude),
++        "latitude": float(latitude),
++        "coordinate_system": str(
++            value.get("coordinate_system", value.get("crs", "GCJ-02"))
++            or "GCJ-02"
++        ),
++    }
++
++
++def _candidate_map(evidence: Mapping[str, object]) -> dict[str, object]:
++    """Project only fact-backed POI coordinates for one candidate card."""
++
++    markers: list[dict[str, object]] = []
++    seen: set[tuple[float, float, str]] = set()
++
++    def add(name: object, value: object, kind: str) -> None:
++        if not isinstance(name, str) or not name.strip():
++            return
++        point = _coordinate(value)
++        if point is None:
++            return
++        identity = (
++            float(point["longitude"]),
++            float(point["latitude"]),
++            name.strip(),
++        )
++        if identity in seen:
++            return
++        seen.add(identity)
++        markers.append(
++            {
++                "marker_id": f"candidate-point-{len(markers) + 1}",
++                "name": name.strip(),
++                "kind": kind,
++                "position": point,
++            }
++        )
++
++    for domain, raw_item in evidence.items():
++        facts = getattr(raw_item, "facts", ())
++        value = usable_fact_values(facts)
++        for key, kind in (
++            ("attractions", "attraction"),
++            ("hotel_candidates", "accommodation"),
++            ("map_points", "place"),
++            ("places", "place"),
++        ):
++            rows = value.get(key)
++            if isinstance(rows, list):
++                for row in rows:
++                    if isinstance(row, Mapping):
++                        add(
++                            row.get("name") or row.get("display_name"),
++                            row,
++                            kind,
++                        )
++        base = value.get("hotel_area")
++        if isinstance(base, Mapping):
++            add(base.get("name"), base, "accommodation")
++        resolutions = value.get("local_transit_place_resolutions")
++        if isinstance(resolutions, Mapping):
++            for name, row in resolutions.items():
++                add(name, row, "transit_stop")
++    return {"markers": markers, "route_polylines": []}
++
++
++def _source_view(item: Mapping[str, object]) -> list[dict[str, object]]:
++    sources = item.get("sources")
++    return [
++        {
++            "provider": str(
++                source.get("provider")
++                or source.get("publisher")
++                or source.get("source_type")
++                or "未标明来源"
++            ),
++            **(
++                {"retrieved_at": str(source["retrieved_at"])}
++                if isinstance(source.get("retrieved_at"), str)
++                else {}
++            ),
++        }
++        for source in (sources if isinstance(sources, (list, tuple)) else ())
++        if isinstance(source, Mapping)
++    ]
++
++
++def _event_evidence_view(
++    plan_payload: Mapping[str, object],
++    trip_payload: Mapping[str, object],
++    evidence: Mapping[str, Mapping[str, object]],
++) -> dict[str, object]:
++    """Resolve event fact_refs to the read-time projection already in trip().
++
++    The adapter only joins references to projection rows.  ``token`` and
++    ``next_action`` are copied verbatim from the read model; no support or
++    freshness condition exists here.
++    """
++
++    presentation = trip_payload.get("presentation")
++    statuses = (
++        presentation.get("evidence_statuses")
++        if isinstance(presentation, Mapping)
++        else None
++    )
++    status_rows = [
++        row for row in statuses if isinstance(row, Mapping)
++    ] if isinstance(statuses, list) else []
++    status_by_projection_domain = {
++        str(row.get("domain")): row for row in status_rows
++    }
++    item_by_id: dict[str, tuple[str, Mapping[str, object]]] = {}
++    for domain, item in evidence.items():
++        evidence_id = item.get("evidence_id")
++        if isinstance(evidence_id, str):
++            item_by_id[evidence_id] = (str(domain), item)
++
++    installed_plan = plan_payload.get("plan")
++    days = (
++        installed_plan.get("days")
++        if isinstance(installed_plan, Mapping)
++        else None
++    )
++    output: dict[str, object] = {}
++    for day in days if isinstance(days, list) else ():
++        if not isinstance(day, Mapping):
++            continue
++        events = day.get("events")
++        for event in events if isinstance(events, list) else ():
++            if not isinstance(event, Mapping):
++                continue
++            event_id = event.get("event_id")
++            if not isinstance(event_id, str):
++                continue
++            references = [
++                str(reference)
++                for reference in (
++                    event.get("fact_refs")
++                    if isinstance(event.get("fact_refs"), list)
++                    else []
++                )
++                if isinstance(reference, str)
++            ]
++            grouped: dict[str, list[str]] = {}
++            unresolved: list[str] = []
++            for reference in references:
++                evidence_id = reference.partition("#")[0]
++                if evidence_id in item_by_id:
++                    grouped.setdefault(evidence_id, []).append(reference)
++                else:
++                    unresolved.append(reference)
++            badges: list[dict[str, object]] = []
++            for evidence_id, fact_refs in grouped.items():
++                domain, item = item_by_id[evidence_id]
++                projection_domain = {
++                    "railway": "railway",
++                    "map": "local_transit",
++                    "web": (
++                        "accommodation"
++                        if event.get("type") in {"hotel", "rest"}
++                        else "attraction"
++                    ),
++                }.get(domain)
++                status = status_by_projection_domain.get(
++                    str(projection_domain or "")
++                )
++                if not isinstance(status, Mapping) or not isinstance(
++                    status.get("token"), str
++                ):
++                    unresolved.extend(fact_refs)
++                    continue
++                badge = {
++                    "fact_refs": fact_refs,
++                    "label": status.get("label") or domain,
++                    "token": status["token"],
++                    "retrieved_at": status.get("retrieved_at"),
++                    "sources": _source_view(item),
++                }
++                if isinstance(status.get("next_action"), Mapping):
++                    badge["next_action"] = deepcopy(status["next_action"])
++                badges.append(badge)
++            output[event_id] = {
++                "badges": badges,
++                "unresolved_fact_refs": unresolved,
++            }
++    return output
++
++
+ class TripMCPAdapter:
+     """User-goal operations over the one authoritative trip runtime."""
+ 
+@@ -423,13 +637,36 @@ class TripMCPAdapter:
+     ) -> dict[str, object]:
+         """Return the canonical candidate view in an MCP App envelope."""
+ 
+-        return self._guard(
+-            lambda: {
++        def operation() -> dict[str, object]:
++            candidates = self._query.candidates(run_id)
++            maps: dict[str, object] = {}
++            options = candidates.get("candidates")
++            for option in options if isinstance(options, list) else ():
++                if not isinstance(option, Mapping):
++                    continue
++                destination_id = option.get("destination_id")
++                if not isinstance(destination_id, str):
++                    continue
++                try:
++                    evidence = self._application.guided_evidence_for_selection(
++                        run_id,
++                        destination_id,
++                    )
++                except TripApplicationError:
++                    continue
++                candidate_map = _candidate_map(evidence)
++                if candidate_map["markers"]:
++                    maps[destination_id] = candidate_map
++            return {
+                 "view": "candidates",
+                 "run_id": run_id,
+                 "current_version": None,
+-                "candidates": self._query.candidates(run_id),
+-            },
++                "candidates": candidates,
++                "candidate_maps": maps,
++            }
++
++        return self._guard(
++            operation,
+             next_call=(
+                 "候选还没准备好。advance_trip_task(run_id) 推到 "
+                 "CANDIDATES_READY 再来"
+@@ -444,13 +681,19 @@ class TripMCPAdapter:
+ 
+         def operation() -> dict[str, object]:
+             plan = self._query.current_plan(run_id)
++            trip = self._query.trip(run_id)
+             version = plan.get("plan_version")
+             return {
+                 "view": "plan",
+                 "run_id": run_id,
+                 "current_version": version,
+-                "trip": self._query.trip(run_id),
++                "trip": trip,
+                 "plan": plan,
++                "event_evidence": _event_evidence_view(
++                    plan,
++                    trip,
++                    self._application.current_run_evidence(run_id),
++                ),
+             }
+ 
+         return self._guard(
+@@ -718,6 +961,7 @@ class TripMCPAdapter:
+         # 所以和 RUNNING 同样处理，但状态名如实区分（R1）。
+         running = status in {"RUNNING", "FINALIZING"}
+         view = {
++            "view": "verification",
+             "artifact_kind": "ItineraryVerification",
+             "domain": "railway",
+             **dict(snapshot),
+@@ -729,6 +973,12 @@ class TripMCPAdapter:
+                 "未核验——没有核验不等于没有问题。"
+             ),
+         }
++        for finding in findings:
++            if finding.get("retrieved_at") is not None:
++                finding["sources"] = [{"provider": "中国铁路12306"}]
++            suggested = finding.get("suggested_action")
++            if isinstance(suggested, str) and suggested.strip():
++                finding["next_action"] = {"detail": suggested}
+         if running:
+             if status == "FINALIZING":
+                 detail = (
+diff --git a/src/trip_decider/mcp_app_workspace_v1.html b/src/trip_decider/mcp_app_workspace_v1.html
+index c6c0a84..d8f4247 100644
+--- a/src/trip_decider/mcp_app_workspace_v1.html
++++ b/src/trip_decider/mcp_app_workspace_v1.html
+@@ -37,6 +37,20 @@
+     .card { scroll-snap-align: start; display: grid; gap: 11px; align-content: start; }
+     .card h3, .panel h3, .day h3 { margin: 0; }
+     .status { display: inline-flex; width: fit-content; border-radius: 999px; background: var(--accent-soft); padding: 4px 8px; font-size: .78rem; }
++    .evidence-badge { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); overflow: hidden; }
++    .evidence-badge summary { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 6px 8px; font-size: .78rem; }
++    .evidence-badge summary::marker { color: var(--muted); }
++    .token { border-radius: 999px; padding: 3px 7px; font-weight: 650; background: #7b8492; color: #fff; }
++    .token[data-token="verified"] { background: #18794e; }
++    .token[data-token="sourced_stale"],
++    .token[data-token="sourced_undated"],
++    .token[data-token="estimated"],
++    .token[data-token="estimated_stale"],
++    .token[data-token="estimated_undated"] { background: #9a6700; }
++    .token[data-token="conflicting"] { background: #c9372c; }
++    .token[data-token="unknown"] { background: #667085; }
++    .evidence-detail { display: grid; gap: 5px; border-top: 1px solid var(--line); padding: 8px; font-size: .79rem; color: var(--muted); }
++    .evidence-detail p { margin: 0; }
+     dl { display: grid; grid-template-columns: minmax(88px, auto) 1fr; gap: 6px 10px; margin: 0; font-size: .87rem; }
+     dt { color: var(--muted); }
+     dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+@@ -51,8 +65,14 @@
+     .event strong { display: block; }
+     .event p { margin: 3px 0 0; color: var(--muted); font-size: .84rem; }
+     .sidebar { display: grid; gap: 12px; }
+-    .budget-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 7px 0; }
+-    .budget-row:first-of-type { border-top: 0; }
++    .data-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
++    .data-table th, .data-table td { border-top: 1px solid var(--line); padding: 8px 6px; text-align: left; vertical-align: top; }
++    .data-table th { color: var(--muted); font-weight: 600; }
++    .data-table thead th { border-top: 0; }
++    .diff-value { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
++    .diff-claim, .diff-observed { border-radius: 6px; padding: 5px 6px; overflow-wrap: anywhere; }
++    .diff-claim { background: light-dark(#fff1f0, #4a2422); }
++    .diff-observed { background: light-dark(#e8f5ee, #173d2d); }
+     .route { border-top: 1px solid var(--line); padding: 8px 0; }
+     .route:first-of-type { border-top: 0; }
+     .route small { display: block; color: var(--muted); margin-top: 3px; }
+@@ -63,13 +83,22 @@
+     .notice { border-radius: 10px; background: var(--surface-soft); padding: 10px 12px; color: var(--muted); }
+     /* 证据事实卡片：next_action.detail 落在卡片内部，不进全局提示区
+        （docs/contracts/invariants.md I3b）。blocking 与非 blocking 要能一眼分开。 */
+-    .evidence-fact { border-top: 1px solid var(--border); padding: 8px 0; display: grid; gap: 4px; }
++    .evidence-fact { border-top: 1px solid var(--line); padding: 8px 0; display: grid; gap: 4px; }
+     .evidence-fact:first-of-type { border-top: 0; }
+     .evidence-facts { display: grid; gap: 2px; margin-top: 8px; }
+     .next-action { margin: 0; font-size: 0.85rem; color: var(--muted); }
+     .next-action.blocking { color: #8a3a1a; font-weight: 600; }
+     .next-action-options { margin: 2px 0 0 1rem; font-size: 0.85rem; color: var(--muted); }
+     .notice.error { color: var(--warning); }
++    .map-figure { display: grid; gap: 7px; margin: 0; }
++    .map-figure figcaption { color: var(--muted); font-size: .78rem; }
++    .map-canvas { width: 100%; min-height: 190px; border: 1px solid var(--line); border-radius: 10px; background: light-dark(#f7faf9, #101b18); }
++    .map-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; opacity: .82; }
++    .map-line.schematic { stroke-dasharray: 6 5; }
++    .map-point { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
++    .map-label { fill: var(--text); font-size: 10px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
++    .verification-progress { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
++    .verification-progress .status { background: var(--surface-soft); }
+     .diff-list { font-size: .86rem; }
+     .hidden { display: none !important; }
+     @media (max-width: 760px) {
+@@ -215,45 +244,45 @@
+         return list;
+       };
+ 
+-      // docs/contracts/evidence-axes.md §4.1 的 8 个 token。这里只做「token ->
+-      // 中文标签」的查表；由两轴推导 token 的逻辑只存在于 evidence_core
+-      // （invariants.md I6），前端不得自行推导。
+-      const tokenLabels = {
+-        verified: "已核实",
+-        sourced_stale: "较早数据",
+-        sourced_undated: "来源未记录采集时间",
+-        estimated: "推算值",
+-        estimated_stale: "较早推算值",
+-        estimated_undated: "推算值，未记录采集时间",
+-        conflicting: "来源不一致",
+-        unknown: "尚未取得",
+-      };
+-
+-      // 每条事实一张卡片。next_action 只在 token !== "verified" 时存在
+-      // （§5.1 双向约束），因此它的有无就是渲染分支；detail 必须落在这张卡片
+-      // 内部，不能挪到全局提示区——它说的是这一条事实缺什么。
++      // UI 只透传读取层给出的 token，不含 support/freshness 判定或 token 映射。
++      // 颜色由 CSS 的 data-token 选择器负责；next_action.detail 留在事实内部。
+       const evidenceCard = (item) => {
+-        const card = element("article", "evidence-fact");
+-        card.append(element("strong", "", item.label || item.domain || "事实"));
+-        const token = item.token || "unknown";
+-        card.append(element("span", "status", tokenLabels[token] || "待核验"));
+-        if (finite(item.count)) card.append(element("span", "muted", `${item.count} 项`));
++        const card = element("details", "evidence-badge");
++        const summary = element("summary");
++        summary.append(element("strong", "", item.label || item.domain || "事实"));
++        const token = element(
++          "span",
++          "token",
++          typeof item.token === "string" ? item.token : "token 未提供",
++        );
++        if (typeof item.token === "string") token.dataset.token = item.token;
++        summary.append(token);
++        if (finite(item.count)) summary.append(element("span", "muted", `${item.count} 项`));
++        card.append(summary);
++        const detail = element("div", "evidence-detail");
++        detail.append(element("p", "", `采集时间：${item.retrieved_at || "未取得"}`));
++        const sources = Array.isArray(item.sources) ? item.sources : [];
++        detail.append(element(
++          "p",
++          "",
++          `来源：${sources.length ? sources.map((source) => source.provider || "未标明来源").join("、") : "未取得"}`,
++        ));
+         const action = item.next_action;
+         if (action && action.detail) {
+-          const note = element(
++          detail.append(element(
+             "p",
+             action.blocking ? "next-action blocking" : "next-action",
+-            action.detail,
+-          );
+-          card.append(note);
++            `下一步：${action.detail}`,
++          ));
+           if (Array.isArray(action.options) && action.options.length) {
+             const choices = element("ul", "next-action-options");
+             action.options.forEach((choice) => {
+               choices.append(element("li", "", choice.label || choice.option_id));
+             });
+-            card.append(choices);
++            detail.append(choices);
+           }
+         }
++        card.append(detail);
+         return card;
+       };
+ 
+@@ -269,6 +298,93 @@
+         return panel;
+       };
+ 
++      const svgElement = (tag) => document.createElementNS("http://www.w3.org/2000/svg", tag);
++      const mapPoint = (value) => {
++        if (!value || typeof value !== "object") return null;
++        const nested = value.position || value.coordinates || value.location || value.center;
++        if (nested && nested !== value) {
++          const point = mapPoint(nested);
++          if (point) return point;
++        }
++        const longitude = value.longitude ?? value.lon;
++        const latitude = value.latitude ?? value.lat;
++        if (!finite(longitude) || !finite(latitude)) return null;
++        if (longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) return null;
++        return {longitude, latitude};
++      };
++
++      // Self-contained SVG: it uses only supplied coordinates and explicit route
++      // geometry/endpoints. No tile request, geocoding, or name-to-coordinate guess.
++      const mapFigure = (model, title) => {
++        const markerRows = Array.isArray(model?.markers) ? model.markers : [];
++        const routeRows = Array.isArray(model?.route_polylines) ? model.route_polylines : [];
++        const markers = markerRows.map((marker) => ({marker, point: mapPoint(marker.position || marker)})).filter((item) => item.point);
++        const markerById = new Map(markers.map((item) => [item.marker.marker_id, item.point]));
++        const routes = routeRows.map((route) => {
++          const supplied = Array.isArray(route.polyline) ? route.polyline.map(mapPoint).filter(Boolean) : [];
++          if (supplied.length >= 2) return {route, points: supplied, schematic: route.geometry_status !== "EXISTING_POLYLINE"};
++          const from = markerById.get(route.from_marker_id);
++          const to = markerById.get(route.to_marker_id);
++          return from && to ? {route, points: [from, to], schematic: true} : null;
++        }).filter(Boolean);
++        const allPoints = [...markers.map((item) => item.point), ...routes.flatMap((item) => item.points)];
++        if (!allPoints.length) return null;
++        const width = 720;
++        const height = 300;
++        const inset = 34;
++        const longitudes = allPoints.map((point) => point.longitude);
++        const latitudes = allPoints.map((point) => point.latitude);
++        const minLon = Math.min(...longitudes);
++        const maxLon = Math.max(...longitudes);
++        const minLat = Math.min(...latitudes);
++        const maxLat = Math.max(...latitudes);
++        const lonSpan = Math.max(maxLon - minLon, 0.01);
++        const latSpan = Math.max(maxLat - minLat, 0.01);
++        const project = (point) => ({
++          x: maxLon === minLon
++            ? width / 2
++            : inset + ((point.longitude - minLon) / lonSpan) * (width - inset * 2),
++          y: maxLat === minLat
++            ? height / 2
++            : height - inset - ((point.latitude - minLat) / latSpan) * (height - inset * 2),
++        });
++        const palette = ["#156b55", "#3b82f6", "#8b5cf6", "#d97706", "#db2777"];
++        const figure = element("figure", "map-figure");
++        const svg = svgElement("svg");
++        svg.classList.add("map-canvas");
++        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
++        svg.setAttribute("role", "img");
++        svg.setAttribute("aria-label", title);
++        routes.forEach(({route, points, schematic}, index) => {
++          const line = svgElement("polyline");
++          line.classList.add("map-line");
++          if (schematic) line.classList.add("schematic");
++          line.setAttribute("points", points.map((point) => {
++            const placed = project(point);
++            return `${placed.x},${placed.y}`;
++          }).join(" "));
++          const day = Number(route.day);
++          line.style.stroke = palette[Number.isFinite(day) && day > 0 ? (day - 1) % palette.length : index % palette.length];
++          svg.append(line);
++        });
++        markers.forEach(({marker, point}) => {
++          const placed = project(point);
++          const dot = svgElement("circle");
++          dot.classList.add("map-point");
++          dot.setAttribute("cx", String(placed.x));
++          dot.setAttribute("cy", String(placed.y));
++          dot.setAttribute("r", "5");
++          const label = svgElement("text");
++          label.classList.add("map-label");
++          label.setAttribute("x", String(placed.x + 8));
++          label.setAttribute("y", String(placed.y - 7));
++          label.textContent = marker.display_name || marker.name || "POI";
++          svg.append(dot, label);
++        });
++        figure.append(svg, element("figcaption", "", "GCJ-02 坐标示意；虚线表示只有端点或明确标为示意的连接，不代表真实道路几何。"));
++        return figure;
++      };
++
+       const renderCandidates = (payload) => {
+         app.replaceChildren();
+         const model = payload.candidates || {};
+@@ -293,6 +409,11 @@
+               ["预算余量", money(option.budget_headroom_after_known_transport_cny)],
+             ])
+           );
++          const candidateMap = mapFigure(
++            payload.candidate_maps?.[option.destination_id],
++            `${title} POI 坐标`,
++          );
++          if (candidateMap) card.append(candidateMap);
+           if (Array.isArray(option.evidence_statuses) && option.evidence_statuses.length) {
+             const facts = element("div", "evidence-facts");
+             option.evidence_statuses.forEach((item) => facts.append(evidenceCard(item)));
+@@ -338,8 +459,39 @@
+ 
+       const eventDetail = (event) => {
+         const parts = [];
++        if (typeof event.detail === "string" && event.detail.trim()) parts.push(event.detail.trim());
++        const legs = Array.isArray(event.legs) ? event.legs : [];
++        legs.forEach((leg) => {
++          if (leg.mode === "walk" && finite(leg.distance_meters)) {
++            parts.push(`步行 ${Math.round(leg.distance_meters)} 米`);
++          } else if (leg.mode === "ride") {
++            const service = leg.service || "线路待核验";
++            const stops = leg.board_at || leg.alight_at ? `（${leg.board_at || "上车点待核验"} 上车，${leg.alight_at || "下车点待核验"} 下车）` : "";
++            const count = finite(leg.stop_count) ? `，${leg.stop_count} 站` : "";
++            parts.push(`乘 ${service}${stops}${count}`);
++          }
++        });
++        if (!legs.length && Array.isArray(event.services)) {
++          event.services.forEach((service) => {
++            parts.push(`乘 ${service.service || "线路待核验"}（${service.board_at || "上车点待核验"} 上车，${service.alight_at || "下车点待核验"} 下车）`);
++          });
++        }
++        if (Array.isArray(event.transfers) && event.transfers.length) {
++          const transferText = event.transfers.map((item) => {
++            if (!item || typeof item !== "object") return String(item);
++            const services = [item.from_service, item.to_service].filter(Boolean).join(" → ");
++            const stops = [item.alight_at, item.board_at].filter(Boolean).join(" → ");
++            return [services, stops].filter(Boolean).join("（") + (services && stops ? "）" : "");
++          }).filter(Boolean);
++          if (transferText.length) parts.push(`换乘：${transferText.join("、")}`);
++        }
++        if (finite(event.headway_minutes)) parts.push(`约每 ${event.headway_minutes} 分钟一班`);
++        if (event.first_departure || event.last_departure) {
++          parts.push(`运营 ${event.first_departure || "首班待核验"}–${event.last_departure || "末班待核验"}`);
++        }
+         if (finite(event.duration_seconds)) parts.push(duration(event.duration_seconds));
+         if (finite(event.distance_meters)) parts.push(`${(event.distance_meters / 1000).toFixed(1)}公里`);
++        if (finite(event.walking_distance_meters)) parts.push(`合计步行${Math.round(event.walking_distance_meters)}米`);
+         if (finite(event.planning_allocation_minutes)) parts.push(`游览${event.planning_allocation_minutes}分钟`);
+         const amount = event.fare?.amount_cny ?? event.cost?.amount_cny;
+         if (finite(amount)) parts.push(money(amount));
+@@ -366,6 +518,15 @@
+             const copy = element("div");
+             copy.append(element("strong", "", event.name || "未命名事件"));
+             copy.append(element("p", "", eventDetail(event)));
++            const projected = payload.event_evidence?.[event.event_id];
++            if (Array.isArray(projected?.badges) && projected.badges.length) {
++              const badges = element("div", "evidence-facts");
++              projected.badges.forEach((badge) => badges.append(evidenceCard(badge)));
++              copy.append(badges);
++            }
++            if (Array.isArray(projected?.unresolved_fact_refs) && projected.unresolved_fact_refs.length) {
++              copy.append(element("p", "muted", `${projected.unresolved_fact_refs.length} 条事实引用当前没有可展示投影。`));
++            }
+             row.append(copy);
+             events.append(row);
+           });
+@@ -378,15 +539,34 @@
+         const sidebar = element("aside", "sidebar");
+         const budgetPanel = element("section", "panel");
+         budgetPanel.append(element("h3", "", "预算"));
++        const budgetTable = element("table", "data-table");
++        const budgetHead = element("thead");
++        const budgetHeadRow = element("tr");
++        ["项目", "金额", "状态"].forEach((label) => budgetHeadRow.append(element("th", "", label)));
++        budgetHead.append(budgetHeadRow);
++        const budgetBody = element("tbody");
+         (presentation.budget_summary || []).forEach((item) => {
+-          const row = element("div", "budget-row");
+-          const parts = [];
+-          if (finite(item.known_cny) && item.known_cny > 0) parts.push(`已知 ${money(item.known_cny)}`);
+-          if (finite(item.estimated_cny) && item.estimated_cny > 0) parts.push(`估算 ${money(item.estimated_cny)}`);
+-          if (item.unknown) parts.push("另有金额待核验");
+-          row.append(element("strong", "", item.label), element("span", "", parts.join(" · ") || "待核验"));
+-          budgetPanel.append(row);
++          const row = element("tr");
++          const amounts = [];
++          const states = [];
++          if (finite(item.known_cny) && item.known_cny > 0) {
++            amounts.push(money(item.known_cny));
++            states.push("已知");
++          }
++          if (finite(item.estimated_cny) && item.estimated_cny > 0) {
++            amounts.push(money(item.estimated_cny));
++            states.push("估算");
++          }
++          if (item.unknown) states.push("含待核验金额");
++          row.append(
++            element("td", "", item.label),
++            element("td", "", amounts.join(" + ") || "—"),
++            element("td", "", states.join(" / ") || "无已知支出"),
++          );
++          budgetBody.append(row);
+         });
++        budgetTable.append(budgetHead, budgetBody);
++        budgetPanel.append(budgetTable);
+         sidebar.append(budgetPanel);
+ 
+         const missingPanel = element("section", "panel");
+@@ -408,13 +588,20 @@
+         sidebar.append(missingPanel);
+         sidebar.append(evidencePanel(presentation.evidence_statuses));
+ 
++        const planMap = mapFigure(presentation.map_payload, "逐日行程 POI 与路线");
++        if (planMap) {
++          const mapPanel = element("section", "panel");
++          mapPanel.append(element("h3", "", "地图"), planMap);
++          sidebar.append(mapPanel);
++        }
++
+         const routesPanel = element("section", "panel");
+         routesPanel.append(element("h3", "", "路线摘要"));
+         const routes = presentation.map_payload?.route_polylines || [];
+         routes.forEach((route) => {
+           const row = element("div", "route");
+           row.append(element("strong", "", `${route.from || "起点"} → ${route.to || "终点"}`));
+-          row.append(element("small", "", `${route.transport_mode || "方式待核验"} · ${duration(route.duration_seconds)} · ${route.evidence_status || "待核验"}`));
++          row.append(element("small", "", `${route.transport_mode || "方式待核验"} · ${duration(route.duration_seconds)} · ${route.token || "token 未提供"}`));
+           routesPanel.append(row);
+         });
+         if (!routes.length) routesPanel.append(element("p", "muted", "路线数据待核验。"));
+@@ -449,13 +636,16 @@
+             });
+             const next = structured(response);
+             if (next?.plan) {
+-              renderPlan({
+-                view: "plan",
+-                run_id: payload.run_id,
+-                current_version: next.plan.plan_version,
+-                trip: next.trip,
+-                plan: next.plan,
+-              });
++              // 重新走唯一展示入口，取得与新 PlanVersion 对应的读时证据徽章；
++              // revise 的结构化结果仍是失败时可保留的完整业务回退。
++              try {
++                const refreshed = structured(await callTool("show_trip_plan", {run_id: payload.run_id}));
++                if (refreshed) renderPayload(refreshed);
++                else renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
++              } catch (_) {
++                renderPlan({view: "plan", run_id: payload.run_id, trip: next.trip, plan: next.plan});
++                revisionPanel.append(element("div", "notice error", "行程已修改，但证据徽章刷新失败；可在对话中再次打开当前行程。"));
++              }
+             }
+           } catch (_) {
+             revisionPanel.append(element("div", "notice error", "本次修改未安装；当前版本保持不变。可在对话中补充修改要求。"));
+@@ -488,10 +678,115 @@
+         app.append(grid);
+       };
+ 
++      const compactValue = (value) => {
++        if (value === null || value === undefined || value === "") return "—";
++        if (typeof value === "object") return JSON.stringify(value, null, 2);
++        return String(value);
++      };
++
++      const claimText = (claim) => {
++        if (!claim || typeof claim !== "object") return "断言内容缺失";
++        const route = [claim.origin_station, claim.destination_station].filter(Boolean).join(" → ");
++        const parts = [claim.train_code, route, claim.departure_at, finite(claim.price_cny) ? money(claim.price_cny) : null].filter(Boolean);
++        return parts.join(" · ") || compactValue(claim);
++      };
++
++      const renderVerification = (payload) => {
++        app.replaceChildren();
++        const summary = payload.summary || {};
++        const total = finite(payload.total) ? payload.total : summary.total || 0;
++        app.append(heading(
++          "行程核验报告",
++          `${total} 条：${summary.sourced || 0} sourced / ${summary.conflicting || 0} conflicting / ${summary.unknown || 0} unknown`,
++        ));
++        const progress = element("section", "panel verification-progress");
++        progress.append(
++          element("span", "status", `status: ${payload.status || "未提供"}`),
++          element("span", "", `已核 ${payload.checked || 0} / ${total}`),
++          element("span", "", `待核 ${payload.pending || 0}`),
++        );
++        if (!payload.terminal && payload.verify_id) {
++          const refresh = element("button", "button", "刷新核验进度");
++          refresh.type = "button";
++          refresh.addEventListener("click", async () => {
++            if (busy) return;
++            busy = true;
++            refresh.disabled = true;
++            refresh.textContent = "正在刷新…";
++            try {
++              const response = await callTool("read_verification", {verify_id: payload.verify_id});
++              const next = structured(response);
++              if (next) renderVerification(next);
++            } catch (_) {
++              refresh.disabled = false;
++              refresh.textContent = "重试刷新";
++              progress.append(element("span", "notice error", "刷新失败；已显示的增量结果仍然有效。"));
++            } finally {
++              busy = false;
++            }
++          });
++          progress.append(refresh);
++        }
++        app.append(progress);
++
++        const panel = element("section", "panel");
++        const table = element("table", "data-table");
++        const head = element("thead");
++        const headRow = element("tr");
++        ["断言内容", "核验结果", "详情"].forEach((label) => headRow.append(element("th", "", label)));
++        head.append(headRow);
++        const body = element("tbody");
++        const findings = Array.isArray(payload.findings) ? payload.findings : [];
++        findings.forEach((finding) => {
++          const row = element("tr");
++          const claim = element("td", "", claimText(finding.claim));
++          const result = element("td");
++          result.append(evidenceCard({
++            label: `第 ${finding.index || "?"} 条`,
++            token: finding.token,
++            retrieved_at: finding.retrieved_at,
++            sources: finding.sources,
++            next_action: finding.next_action,
++          }));
++          const detail = element("td");
++          const mismatches = Array.isArray(finding.mismatches) ? finding.mismatches : [];
++          mismatches.forEach((mismatch) => {
++            const item = element("div");
++            item.append(element("strong", "", mismatch.field || "差异"));
++            const pair = element("div", "diff-value");
++            pair.append(
++              element("div", "diff-claim", `声称：${compactValue(mismatch.claimed)}`),
++              element("div", "diff-observed", `实查：${compactValue(mismatch.observed)}`),
++            );
++            item.append(pair);
++            detail.append(item);
++          });
++          if (!mismatches.length) {
++            const observed = finding.observed ? `实查：${compactValue(finding.observed)}` : "没有取得可对照值";
++            detail.append(element("p", "", observed));
++          }
++          if (finding.reason) detail.append(element("p", "muted", `说明：${finding.reason}`));
++          if (finding.next_action?.detail) detail.append(element("p", "next-action", `建议：${finding.next_action.detail}`));
++          row.append(claim, result, detail);
++          body.append(row);
++        });
++        if (!findings.length) {
++          const row = element("tr");
++          const cell = element("td", "muted", "结论正在增量到达；刷新后会追加到这里。");
++          cell.colSpan = 3;
++          row.append(cell);
++          body.append(row);
++        }
++        table.append(head, body);
++        panel.append(table);
++        app.append(panel, element("p", "muted", payload.scope_note || ""));
++      };
++
+       const renderPayload = (payload) => {
+         if (!payload || typeof payload !== "object") return;
+         if (payload.view === "candidates" || payload.candidates?.candidates) renderCandidates(payload);
+         else if (payload.view === "plan" || payload.plan?.plan) renderPlan(payload);
++        else if (payload.view === "verification" || payload.artifact_kind === "ItineraryVerification") renderVerification(payload);
+       };
+ 
+       if (window.openai?.toolOutput) renderPayload(window.openai.toolOutput);
+diff --git a/src/trip_decider/mcp_server.py b/src/trip_decider/mcp_server.py
+index 47d55a3..be90d5c 100644
+--- a/src/trip_decider/mcp_server.py
++++ b/src/trip_decider/mcp_server.py
+@@ -104,8 +104,8 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+         name="trip-decider-workspace",
+         title="Trip Decider 交互工作台",
+         description=(
+-            "交互工作台：渲染目的地比较与已安装行程，每条数据旁标注证据状态与"
+-            "采集时间。不持有业务状态。"
++            "交互工作台：渲染目的地比较、已安装行程和核验报告，每条数据旁标注"
++            "证据状态与采集时间；有明确坐标时增强为内嵌地图。不持有业务状态。"
+         ),
+         mime_type=TRIP_MCP_APP_MIME_TYPE,
+         meta={"ui": {"prefersBorder": True}},
+@@ -419,6 +419,11 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+             "不会重复打 12306。已核出的部分是最终结论，不会再变。"
+         ),
+         annotations=_VERIFYING,
++        meta={
++            **_APP_RENDER_META,
++            "openai/toolInvocation/invoking": "正在建立核验报告…",
++            "openai/toolInvocation/invoked": "核验报告已建立",
++        },
+         structured_output=True,
+     )
+     def verify_itinerary(
+@@ -445,6 +450,11 @@ def build_mcp_server(adapter: TripMCPAdapter) -> MCPServer:
+             "会明确报「这个 id 不存在」而不是假装还在跑。"
+         ),
+         annotations=_READ_ONLY,
++        meta={
++            **_APP_RENDER_META,
++            "openai/toolInvocation/invoking": "正在刷新核验进度…",
++            "openai/toolInvocation/invoked": "核验进度已刷新",
++        },
+         structured_output=True,
+     )
+     def read_verification(verify_id: str) -> dict[str, Any]:
+diff --git a/src/trip_decider/simple_live.py b/src/trip_decider/simple_live.py
+index 930d761..b331637 100644
+--- a/src/trip_decider/simple_live.py
++++ b/src/trip_decider/simple_live.py
+@@ -631,9 +631,10 @@ def search_live_places(
+ ) -> dict[str, object]:
+     """Search provider POIs without persisting raw response bytes.
+ 
+-    This is the generic discovery/profile boundary.  It intentionally returns
+-    only parsed provider fields and GCJ-02 coordinates; opening hours, prices
+-    and editorial recommendations are not inferred from a POI response.
++    This is the generic discovery/profile boundary.  It returns parsed
++    provider fields, GCJ-02 coordinates, and an explicitly reported POI
++    reference price when present.  Opening hours, live bookable prices, and
++    editorial recommendations are never inferred from a POI response.
+     """
+ 
+     normalized_keyword = keyword.strip()
+@@ -701,6 +702,7 @@ def search_live_places(
+                 "city_code": poi.city_code,
+                 "district_code": poi.district_code,
+                 "location": location,
++                "reference_price_cny": poi.reference_price_cny,
+             }
+         )
+     return {
+diff --git a/tests/invariant_ledger.json b/tests/invariant_ledger.json
+index b6c88ff..8e8586d 100644
+--- a/tests/invariant_ledger.json
++++ b/tests/invariant_ledger.json
+@@ -3,15 +3,7 @@
+   "established_at": "2026-08-02",
+   "purpose": "P1-P5 期间不变式测试套件长期为红。本文件登记当前允许失败的测试；tests/test_invariant_ledger.py 断言实际失败集合与本登记逐条相等。多出失败是回归，少了失败是悄悄转绿未记录，两者都失败。",
+   "maintenance": "每个阶段闸门都要求同步本文件：转绿的条目删除，新增的不变式测试补登记。登记只接受断言失败——无法构造场景的阻塞项必须用 assertXxx 表达阻塞原因，不得让异常逃逸。",
+-  "entries": [
+-    {
+-      "test_id": "tests.test_invariant_i4_non_stale_types_blocked.NonStaleTypesBlockedCase.test_i4_non_stale_type_reaches_feasibility_as_unknown",
+-      "invariant": "I4",
+-      "expected_green_at": "P5",
+-      "failing_assertion": "assertEqual([], ['hotel_price'])：唯一的 stale_allowed=False 类型在 src/ 中没有生产者，无法构造端到端场景",
+-      "blocked_on": "P5：hotel_price 的 status 为 planned（planned_for=P5，freshness-policy.md §2.2 注 2）。生产者落地前只能核对缓存层（第 1 条），第 2、3 条无法执行。"
+-    }
+-  ],
++  "entries": [],
+   "current_phase": "P5",
+   "phase_order": [
+     "P0",
+@@ -26,9 +18,7 @@
+   ],
+   "exemptions_note": "豁免与预期失败是两回事。entries 登记的是「整条测试允许失败」；exemptions 登记的是「某条不变式在某个受限子范围内允许不成立，而承载它的测试整体仍需通过」。豁免必须有到期阶段，且不得晚于该阶段仍然存在。",
+   "exemptions": [],
+-  "still_red_invariants": [
+-    "I4"
+-  ],
++  "still_red_invariants": [],
+   "green_invariants": [
+     "I2",
+     "I3a",
+@@ -40,9 +30,10 @@
+     "I11",
+     "I1",
+     "I9",
+-    "I12"
++    "I12",
++    "I4"
+   ],
+-  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1；I12 于 P5 轮 3（增列即绿，见下）。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。余下只有 I4，等 hotel_price 生产者。",
++  "green_note": "I8 于 P1 转绿；I2/I5/I6/I3b 于 P3a；I3a 与 I7 于 P3b；I11 于 P4-a；I1 于 P4-c 第 3 批；I9 于 P5 轮 1；I12 于 P5 轮 3（增列即绿，见下）；I4 于 2026-08-05 由高德 POI 参考价字段级生产者收尾。I10 已收录文档，测试随 P4-b 的 facts 形状落地。P4-c 于 2026-08-03 完结。ledger 全绿。",
+   "lifecycle": {
+     "I1": {
+       "statement": "落盘产物不得含展示状态字段（invariants.md I1）",
+diff --git a/tests/test_mcp_adapter.py b/tests/test_mcp_adapter.py
+index 5805c95..126d2c8 100644
+--- a/tests/test_mcp_adapter.py
++++ b/tests/test_mcp_adapter.py
+@@ -313,11 +313,18 @@ class TripMCPAdapterTests(unittest.TestCase):
+                         )
+                         render_tools = {
+                             tool.name: tool for tool in tools.tools
+-                            if tool.name.startswith("show_trip_")
++                            if tool.meta
++                            and tool.meta.get("ui", {}).get("resourceUri")
++                            == TRIP_MCP_APP_URI
+                         }
+                         self.assertEqual(
+                             set(render_tools),
+-                            {"show_trip_candidates", "show_trip_plan"},
++                            {
++                                "show_trip_candidates",
++                                "show_trip_plan",
++                                "verify_itinerary",
++                                "read_verification",
++                            },
+                         )
+                         for tool in render_tools.values():
+                             self.assertEqual(
+@@ -331,6 +338,8 @@ class TripMCPAdapterTests(unittest.TestCase):
+                             "revise_trip_plan",
+                             "show_trip_candidates",
+                             "show_trip_plan",
++                            "verify_itinerary",
++                            "read_verification",
+                         ):
+                             self.assertIn(
+                                 "app",
+@@ -366,6 +375,9 @@ class TripMCPAdapterTests(unittest.TestCase):
+                             '"select_trip_candidate"',
+                             '"advance_trip_task"',
+                             '"revise_trip_plan"',
++                            '"read_verification"',
++                            "renderVerification",
++                            "mapFigure",
+                             "requestDisplayMode",
+                         ):
+                             self.assertIn(required, app_html)
+
+=== 未跟踪新增文件（git diff 不含，补录）===
+--- docs/contracts/mcp-app-views.md ---
+# MCP App 视图与地图边界
+
+## 单一宿主管线
+
+行程、核验与地图都复用已经在 Claude Desktop 实测通过的
+`ui://trip-decider/workspace/v1.html`：工具通过 `ui.resourceUri` /
+`openai/outputTemplate` 指向同一个自包含资源，结构化结果仍是权威数据。
+MCP Apps 不可用时，客户端只是少一层渲染，不会少任何计划、核验结论或下一步。
+
+## 证据徽章
+
+MCP App 不计算 token。计划事件的 `fact_refs` 在适配层只负责连接到
+`trip().presentation.evidence_statuses` 的读取时投影；HTML 原样显示 `token`、
+`retrieved_at`、来源和 `next_action.detail`。呈现代码不存在 support/freshness
+合取或 token 文案映射。
+
+## 地图选型
+
+采用资源内原生 SVG 坐标图，不接瓦片服务或第三方 JavaScript 地图库。理由：
+
+- Claude Desktop 的 MCP App 运行在沙箱中，自包含 SVG 不依赖外网、API key、
+  CSP 放行或宿主额外能力；
+- 输入只接受现有 facts / `map_payload` 中明确给出的 GCJ-02 经纬度和路线点，
+  无地理编码，也没有名称到坐标的模型推断；
+- 地图失败不会影响时间轴、预算和核验表。没有一个有效坐标时整块地图不渲染；
+  个别 POI 缺坐标时只略过该点；路线缺几何但两端坐标齐全时画虚线示意连接并
+  明标其不是道路几何。
+
+代价是没有真实底图、道路标签、缩放平移和跨坐标系转换。当前图用于展示相对点位与
+逐日连接，不用于导航；这比在宿主沙箱中引入一项会失败的网络依赖更符合“地图是增强”
+的边界。
+
+## 核验增量
+
+`verify_itinerary` 与 `read_verification` 都绑定同一资源。进行态报告提供“刷新核验
+进度”按钮，调用既有 `read_verification(verify_id)` 并用增量结果重绘；宿主在外部
+轮询时，`ui/notifications/tool-result` 也会触发同一渲染入口。视图不自动高频轮询，
+避免后台核验尚未推进时制造无意义调用。
+--- tests/test_hotel_price_collection.py ---
+"""AMap hotel POI reference prices become field-level estimated facts."""
+
+from __future__ import annotations
+
+import json
+import os
+import unittest
+from unittest.mock import patch
+
+from trip_decider import dynamic_discovery, simple_live
+from trip_decider.evidence_projection import usable_fact_values
+from trip_decider.travel_agent import TravelIntent
+
+
+STAMP = "2026-08-05T09:30:00+08:00"
+
+
+def _poi(record_id: str, name: str, *, cost: object = None) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": record_id,
+        "name": name,
+        "location": "117.8000,29.2500",
+        "type": "住宿服务;宾馆酒店",
+        "typecode": "100100",
+        "adname": "乙区",
+    }
+    if cost is not None:
+        value["business"] = {"cost": cost, "rating": "4.8"}
+    else:
+        # rating is deliberately present: it must never be converted to price.
+        value["business"] = {"rating": "4.8"}
+    return value
+
+
+def _intent() -> TravelIntent:
+    return TravelIntent.from_mapping(
+        {
+            "task_mode": "DIRECT_PLAN",
+            "origin": "甲地",
+            "destination_anchor": "乙地",
+            "destination_expression": "确定乙地",
+            "earliest_departure_at": "2026-08-10T08:00",
+            "latest_return_at": "2026-08-12T20:00",
+            "travelers": 2,
+            "total_budget_cny": 5000,
+            "pace": "relaxed",
+            "transport_preferences": ["rail"],
+            "themes": ["自然"],
+        }
+    )
+
+
+def _live_response(keyword: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+    if keyword == "酒店":
+        places = [
+            {
+                "provider_record_id": "hotel-priced",
+                "name": "参考价酒店",
+                "category": "宾馆酒店",
+                "district": "乙区",
+                "address": "测试路1号",
+                "location": {
+                    "longitude": 117.8,
+                    "latitude": 29.25,
+                    "coordinate_system": "GCJ-02",
+                },
+                "reference_price_cny": 388.0,
+            },
+            {
+                "provider_record_id": "hotel-undated",
+                "name": "无价酒店",
+                "category": "宾馆酒店",
+                "district": "乙区",
+                "address": "测试路2号",
+                "location": {
+                    "longitude": 117.81,
+                    "latitude": 29.26,
+                    "coordinate_system": "GCJ-02",
+                },
+                "reference_price_cny": None,
+            },
+        ]
+    elif keyword.endswith("站") or keyword == "火车站":
+        places = [
+            {
+                "provider_record_id": f"station-{keyword}",
+                "name": f"{keyword.removesuffix('站')}站",
+                "category": "火车站",
+                "district": "乙区",
+                "location": {
+                    "longitude": 117.79,
+                    "latitude": 29.24,
+                    "coordinate_system": "GCJ-02",
+                },
+            }
+        ]
+    else:
+        places = [
+            {
+                "provider_record_id": f"spot-{keyword}",
+                "name": f"{keyword}甲",
+                "category": "风景名胜",
+                "district": "乙区",
+                "location": {
+                    "longitude": 117.82,
+                    "latitude": 29.27,
+                    "coordinate_system": "GCJ-02",
+                },
+            }
+        ]
+    return {
+        "support": "sourced",
+        "places": places,
+        "retrieved_at": STAMP,
+        "source": {
+            "provider": "高德地图 Web 服务",
+            "scope": "POI Search 2.0",
+            "retrieved_at": STAMP,
+        },
+    }
+
+
+class AmapReferencePriceParsingCase(unittest.TestCase):
+    def test_search_projects_explicit_business_cost_only(self) -> None:
+        body = json.dumps(
+            {
+                "status": "1",
+                "infocode": "10000",
+                "count": "2",
+                "pois": [
+                    _poi("priced", "有价酒店", cost="388"),
+                    _poi("unpriced", "无价酒店"),
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        response = simple_live._Response(
+            body=body,
+            http_status=200,
+            attempts=1,
+            amap_status="1",
+            amap_infocode="10000",
+        )
+        with patch.dict(os.environ, {"AMAP_WEB_SERVICE_KEY": "test-key"}), patch(
+            "trip_decider.simple_live._http_get",
+            return_value=response,
+        ):
+            result = simple_live.search_live_places(keyword="酒店")
+
+        self.assertEqual(388.0, result["places"][0]["reference_price_cny"])
+        self.assertIsNone(result["places"][1]["reference_price_cny"])
+
+    def test_legacy_biz_ext_cost_is_supported_but_rating_is_not_a_price(self) -> None:
+        parsed = simple_live.parse_amap_poi_response(
+            {
+                "status": "1",
+                "infocode": "10000",
+                "count": "2",
+                "pois": [
+                    {
+                        **_poi("legacy", "旧响应酒店"),
+                        "biz_ext": {"cost": 299},
+                    },
+                    _poi("rating-only", "只有评分"),
+                ],
+            }
+        )
+
+        self.assertFalse(parsed.problems)
+        self.assertEqual(299.0, parsed.value.pois[0].reference_price_cny)
+        self.assertIsNone(parsed.value.pois[1].reference_price_cny)
+
+    def test_zero_cost_is_missing_not_a_free_hotel_claim(self) -> None:
+        parsed = simple_live.parse_amap_poi_response(
+            {
+                "status": "1",
+                "infocode": "10000",
+                "count": "1",
+                "pois": [_poi("zero", "零值酒店", cost="0.00")],
+            }
+        )
+
+        self.assertFalse(parsed.problems)
+        self.assertIsNone(parsed.value.pois[0].reference_price_cny)
+
+
+class HotelPriceFactCase(unittest.TestCase):
+    def test_profile_has_estimated_and_unknown_price_facts_side_by_side(self) -> None:
+        with patch(
+            "trip_decider.dynamic_discovery.search_live_places",
+            side_effect=_live_response,
+        ):
+            evidence = dynamic_discovery.collect_live_destination_profile(_intent())
+
+        price_facts = [
+            fact
+            for fact in evidence.facts
+            if str(fact.get("field", "")).startswith("hotel_candidates[")
+            and str(fact.get("field", "")).endswith("price.amount_cny")
+        ]
+        self.assertEqual(2, len(price_facts))
+        self.assertEqual(
+            ["estimated", "unknown"],
+            [fact["support"] for fact in price_facts],
+        )
+        self.assertEqual(
+            {"hotel_price"},
+            {fact["data_type"] for fact in price_facts},
+        )
+        self.assertEqual(388.0, price_facts[0]["value"])
+        self.assertIsNone(price_facts[1]["value"])
+        rebuilt = usable_fact_values(evidence.facts)
+        self.assertEqual(
+            388.0,
+            rebuilt["hotel_candidates"][0]["price"]["amount_cny"],
+        )
+        self.assertNotIn("price", rebuilt["hotel_candidates"][1])
+
+
+if __name__ == "__main__":
+    unittest.main()
+--- tests/test_mcp_app_views.py ---
+"""Presentation-only MCP App envelopes for plan, verification, and maps."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import re
+import unittest
+
+from trip_decider.mcp_adapter import TripMCPAdapter
+from trip_decider.mcp_app import load_trip_mcp_app_html
+from trip_decider.travel_agent import EvidenceItem, EvidenceStatus
+
+
+STAMP = "2026-08-05T09:00:00+08:00"
+
+
+def _rail_item() -> dict[str, object]:
+    return EvidenceItem(
+        evidence_id="rail-live",
+        domain="railway",
+        status=EvidenceStatus.SOURCED,
+        value={"outbound": {"train_code": "G100"}},
+        sources=({"provider": "中国铁路12306", "retrieved_at": STAMP},),
+    ).to_dict()
+
+
+def _web_item() -> EvidenceItem:
+    return EvidenceItem(
+        evidence_id="web-live",
+        domain="web",
+        status=EvidenceStatus.SOURCED,
+        value={
+            "attractions": [
+                {
+                    "name": "坐标景点",
+                    "location": {
+                        "longitude": 117.8,
+                        "latitude": 29.25,
+                        "coordinate_system": "GCJ-02",
+                    },
+                }
+            ]
+        },
+        sources=({"provider": "高德地图", "retrieved_at": STAMP},),
+    )
+
+
+class _Application:
+    def current_run_evidence(self, _run_id: str) -> dict[str, object]:
+        return {"railway": _rail_item()}
+
+    def guided_evidence_for_selection(
+        self,
+        _run_id: str,
+        _destination_id: str,
+    ) -> dict[str, EvidenceItem]:
+        return {"web": _web_item()}
+
+
+class _NoCoordinateApplication(_Application):
+    def guided_evidence_for_selection(
+        self,
+        _run_id: str,
+        _destination_id: str,
+    ) -> dict[str, EvidenceItem]:
+        return {
+            "web": EvidenceItem(
+                evidence_id="web-without-coordinate",
+                domain="web",
+                status=EvidenceStatus.SOURCED,
+                value={"attractions": [{"name": "只有名称的景点"}]},
+                sources=({"provider": "高德地图", "retrieved_at": STAMP},),
+            )
+        }
+
+
+class _Query:
+    def __init__(self, application: _Application) -> None:
+        self.application_service = application
+
+    @staticmethod
+    def candidates(_run_id: str) -> dict[str, object]:
+        return {
+            "candidates": [
+                {"destination_id": "candidate-one", "name": "候选甲"}
+            ]
+        }
+
+    @staticmethod
+    def current_plan(_run_id: str) -> dict[str, object]:
+        return {
+            "plan_version": 1,
+            "plan": {
+                "days": [
+                    {
+                        "day": 1,
+                        "date": "2026-08-10",
+                        "events": [
+                            {
+                                "event_id": "rail-outbound",
+                                "type": "transit",
+                                "name": "G100",
+                                "fact_refs": [
+                                    "rail-live#outbound.train_code"
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+    @staticmethod
+    def trip(_run_id: str) -> dict[str, object]:
+        return {
+            "presentation": {
+                "evidence_statuses": [
+                    {
+                        "domain": "railway",
+                        "label": "跨城铁路",
+                        "token": "verified",
+                        "retrieved_at": STAMP,
+                    }
+                ],
+                "map_payload": {
+                    "markers": [
+                        {
+                            "marker_id": "point-one",
+                            "name": "坐标景点",
+                            "position": {
+                                "longitude": 117.8,
+                                "latitude": 29.25,
+                            },
+                        }
+                    ],
+                    "route_polylines": [],
+                },
+            }
+        }
+
+
+class MCPAppEnvelopeCase(unittest.TestCase):
+    def setUp(self) -> None:
+        application = _Application()
+        self.adapter = TripMCPAdapter(application, _Query(application))
+
+    def test_plan_envelope_contains_projected_badge_and_coordinate(self) -> None:
+        view = self.adapter.render_trip_plan("run-one")
+
+        badge = view["event_evidence"]["rail-outbound"]["badges"][0]
+        self.assertEqual("verified", badge["token"])
+        self.assertEqual(STAMP, badge["retrieved_at"])
+        self.assertEqual("中国铁路12306", badge["sources"][0]["provider"])
+        point = view["trip"]["presentation"]["map_payload"]["markers"][0]
+        self.assertEqual(117.8, point["position"]["longitude"])
+
+    def test_candidate_envelope_contains_fact_backed_poi_point(self) -> None:
+        view = self.adapter.render_trip_candidates("run-one")
+
+        marker = view["candidate_maps"]["candidate-one"]["markers"][0]
+        self.assertEqual("坐标景点", marker["name"])
+        self.assertEqual(29.25, marker["position"]["latitude"])
+
+    def test_missing_coordinate_omits_map_without_losing_candidate_data(self) -> None:
+        application = _NoCoordinateApplication()
+        adapter = TripMCPAdapter(application, _Query(application))
+
+        view = adapter.render_trip_candidates("run-one")
+
+        self.assertEqual({}, view["candidate_maps"])
+        self.assertEqual(
+            "candidate-one",
+            view["candidates"]["candidates"][0]["destination_id"],
+        )
+
+    def test_verification_envelope_contains_counts_tokens_and_next_action(self) -> None:
+        view = self.adapter._verification_view(
+            {
+                "verify_id": "verify-one",
+                "status": "COMPLETE",
+                "total": 2,
+                "checked": 2,
+                "pending": 0,
+                "findings": [
+                    {
+                        "index": 1,
+                        "verdict": "conflicting",
+                        "claim": {"train_code": "G100"},
+                        "observed": {"train_code": "G101"},
+                        "mismatches": [
+                            {
+                                "field": "train_code",
+                                "claimed": "G100",
+                                "observed": "G101",
+                            }
+                        ],
+                        "retrieved_at": STAMP,
+                        "suggested_action": "改成实查车次",
+                    },
+                    {
+                        "index": 2,
+                        "verdict": "unknown",
+                        "claim": {"train_code": "G200"},
+                        "observed": None,
+                        "mismatches": [],
+                        "retrieved_at": None,
+                        "suggested_action": "稍后重查",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual("verification", view["view"])
+        self.assertEqual(2, view["summary"]["total"])
+        self.assertEqual(1, view["summary"]["conflicting"])
+        self.assertEqual(1, view["summary"]["unknown"])
+        self.assertEqual("conflicting", view["findings"][0]["token"])
+        self.assertEqual(
+            "稍后重查",
+            view["findings"][1]["next_action"]["detail"],
+        )
+
+
+class PresentationDoesNotGradeEvidenceCase(unittest.TestCase):
+    def test_ui_has_no_token_vocabulary_condition_or_label_map(self) -> None:
+        html = load_trip_mcp_app_html()
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        token_literals = (
+            "verified",
+            "sourced_stale",
+            "sourced_undated",
+            "estimated_stale",
+            "estimated_undated",
+            "conflicting",
+            "unknown",
+        )
+        conditional_lines = [
+            line.strip()
+            for line in script.splitlines()
+            if re.search(r"\b(?:if|switch|case)\b|\?[^:]", line)
+            and any(f'"{token}"' in line or f"'{token}'" in line for token in token_literals)
+        ]
+        self.assertEqual([], conditional_lines)
+        self.assertNotIn("tokenLabels", script)
+        self.assertIn("typeof item.token", script)
+        self.assertIn("token.dataset.token = item.token", script)
+
+    def test_single_resource_contains_all_three_renderers(self) -> None:
+        html = load_trip_mcp_app_html()
+        for renderer in ("renderCandidates", "renderPlan", "renderVerification"):
+            self.assertIn(renderer, html)
+        self.assertIn("mapFigure", html)
+
+
+if __name__ == "__main__":
+    unittest.main()
