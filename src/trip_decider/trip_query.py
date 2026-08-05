@@ -500,13 +500,56 @@ class TripQueryService:
         return deepcopy(dict(payload)) if isinstance(payload, Mapping) else {}
 
     def missing_information(self, run_id: str) -> dict[str, object]:
+        """还缺什么，**以及每一项要按什么形状补**。
+
+        第六次实测（2026-08-05）：`submit_trip_evidence` 的描述白纸黑字写着
+        「可以先 read_trip(view="missing") 看当前待补动作的 required_fields /
+        optional_fields」，而这个视图当时只回 planning_draft——里面一个
+        `required_fields` 都没有。宿主连交三轮、拿不到一个字段名，只能止损。
+
+        **系统要求证据却不公布证据 schema，是这个产品的自我违背。** 待补动作
+        本来就带着 `required_fields` / `optional_fields` / `example`，它们在
+        动作快照里，只是从没有接到这个视图上。这里补上——不新造一份 schema
+        （那就是第二张表，D2），而是把动作快照里已有的那份原样带出来。
+        """
+
         presentation = self.trip(run_id).get("presentation")
         draft = (
             presentation.get("planning_draft")
             if isinstance(presentation, Mapping)
             else None
         )
-        return deepcopy(dict(draft)) if isinstance(draft, Mapping) else {}
+        view = deepcopy(dict(draft)) if isinstance(draft, Mapping) else {}
+        view["pending_actions"] = self._pending_action_schemas(run_id)
+        return view
+
+    def _pending_action_schemas(self, run_id: str) -> list[dict[str, object]]:
+        """待补动作连同它们各自声明的字段清单。"""
+
+        try:
+            snapshot = self.application_service.next_actions(run_id)
+        except (TravelAgentError, TripQueryError):
+            return []
+        actions = snapshot.get("actions")
+        if not isinstance(actions, list):
+            return []
+        pending: list[dict[str, object]] = []
+        for action in actions:
+            if not isinstance(action, Mapping):
+                continue
+            entry: dict[str, object] = {
+                "action_id": action.get("action_id"),
+                "submit_action_id": action.get(
+                    "submit_action_id", action.get("action_id")
+                ),
+                "title": action.get("title"),
+                "required_fields": list(action.get("required_fields") or []),
+                "optional_fields": list(action.get("optional_fields") or []),
+            }
+            if action.get("example"):
+                entry["example"] = deepcopy(action["example"])
+            pending.append(entry)
+        return pending
 
     def audit_result(self, run_id: str) -> dict[str, object]:
         run = self.store.get_run(run_id)
