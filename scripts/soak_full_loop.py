@@ -32,7 +32,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import os
@@ -47,6 +49,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from trip_decider.evidence_broker import EvidenceBroker  # noqa: E402
+from trip_decider.agent_actions import MAP_SEGMENT_EXAMPLE  # noqa: E402
 from trip_decider.mcp_adapter import (  # noqa: E402
     TripMCPAdapter,
     TripMCPError,
@@ -262,7 +265,7 @@ class _Soak:
                 supplied = False
                 for action in pending:
                     domain = str(action.get("submit_action_id") or "")
-                    payload = _synthetic_evidence(domain)
+                    payload = _synthetic_evidence(action)
                     if payload is None:
                         continue
                     try:
@@ -301,33 +304,16 @@ class _Soak:
         return checkpoint
 
     def _submit_probe(self, run_id: str, result: RoundResult) -> None:
-        """提交一份形状合法的 map 证据，核对 accepted 与解析条数。"""
+        """原样采用公布的 map example，核对 accepted 与解析条数。"""
 
         try:
+            payload = deepcopy(MAP_SEGMENT_EXAMPLE)
+            payload["sources"] = [
+                {"provider": "soak-probe", "retrieved_at": _now_iso()}
+            ]
             response = self.adapter.submit_trip_evidence(
                 run_id,
-                {
-                    "action_id": "map",
-                    "value": {
-                        "local_transit": [
-                            {
-                                "from": "住宿片区",
-                                "to": "景区入口",
-                                "duration_seconds": 1800,
-                                "line": "景区班车",
-                                "board_at": "住宿片区",
-                                "alight_at": "景区入口",
-                                "fare": 10.0,
-                            }
-                        ]
-                    },
-                    "sources": [
-                        {
-                            "provider": "soak-probe",
-                            "retrieved_at": _now_iso(),
-                        }
-                    ],
-                },
+                payload,
             )
         except TripMCPError as error:
             # 被拒是允许的，但必须带理由（本轮新立的规矩）
@@ -381,44 +367,24 @@ class _Soak:
         return result
 
 
-def _synthetic_evidence(domain: str) -> dict[str, Any] | None:
-    """替宿主补一份形状合法的证据。
+def _synthetic_evidence(
+    action: Mapping[str, object],
+) -> dict[str, Any] | None:
+    """把 missing 公布的 example 原样变成宿主提交。
 
     **不是在造事实**——soak 要验的是链路走不走得通，不是数据对不对；这些提交
-    全部带 `provider: soak-probe`，一眼看得出不是真实来源。真实性由别的测试守。
+    只把来源标成 `soak-probe`、时间换成当前时刻。value 结构完全来自产品公布的
+    example；说明书一旦与机器解析器分叉，soak 与元用例会同时红。
     """
 
-    stamp = _now_iso()
-    source = [{"provider": "soak-probe", "retrieved_at": stamp}]
-    if domain == "web":
-        return {
-            "action_id": "web",
-            "value": {
-                "destination_official_name": "疲劳测试目的地",
-                "hotel_area": {"name": "老城片区"},
-                "verified_facts": [
-                    {"claim": "片区集中了多数住宿",
-                     "source_url": "https://example.invalid/a"},
-                    {"claim": "有两处主要景点",
-                     "source_url": "https://example.invalid/b"},
-                ],
-            },
-            "sources": source,
-        }
-    if domain == "map":
-        return {
-            "action_id": "map",
-            "value": {
-                "local_transit": [
-                    {"from": "住宿片区", "to": "景区入口",
-                     "duration_seconds": 1800, "line": "景区班车",
-                     "board_at": "住宿片区", "alight_at": "景区入口",
-                     "fare": 10.0}
-                ]
-            },
-            "sources": source,
-        }
-    return None
+    example = action.get("example")
+    if not isinstance(example, Mapping):
+        return None
+    payload = deepcopy(dict(example))
+    payload["sources"] = [
+        {"provider": "soak-probe", "retrieved_at": _now_iso()}
+    ]
+    return payload
 
 
 def _day(offset: int, clock: str) -> str:
