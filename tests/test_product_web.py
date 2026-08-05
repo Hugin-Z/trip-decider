@@ -601,13 +601,34 @@ class ProductWebContractTests(unittest.TestCase):
         )
         started = time.monotonic()
         streamed: list[tuple[str, float]] = []
+        # 并发度直接量：两个采集器**同时在飞**过一次，才叫并行。
+        # 原来这里靠墙钟阈值（首结果 <0.12s、总耗时 <0.24s）间接推断并行，
+        # 那两个数在慢一点的机器上会红——**同一份源码在干净 checkout 里 5/5 绿、
+        # 在本工作目录 5/5 红**，量到的差异不在线程调度（2×30ms 并行实测 31ms），
+        # 而在每个候选的准备开销，随文件系统与缓存状态浮动。
+        #
+        # 归因到此为止，改判据：**用环境敏感量换设计不变量**。要验的性质是
+        # 「两个候选并行核验」，那就直接数同时在飞的数量，不再拿耗时当代理。
+        # 这不是放宽——顺序执行下 max_in_flight 恒为 1，照样红，而且红得
+        # 指名道姓。
+        in_flight = 0
+        max_in_flight = 0
+        concurrency_lock = threading.Lock()
 
         def railway(contract: TravelIntent) -> EvidenceItem:
-            time.sleep(
-                0.03
-                if contract.destination_anchor == "候选甲站"
-                else 0.15
-            )
+            nonlocal in_flight, max_in_flight
+            with concurrency_lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            try:
+                time.sleep(
+                    0.03
+                    if contract.destination_anchor == "候选甲站"
+                    else 0.15
+                )
+            finally:
+                with concurrency_lock:
+                    in_flight -= 1
             return EvidenceItem(
                 evidence_id="rail",
                 domain="railway",
@@ -646,8 +667,23 @@ class ProductWebContractTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(result["option_count"], 2)
         self.assertEqual(len(streamed), 2)
-        self.assertLess(streamed[0][1], 0.12)
-        self.assertLess(elapsed, 0.24)
+        # 并行：两个候选的核验同时在飞过。
+        self.assertEqual(
+            2,
+            max_in_flight,
+            "两个候选没有同时在飞——候选核验退化成串行了",
+        )
+        # 增量：快的那个先流出来，不是攒齐了一起交。
+        self.assertEqual(
+            "候选甲",
+            streamed[0][0],
+            f"先流出来的不是快的那个：{[name for name, _ in streamed]}",
+        )
+        self.assertLess(
+            streamed[0][1],
+            elapsed,
+            "首个结果与整体同时到达——说明是攒齐再交，不是边算边流",
+        )
 
     def test_guided_domain_timeout_is_partial_and_does_not_block(self) -> None:
         intent = TravelIntent.from_mapping(

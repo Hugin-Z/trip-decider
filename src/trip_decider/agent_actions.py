@@ -494,7 +494,7 @@ def run_until_blocked(
                 dispatched_at = time.monotonic()
                 completed, pending = wait(
                     futures,
-                    timeout=min(ACTION_STALL_SECONDS, remaining),
+                    timeout=remaining,
                 )
                 for future in completed:
                     # 「已经有人在做」不是错误，是进度：另一条路径正在跑同一个
@@ -515,17 +515,10 @@ def run_until_blocked(
                         str(batch[futures.index(future)]["action_id"])
                         for future in pending
                     ]
-                    if _is_real_stall(dispatched_at):
-                        for future in pending:
-                            future.cancel()
-                        _timeout_actions(
-                            run_id,
-                            pending_ids,
-                            store=store,
-                        )
-                        return get_next_actions(run_id, store=store)
-                    # 预算用完而已，动作还在飞。**不取消、不判超时**——取消它
-                    # 才是死锁的源头：结果永远没人收，下一轮又重发一个新的。
+                    # 停滞判定归**入口**所有（`execute_registered_action`
+                    # 内的看门狗），这里只管本次调用的预算。两处都判会重复
+                    # 记熔断次数、并对已经阻塞的 run 再 block 一次
+                    # （实测：TravelAgentError("run is not running")）。
                     return _budget_exhausted(
                         run_id,
                         pending_ids,
@@ -554,17 +547,10 @@ def run_until_blocked(
             dispatched_at = time.monotonic()
             completed, pending = wait(
                 (future,),
-                timeout=min(ACTION_STALL_SECONDS, remaining),
+                timeout=remaining,
             )
             if pending:
-                if _is_real_stall(dispatched_at):
-                    future.cancel()
-                    _timeout_actions(
-                        run_id,
-                        [action_id],
-                        store=store,
-                    )
-                    return get_next_actions(run_id, store=store)
+                # 同上：停滞归入口判，这里只判预算。
                 return _budget_exhausted(
                     run_id,
                     [action_id],
@@ -825,15 +811,41 @@ def execute_registered_action(
         raise ActionAlreadyInFlight(
             f"{action_id} 已在执行中，本次不重复派发"
         )
+
+    def _run_and_release() -> dict[str, object]:
+        # **在飞登记只在真正跑完时才释放**，不随外层超时返回而释放：外层等不到
+        # 不代表活干完了，提前放会让下一次派发和它撞车。
+        try:
+            return _execute_registered_action_claimed(
+                run_id,
+                action_id,
+                store=store,
+                evidence_broker=evidence_broker,
+            )
+        finally:
+            _release_in_flight(run_id, action_id)
+
+    # 看门狗与熔断下沉到这里——**动作执行的唯一入口**。
+    #
+    # 上一轮核对表的欠账：降级链原本只活在 `run_until_blocked` 里，于是
+    # `execute_trip(action_id=X)` 与 `retry_action(X)` 这两条直呼路径既没有
+    # 看门狗也没有熔断（第七次实测「重试两次无效」的结构性成因）。放在入口处，
+    # 四条路径全部自动继承，不必各自记得包一层。
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix=f"action-{action_id}",
+    )
     try:
-        return _execute_registered_action_claimed(
-            run_id,
-            action_id,
-            store=store,
-            evidence_broker=evidence_broker,
-        )
+        future = executor.submit(_run_and_release)
+        completed, pending = wait((future,), timeout=ACTION_STALL_SECONDS)
+        if pending:
+            # 超过停滞阈值：记一次熔断计数并如实落状态。动作**不取消**——
+            # 它还在飞，迟到的结果照样会被收下（第五轮的「迟到结果回收」）。
+            _timeout_actions(run_id, [action_id], store=store)
+            return get_next_actions(run_id, store=store)
+        return next(iter(completed)).result()
     finally:
-        _release_in_flight(run_id, action_id)
+        executor.shutdown(wait=False)
 
 
 def _execute_registered_action_claimed(

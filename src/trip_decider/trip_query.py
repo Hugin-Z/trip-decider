@@ -520,7 +520,18 @@ class TripQueryService:
             else None
         )
         view = deepcopy(dict(draft)) if isinstance(draft, Mapping) else {}
-        view["pending_actions"] = self._pending_action_schemas(run_id)
+        pending = self._pending_action_schemas(run_id)
+        view["pending_actions"] = pending
+        if not pending:
+            # 空列表会被读成「没有待补项」，而真实情况常常是「手工可补项还没
+            # 就绪」——planner 跑过之后才知道缺哪一段，在那之前列不出来。
+            # 两者对宿主的含义完全相反，不能用同一个空列表表示（这是上一轮
+            # 半修复留下的那一半，完整修复仍在登记中）。
+            view["pending_actions_note"] = (
+                "当前列不出手工可补项：待补内容要等规划器跑过才能定位到具体"
+                "字段。这不等于没有缺口——先看 blockers 与 missing_requirements，"
+                "或调 advance_trip_task 推进一步后再取一次。"
+            )
         return view
 
     def _pending_action_schemas(self, run_id: str) -> list[dict[str, object]]:
