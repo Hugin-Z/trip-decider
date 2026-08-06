@@ -3,6 +3,14 @@
 .env.*
 !.env.example
 .venv/
+.secrets/
+secrets/
+credentials/
+claude_desktop_config.json
+*.key
+*.pem
+*.p12
+*.pfx
 
 # Python/editor caches that future work units may create locally
 __pycache__/
