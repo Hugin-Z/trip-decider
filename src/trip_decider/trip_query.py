@@ -23,10 +23,7 @@ from trip_decider.trip_read_model import (
     _planning_draft_read_model,
     _presentation_contract,
 )
-from trip_decider.planning_input_compiler import (
-    PlanningInputCompiler,
-    plan_verdict_from_result,
-)
+from trip_decider.planning_input_compiler import plan_verdict_from_result
 from trip_decider.evidence_projection import (
     REFETCH_BUDGET_SECONDS,
     project_domain,
@@ -34,7 +31,6 @@ from trip_decider.evidence_projection import (
     verdict_payload,
 )
 from trip_decider.travel_agent import (
-    default_agent_store,
     InMemoryAgentStore,
     RunStatus,
     TaskMode,
@@ -62,9 +58,12 @@ class TripQueryService:
         refetcher: object = None,
         live_refetch: bool = False,
     ) -> None:
-        store = store if store is not None else default_agent_store()
         if application_service is None:
-            application_service = default_trip_application_service()
+            application_service = (
+                default_trip_application_service()
+                if store is None
+                else TripApplicationService(store=store)
+            )
         if store is None:
             store = application_service.store
         if application_service.store is not store:
@@ -660,7 +659,6 @@ def reset_default_trip_query_service() -> None:
 
 
 __all__ = [
-    "DEFAULT_TRIP_QUERY_SERVICE",
     "TripQueryError",
     "TripQueryService",
 ]

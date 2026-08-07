@@ -19,11 +19,13 @@ from trip_decider.product_web import (
     _execute_direct_plan,
     _execute_guided_discovery,
     _execute_open_discovery,
-    _map_payload_contract,
     _persist_guided_evidence,
-    _presentation_contract,
     _sse_event,
     _trip_post,
+)
+from trip_decider.trip_read_model import (
+    _map_payload_contract,
+    _presentation_contract,
 )
 from trip_decider.agent_actions import (
     execute_registered_action,
@@ -354,7 +356,7 @@ class ProductWebContractTests(unittest.TestCase):
             True,
         )
         _trip_post(f"/api/trips/{run_id}/confirm", {})
-        with patch.object(product_web, "start_action_loop") as planner:
+        with patch("trip_decider.trip_application.start_action_loop") as planner:
             status, response = _trip_post(
                 f"/api/trips/{run_id}/audit",
                 {

@@ -1,10 +1,10 @@
 # 落盘契约 v2 规格
 
-> 状态：**已确认**（2026-08-02）。裁决见 §13，第二步实施按 §14 的顺序执行。
+> 状态：**已实施**。裁决与执行顺序保留为迁移记录。
 > 建立日期：2026-08-02
 > 范围：`runtime/` 下全部产物。
 > 前置：`evidence-axes.md`、`freshness-policy.md` §4、`invariants.md` I1/I5/I6、`p3b-gate-inventory.md` §8.3（结论值原则）。
-> 边界：本文件是规格，不是改动。除 P3b 的 `schema_version` 尾巴外，本步骤不改代码。
+> 边界：下文的 v1 数字与“当前”陈述都是实施前基线；现行运行时不提供 v1 迁移或旧文件名回退。
 
 ---
 
@@ -34,7 +34,7 @@
 |---|---|
 | 位置 | 每个 JSON 文件的**顶层**；`events.jsonl` 每行一个 |
 | v2 取值 | `2` |
-| 无该字段 | 按 `1` 处理（`travel_agent.runtime_schema_version()`） |
+| 无该字段 | 不受支持；不提供 v1 默认或迁移 |
 | 打标点 | `travel_agent.stamp_schema_version()`，三个原子写函数统一走它 |
 
 **已知冲突**：`evidence/namespace.json` 有一个**自己的** `schema_version: 1`，语义是「命名空间格式版本」，与本契约的运行时版本同名不同义。v2 必须改名其一。**建议**把命名空间的改为 `namespace_format_version`，因为运行时版本是跨文件统一概念，占用通名更合理。
@@ -184,7 +184,7 @@ A 与 B 目前靠「都从同一个 `state.evidence` 写出」保持一致，那
 建议：**读时从 `run.intent` 重建**。它本来就是 intent 的投影而不是采集来的证据
 ——`_planner_handler` 里就是 `EvidenceItem(evidence_id="confirmed-travel-intent",
 domain="user_input", value=intent.to_dict())` 现造的。重建即可，顺带再消灭一份
-副本。**此项待批**。
+副本。**此项当时待批，结论见下方完结记录。**
 
 **完结记录（2026-08-03）**：读取侧 4 点、写入侧 3 点全部落地，`user_input`
 改为从 `run.intent` 重建。守卫：`test_read_entrances_do_not_fork`（两面读同一份）、

@@ -23,7 +23,6 @@ from trip_decider.evidence_core import (
     support_from_legacy_name,
 )
 from threading import Condition, RLock
-from typing import Any
 from uuid import uuid4
 
 
@@ -494,21 +493,6 @@ class TravelIntent:
         ]
         return tuple(dict.fromkeys((*inferred, *self.missing_fields)))
 
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
-
     def to_dict(self) -> dict[str, object]:
         return {
             "task_mode": self.task_mode.value,
@@ -633,21 +617,6 @@ class Revision:
             "must_visit": list(self.must_visit),
             "day_start_times": dict(self.day_start_times),
         }
-
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -811,21 +780,6 @@ class DestinationContext:
             if item.status is EvidenceStatus.CONFLICTING
         )
 
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
-
     def to_dict(self) -> dict[str, object]:
         return {
             "context_id": self.context_id,
@@ -867,21 +821,6 @@ class AgentEvent:
     occurred_at: str
     details: Mapping[str, object] = field(default_factory=dict)
 
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
-
     def to_dict(self) -> dict[str, object]:
         return {
             "sequence": self.sequence,
@@ -916,21 +855,6 @@ class AgentRun:
     #: 结论，与 ``refresh_failure`` 同性质（`invariants.md` I1 白名单）。
     error_detail: str | None = None
 
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
-
     def to_dict(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
@@ -959,21 +883,6 @@ class AgentSession:
     created_at: str
     run_ids: list[str]
     current_run_id: str
-
-    def _persisted_value(self) -> object:
-        """v2 落盘形状：facts 数组 + 采集元数据（persistence-v2.md §1.3）。"""
-
-        value = self.value
-        if not isinstance(value, Mapping):
-            return deepcopy(value)
-        if isinstance(value.get("facts"), (list, tuple)):
-            return deepcopy(dict(value))
-        return deepcopy(
-            {
-                **collection_metadata(value),
-                "facts": [dict(fact) for fact in self.facts],
-            }
-        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1656,30 +1565,14 @@ def _read_json_lines(path: Path) -> list[dict[str, object]]:
 # 本次是**最小打标**：只加版本号，不改落盘结构。完整的落盘契约改造属 P4。
 RUNTIME_SCHEMA_VERSION = 2
 
-# 需要打标的文件——它们承载 EvidenceItem.status，正是取值域变化的载体。
-# 裁决点名的三个文件里有两个已改用新布局（evidence/current.json 与
-# evidence/guided-comparison.json），旧名保留是因为读取端仍有回退分支
-# （agent_actions.py:2042、trip_application.py:861）。
+# 需要打标的现行文件——它们承载 EvidenceItem.status，正是取值域变化的载体。
 _VERSIONED_RUNTIME_FILES = frozenset(
     {
         "run.json",
         "current.json",
         "guided-comparison.json",
-        "evidence.json",
-        "guided-evidence.json",
     }
 )
-
-
-def runtime_schema_version(document: Mapping[str, object]) -> int:
-    """读取落盘文件的 schema 版本。无该字段的文件按 1 处理。
-
-    1 = P3b 之前，``status`` 取值域是 sourced/missing/conflicting 三值。
-    2 = P3b 起，加入 estimated。
-    """
-
-    raw = document.get("schema_version")
-    return int(raw) if isinstance(raw, int) and raw > 0 else 1
 
 
 def stamp_schema_version(

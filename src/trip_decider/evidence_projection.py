@@ -30,12 +30,10 @@ from trip_decider.evidence_core import (
     SUPPORT_ESTIMATED,
     SUPPORT_SOURCED,
     SourceRef,
-    derive_facts,
     evaluate_fact,
     collection_metadata,
     normalized_retrieved_at,
     parse_timestamp,
-    support_from_legacy_name,
     token_support,
     token_freshness,
 )

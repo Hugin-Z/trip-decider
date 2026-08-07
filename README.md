@@ -1,156 +1,224 @@
 # trip-decider
 
-一个旅行规划 AI，它给的行程你能直接照着走——<br>
-每一段路都写清：坐什么车、几点发、在哪上车、多少钱、末班几点。<br>
-查不到的它明说，绝不用“前往 XX（车程约 1 小时）”这种话糊弄你。
+> **Trip Decider is an evidence-constrained agent for real-world travel decisions.**
+>
+> 一个先核验现实事实、再决定哪些内容可以进入行程的旅行决策 Agent。
 
-## 你一定遇到过这种事
+[![CI](https://github.com/Hugin-Z/trip-decider/actions/workflows/ci.yml/badge.svg)](https://github.com/Hugin-Z/trip-decider/actions/workflows/ci.yml)
 
-城市之间其实好办。高铁谁都会查，12306 上车次、时刻、票价一目了然。
+它不把模型记忆当作交通事实，也不生成“看起来合理”的攻略来填空：
 
-真正让一趟旅行崩掉的，往往是**最后一段**：县城怎么到景区，景区之间怎么走，
-当天还能不能回来。
+- 用 12306 核验铁路车次、时刻与票价；
+- 用高德核验地点身份、POI、路线与当地交通；
+- 把事实逐字段记录为 `sourced / estimated / conflicting / unknown`，并在读取时计算新鲜度；
+- 产出可执行行程，也能审计其他 AI、攻略或人工排出的行程。
 
-这类班车信息散、旧、难搜。地图 App 里的班次可能是几年前的；搜索引擎搜出来的
-攻略互相抄；最后还是得去小红书翻“有没有人真的坐过”。通用 AI 到这里通常只剩
-一句：
+模型或 MCP 宿主可以理解需求、调用工具和推进任务，**但模型不是事实来源**。
 
-> 上午前往篁岭。
+> Unknown stays unknown. Conflicts stay visible. Freshness is evaluated at read time.
+> **Verification > generation.**
 
-怎么去？在哪上车？几点有车？回程末班几点？它不知道，但它也不说它不知道。
-等你到了县城，才发现计划里最关键的一段根本没法执行。
+当前版本：`0.1.0` release baseline。
 
-trip-decider 在第十次真实复测里，同一段给出的信息是：
+## 一个真实结果
 
-> **高铁站—篁岭旅游班车：6:40–17:40，每约 20 分钟一班；沿线停靠李坑、汪口、
-> 江湾；全程 ¥19/人；回程末班 17:00。**
+一份外部行程曾声称：G1992 从上饶到武汉，15:35 发车，二等座 ¥340。
+trip-decider 在 2026-08-04 20:08–20:09（+08:00）查询 12306 后观测到：
 
-如果班次没有可靠的固定答案，它不会补一个“约半小时一班”，而会直接写：
+| 断言 | 12306 观测值 | 判定 |
+| --- | --- | --- |
+| 15:35 发车，¥340 | 15:02 发车，¥202.5 | `conflicting` |
 
-> **班车时刻随季节浮动，建议出发前一天在“赣悦行”小程序确认班次。**
+它没有“挑一个更像真的”，而是保留断言与观测值，并指出发车时间相差 33 分钟、
+票价相差 ¥137.5。同批另外三条没有查到支持证据，被标为 `unknown`，而不是“错误”。
 
-不确定本身也是可执行的信息。重要的不是把每个格子填满，而是让你知道这段能不能
-照着走；不能的话，出发前要去哪里确认、到了该问谁。
+这是一个历史实查快照，不是今天仍有效的时刻表；现在使用前必须重新查询。完整记录见
+[第三方行程 vs 12306 实查](docs/field-reports/verify-2026-08-04-third-party-vs-12306.md)。
 
-以上数字来自真实宿主复测记录，原始过程保存在
-[`docs/field-reports/`](docs/field-reports/)。
+普通生成式行程会写“下午前往景区，车程约 1 小时”。trip-decider 要么给出可核验的
+交通方式、上下车点、班次、费用与返程边界，要么明确告诉你缺什么、何时重查、向谁确认。
 
-## 它长什么样
+## Current scope
 
-### 逐日行程：交通列才是主角
+当前完整端到端真实复测主要覆盖**武汉 → 婺源及上饶区域**，包括 Claude Desktop / MCP
+宿主调用、真实 12306 核验、高德地点与当地交通采集，以及发布前重复 soak。
+这不是全国可用性声明。
 
-| 时段 | 行程 | 怎么走 | 票价与返程边界 |
-| --- | --- | --- | --- |
-| 当天 | 婺源高铁站 → 篁岭 | 旅游班车；6:40–17:40，每约 20 分钟一班；沿线停李坑、汪口、江湾 | ¥19/人；回程末班 17:00 |
-| 出发前一天 | 复核季节班次 | 打开“赣悦行”小程序确认当天发车表 | 未确认前保持“待核验” |
+当前明确不支持或覆盖不足：
 
-> 📷 **截图占位：第十次复测完整逐日行程表**
-> 需要露出每行的交通方式、上下车点、班次、票价、末班和待核验动作。
+- 航班规划和长途公路尚未形成统一支持路径；
+- 酒店实时成交价与库存没有稳定来源；
+- 景点开放时间与门票覆盖不完整；
+- 天气尚未接入；
+- 不提供订票、订房、账户或消费级托管服务；
+- runtime persistence formats before v2 are not supported.
 
-### 预算：金额和可信状态放在一起
+更多边界见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。
 
-| 项目 | 金额 | 状态 | 你该怎么做 |
-| --- | ---: | --- | --- |
-| 高铁站—篁岭旅游班车 | ¥19/人 | 已核验 | 按行程乘坐 |
-| 季节班次 | — | 出发前复核 | 前一天查“赣悦行” |
-| 没有可靠来源的费用 | — | 未核验 | 不计入“已知预算” |
+## Architecture in one glance
 
-> 📷 **截图占位：第十次复测预算表**
-> 需要同时露出金额、状态和未计入总额的未知项。
+```mermaid
+flowchart TD
+    U[User] --> H[LLM / MCP Host]
+    U --> W[Standalone deterministic parser]
+    H --> I[Travel Intent]
+    W --> I
+    I --> C[Evidence Collection]
+    P[12306 / AMap / user-supplied evidence] --> C
+    C --> F[Field-level Facts]
+    F --> E[support × freshness]
+    E --> G[Decision Gates]
+    G --> R[Planner]
+    R --> O[Executable Plan / Audit Report]
+```
 
-### 核验：把“看起来很完整”拆开逐条对账
+LLM / MCP Host 只位于意图理解和工具编排路径，不位于 truth-source 路径；Standalone
+Web 则通过确定性规则提取明确输入。
+权威决策链是：
 
-一次真实对账中，第三方行程写了 4 条铁路断言。trip-decider 逐条查询 12306 后给出：
+```text
+evidence -> support × freshness -> decision gates -> planner
+```
 
-| 结果 | 数量 | 例子 |
-| --- | ---: | --- |
-| 有据 | 0 | — |
-| 冲突 | 1 | G1992：第三方写 15:35、¥340；12306 实查为 15:02、¥202.5 |
-| 查无实据 | 3 | 只说明当前组合查不到，不擅自判成“车次不存在” |
+详细模块边界见 [CURRENT_ARCHITECTURE.md](CURRENT_ARCHITECTURE.md)。
 
-> 📷 **截图占位：核验对账页**
-> 需要露出第三方断言、12306 实查值、判定和“查无实据不等于错误”的说明。
+## 两个主要能力
 
-完整快照见
-[`verify-2026-08-04-third-party-vs-12306.md`](docs/field-reports/verify-2026-08-04-third-party-vs-12306.md)。
+### Plan：从需求到可执行行程
 
-## 两个用法
+系统把模糊需求收敛成结构化 intent，确认后再进行目的地候选发现、铁路查询、地点与
+POI 核验、当地交通拼接、预算与返程边界检查。候选目录只能提出“值得查什么”，不能
+证明可达；是否进入计划由事实级证据和 decision gates 决定。
 
-### 排：一句话变成能执行的行程
+计划包含逐日事件、交通段、预算状态、未知项和恢复动作。修改节奏或约束时会生成新
+PlanVersion；新版本失败不会覆盖已经安装的可用版本。
 
-真实宿主测试用的是这样一句话：
+### Verify：审计别处排好的行程
 
-> 我想 8 月 4 号从武汉出发去婺源上饶那边玩到 8 月 7 号，两个人，预算 6000，
-> 节奏慢一点，想看自然和古村。帮我安排一下。
+把其他 AI、攻略或人工行程中的铁路断言交给 trip-decider，它会逐条给出三档结果：
 
-trip-decider 会先确认硬条件，再查往返铁路、地点身份和当地交通，最后给出从出发到
-返程的逐日表。缺哪一段就点名缺哪一段，不会拿一段散文冒充计划。
+| 结果 | 含义 |
+| --- | --- |
+| `sourced` / supported | 当前查询得到的事实与断言一致 |
+| `conflicting` | 查到了，但观测值与断言不一致；两边都保留 |
+| `unknown` / unsupported | 当前没有找到足够证据，或查询/输入条件不足 |
 
-### 验：把别人排的丢进来，逐条查账
+**Unsupported does not mean false.** 超出预售期、站名不完整、网络失败或当前线路未查到，
+都不能被偷换成“这趟车不存在”。
 
-> **你：** 帮我核一下这份行程里的车次、时刻和票价。
-> **trip-decider：** 4 条断言：0 条有据、1 条冲突、3 条查无实据。G1992 的发车
-> 时刻相差 33 分钟，二等座票价相差 ¥137.5；其余 3 条建议出发前确认。
+## Why this is different
 
-“冲突”表示查到了但对不上；“查无实据”表示当前没查到。它不会把后者偷换成
-“假的”，也不会把第三方行程整份打一个模糊分数。
+### 1. Field-level evidence
 
-## 快速开始
+来源不只贴在整份文档上。车次、发车时间、票价、路线时长、POI 身份等字段分别保留
+来源、采集时刻、支持状态与计划依赖；一个字段有据，不会自动替同一段里的其他字段背书。
 
-要求 Python `>=3.11,<3.12`。当前一键启动脚本在 Windows PowerShell 上验证。
+### 2. Support × Freshness
+
+事实支持度与时效是两条独立轴：
+
+- Support：`sourced`、`estimated`、`conflicting`、`unknown`；
+- Freshness：`fresh`、`stale`、`undated`。
+
+Support 随证据保存；freshness 根据 `retrieved_at` 和读取时刻重新计算。昨天可信的班次
+不会因为曾经写入磁盘，就永远显示为今天仍可信。完整规则见
+[evidence axes](docs/contracts/evidence-axes.md) 与
+[freshness policy](docs/contracts/freshness-policy.md)。
+
+### 3. Honest failure
+
+系统区分“已核实不存在”、当前未找到、采集超时、来源冲突、内部错误，以及动作仍在
+执行。`blocked` 不是一句模糊失败：读取结果必须给出 recovery / `next_action`，说明
+系统会重试、用户需要补什么，或哪个冲突需要选择。
+
+### 4. Stateful agent runtime
+
+这不是一次 `prompt -> answer` 调用。运行过程包含：
+
+```text
+intent -> confirmation -> execution -> blocked/completed -> revision
+```
+
+任务状态、事件、证据和 PlanVersion 都可恢复；界面只是读取同一份 read model，不拥有
+另一套事实或规划状态。
+
+## Evidence example
+
+下面仍使用上面的真实 G1992 核验快照，展示一条事实怎样被消费：
+
+```text
+Fact:              G1992 departure_at = 2026-08-14 15:02
+Source:            China Railway 12306
+Observed support:  sourced
+Retrieved:         2026-08-04 20:08–20:09 +08:00
+Freshness then:    fresh
+Compared claim:    departure_at = 15:35; fare = ¥340
+Decision:          conflicting
+Decision dependency: external itinerary's return rail leg; refetch before relying on it
+```
+
+`Freshness then` 只描述当次读取。今天再打开这条记录，它只是历史证据，不能直接进入新计划。
+
+## 两种运行模式
+
+### MCP / Agent-hosted mode
+
+Claude、Codex 或其他 MCP-capable host 负责理解自然语言、选择工具、跟随 `next_call`
+推进 runtime，并把结果解释给用户。trip-decider 负责状态、provider 调用、事实、证据判定、
+规划和核验。这是完整的 Agent 使用方式；宿主的语言模型仍然不是 truth source。
+
+MCP 配置见 [使用说明](docs/usage.md)。
+
+### Standalone Web
+
+本地 Web 使用确定性的结构化提取规则读取显式日期、地点、人数、预算和偏好，然后调用
+同一套 application/query services 与 read model。它没有隐藏的模型调用。
+
+> **Standalone Web intentionally does not require a model API.**
+
+## Quick start
+
+支持 Python `>=3.11,<3.12`。锁定依赖和一键启动脚本目前在 Windows PowerShell 验证。
 
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --requirement .\requirements-dev.lock
 ```
 
-当地地点和路线查询需要高德 Web 服务 key：
+启动 standalone Web（真实地点和路线查询需要高德 Web 服务 key）：
 
 ```powershell
 $env:AMAP_WEB_SERVICE_KEY = "<your-amap-web-service-key>"
 .\scripts\run_product.ps1
 ```
 
-浏览器会打开 <http://127.0.0.1:8765/>。真实 key 只通过进程环境传入，不要写进
-仓库、配置示例、日志或截图。
+浏览器会打开 <http://127.0.0.1:8765/>。凭据只通过进程环境传入，不要写进仓库、日志或截图。
 
-如果要在 Claude Desktop 里直接对话使用，按
-[`docs/usage.md`](docs/usage.md) 配置 MCP。完整离线测试：
+## Reliability
 
-```powershell
-$env:PYTHONPATH = "$PWD\src"
-.\.venv\Scripts\python.exe -m pytest -q
-```
+| 层级 | 作用 | 执行方式 |
+| --- | --- | --- |
+| Offline CI | 确定性回归；pytest、Ruff、Pyright；不需要凭据 | 每个 PR 和 `main` push |
+| Live smoke | 检查当前 12306 / 高德响应能否通过真实采集和动作循环 | 有凭据、有网络时人工执行 |
+| Soak | 在真实 provider 时序和数据波动下重复走到明确终态 | 发布门，不进入普通 CI |
 
-## 为什么它做得到
+仓库已有两次可追溯的 20 轮 soak 记录，两次均为 0 个探针失败；其中终态包含“需要用户
+补证据”和“无可行候选”，**不等于 40 轮都生成了计划**。详见
+[soak gate report](docs/field-reports/soak-2026-08-05-r8-r9-gate.md)。
 
-因为能直查的交通不是让模型回忆：跨城铁路查 12306，当地路线查高德；外部补充的
-班车信息也必须带来源和采集时刻。
+完整命令、边界和不过度解读方式见 [docs/verification.md](docs/verification.md)。
 
-每个事实分开记录两件事：**有没有可靠支持**，以及**到你读取时还新不新**。前者
-可以保存，后者每次读取现算，所以昨天可信的班次不会永远挂着“已核验”。
-规则见 [证据两轴模型](docs/contracts/evidence-axes.md) 和
-[新鲜度策略](docs/contracts/freshness-policy.md)。
+## 推荐阅读顺序
 
-查不到就标未核验，冲突就把两边都摆出来。系统层面禁止静默编造：这套约束从最初
-13 条机器核验继续扩展到当前的 I15，覆盖持久化、未知与冲突、读时计算、规划消费
-和 MCP 调用边界，详见 [不变式契约](docs/contracts/invariants.md)。
+1. README（你正在读的这份产品与技术概览）
+2. [CURRENT_ARCHITECTURE.md](CURRENT_ARCHITECTURE.md)（当前模块和数据流）
+3. [docs/verification.md](docs/verification.md)（离线、live smoke、soak 的边界）
+4. [docs/usage.md](docs/usage.md)（Web 与 MCP 使用方式）
+5. [docs/contracts/](docs/contracts/)（证据与可靠性契约）
 
-`evidence-runtime` 是实现这件事的底层：它决定什么事实可以进入规划。但它是手段，
-不是目的；目的始终是让你拿到一份能照着走的行程。
+`PLAN.md`、`docs/audit/` 与 `docs/field-reports/` 保留工程决策和实测历史，但不是理解产品
+的前置阅读。
 
-## 它诚实到什么程度
-
-- 当前完成端到端真实复测的主链路是武汉到婺源区域，不声称已经覆盖全国；
-- 12306、高德和地方班车都会变化，旧快照不会被包装成今天仍然有效；
-- 酒店成交价、实时可订状态、天气和部分景点信息仍可能是未知；
-- 它不订票、不订房，也不会替你登录任何账号；
-- 本地 Web 服务没有认证，只应绑定 `127.0.0.1`，不能直接暴露到公网。
-
-所有已确认边界见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。真实宿主用坏它、卡住它、
-发现数据对不上的过程没有藏起来，全部留在
-[`docs/field-reports/`](docs/field-reports/)。
-
-## License 与作者
+## License
 
 [MIT License](LICENSE) · © 2026 [Hugin-Z](https://github.com/Hugin-Z)

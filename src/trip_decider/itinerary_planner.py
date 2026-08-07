@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from typing import cast
 
 
 EVENT_TYPES = frozenset(
@@ -962,7 +963,10 @@ def replan_itinerary(
         int(day["day"]): set(day["violations"])
         for day in candidate_evaluation["days"]
     }
-    days = deepcopy(list(candidate_days))
+    days = cast(
+        list[dict[str, object]],
+        deepcopy(list(candidate_days)),
+    )
     previous_positions = {
         str(event["event_id"]): (day, index, deepcopy(dict(event)))
         for day, index, event in _selected_events(previous_days)
@@ -1193,7 +1197,7 @@ def replan_itinerary(
             )
             continue
         insertion = min(old_index, len(target["events"]))
-        target["events"].insert(insertion, old_event)
+        cast(list[object], target["events"]).insert(insertion, old_event)
 
     for day_number, clock in sorted(day_start_times.items()):
         target = next(

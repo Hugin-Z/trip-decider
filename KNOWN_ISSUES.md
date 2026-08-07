@@ -3,6 +3,8 @@
 本文件记录当前版本已经确认的限制、风险和可用规避方式。它们不是未来能力承诺；
 状态变化应同时更新这里、`README.md` 和相关测试。
 
+适用版本：`0.1.0` 发布基线。
+
 ## 安全与部署
 
 | 限制 | 影响 | 当前处置 |
@@ -35,7 +37,7 @@
 | --- | --- | --- |
 | 官方启动脚本只在 Windows PowerShell 验证 | macOS/Linux 没有等价的一键脚本 | 手动设置 `PYTHONPATH=src` 后运行 `python -m trip_decider.product_web` |
 | Python 版本限定为 3.11 | 3.12+ 或更早版本不在当前测试矩阵 | 使用独立的 Python 3.11 虚拟环境 |
-| runtime schema 不提供 v1→v2 迁移 | 旧运行数据不能安全复用 | 升级前备份；使用新 runtime root 或删除可再生成的旧数据 |
+| runtime persistence formats before v2 are not supported. | 旧运行数据不能安全复用，也不会由当前读取路径自动迁移 | 升级前备份；使用新 runtime root 或删除可再生成的旧数据 |
 | 当前没有托管部署、账户或预订集成 | 无法把它当消费级在线服务使用 | 仅作为本地决策支持与可审计原型 |
 
 ## 报告问题

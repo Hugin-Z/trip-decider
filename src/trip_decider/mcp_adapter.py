@@ -620,7 +620,7 @@ class TripMCPAdapter:
         return self._guard(
             lambda: readers[view](run_id),
             next_call=(
-                f'这个视图现在读不出来。先用 read_trip(run_id, view="overview") '
+                '这个视图现在读不出来。先用 read_trip(run_id, view="overview") '
                 "看任务整体状态，overview 里的 checkpoint 会说明当前该做什么"
             ),
         )
@@ -1134,7 +1134,8 @@ def _next_call(
     的通用建议。
     """
 
-    run = trip.get("run") if isinstance(trip.get("run"), Mapping) else {}
+    raw_run = trip.get("run")
+    run = raw_run if isinstance(raw_run, Mapping) else {}
     if not (isinstance(recovery, list) and recovery):
         result = run.get("result") if isinstance(run, Mapping) else None
         recovery = (

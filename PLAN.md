@@ -1,7 +1,9 @@
-# trip-decider · Plan v4（解冻版）
+# trip-decider · Plan v4（已完成的可靠性迁移记录）
 
 > 版本：v4.0 · 2026-08-02
-> 状态：**解冻**。v3.0 的冻结状态于 2026-08-02 正式撤销。
+> 状态：**已完成，保留为迁移与裁决记录**。当前系统边界以
+> `CURRENT_ARCHITECTURE.md` 为准；下文中的 P0–P5、“当前状态”与基线数字均是
+> 2026-08-02 至 2026-08-05 的执行记录，不是新一轮待办。
 > 撤销原因：`docs/audit/handover-baseline.md` 实测确认，v3 §4 冻结的五态证据模型在产品运行路径上一次都不出现（基线报告 §3.2），其冻结不变式（v3:72）在 `trip_read_model.py:231-238` 处被反向违反（基线报告 §3.4 实测）。一份既未实现、也无法机械检验的冻结契约不构成约束，继续冻结只会让偏差累积。
 > 仓库名 trip-decider 为占位，Hugin 可改。
 
@@ -49,7 +51,7 @@
 
 | 能力 | 一句话 | 执行期 |
 |---|---|---|
-| A. 目的地发现 | 给定出发地 / 天数 / 预算 / 偏好，在可达圈内筛出 2-3 个差异化的可行目的地方案（Plan-backed：每个推荐背后至少跑通一个粗粒度可行方案） | v1 实现，v0 只定接口 |
+| A. 目的地发现 | 给定出发地 / 天数 / 预算 / 偏好，从可替换的种子池预筛，再实查车次、地点与路线后输出候选；种子池缺失时才回落到高德实时地区检索 | 已实现 |
 | B. 行程结构决策 | 目的地确定后，决定住哪个片区、哪天走哪条线、天内怎么排、时间够不够；放不进去的点明确淘汰并说明原因 | v0 主攻 |
 
 差异化主张（对外一句话）：**别的行程工具在数据不足时照样一本正经，这个系统会诚实说「这块我没底」。**
@@ -83,11 +85,11 @@
 ```
 [A] 需求澄清与约束化          实现（输入解析 → 结构化 intent）
         ↓
-[B] 可达目的地候选池           实现（高德实时 POI 检索 + 分组排序）
+[B] 可达目的地候选池           实现（可替换种子池预筛 + 实查；空池才走高德实时回落）
         ↓
 [C] POI 候选池生成             实现（零起点检索 + 用户指定点，双入口）
         ↓
-[D] 字段级证据采集与定级        重做（support / freshness 两轴）   ← v3 此处为「五态模型」，作废
+[D] 字段级证据采集与定级        实现（support / freshness 两轴；`evidence_core.py`）
         ↓
 [E] 约束形式化 + 冲突检查       实现（三层约束；无解时输出冲突集）
         ↓
@@ -137,7 +139,7 @@ v3 §4 的五态模型作废。当前权威定义分布在三份契约文件：
 |---|---|
 | `support` / `freshness` 两轴定义、合取规则、`next_action` 结构、旧模型映射 | `docs/contracts/evidence-axes.md` |
 | 各 data_type 的容忍窗、复用上限、超窗档位、「影响可行性」判定准则、PlanVersion 性质 | `docs/contracts/freshness-policy.md` |
-| 必须始终成立且必须被测试核对的性质 I1–I9 | `docs/contracts/invariants.md` |
+| 必须始终成立且必须被测试核对的性质 I1–I15 | `docs/contracts/invariants.md` |
 
 **从 v3 保留下来的两条**：
 
@@ -190,11 +192,15 @@ data_type 的权威登记表见 `freshness-policy.md` §2.2。无生产者项的
 
 ## 7. 工件契约（修订自 v3）
 
-v3 §7 定义的 7 个工件（`request.yaml` / `constraints.yaml` / `candidates.json` / `evidence.json` / `plan.json` / `violations.json` / `trip-card.html`）**只存在于离线 artifact 管线**，该管线从产品入口不可达（基线报告 §2.5：14 个模块 13,347 行，占 `src/` 的 36.4%）。
+v3 §7 定义的 7 个工件（`request.yaml` / `constraints.yaml` / `candidates.json` / `evidence.json` / `plan.json` / `violations.json` / `trip-card.html`）**曾只存在于离线 artifact 管线**；该管线当时从产品入口不可达，现已从仓库删除（基线报告 §2.5：14 个模块 13,347 行，占当时 `src/` 的 36.4%）。
 
-在线路径的实际落盘产物（基线报告 §2.4 实测）：`run.json` / `session.json` / `events.jsonl` / `plan-version.json` / `plans/plan-NNNN.json` / `evidence.json` / `guided-evidence.json` / `action-loop.json`，另有 `runtime/evidence-cache/records.json`。
+在线路径的实际落盘产物为：`run.json` / `session.json` /
+`events.jsonl` / `plan-version.json` / `plans/plan-NNNN.json` /
+`evidence/current.json` / `evidence/guided-comparison.json` / `action-loop.json`，
+另有 `runtime/evidence-cache/records.json`。
 
-**两条管线保留哪一条为主干是一个未决决策**（基线报告 D2），本文件不代为裁决。在裁决前，以下约束对**两条管线同时生效**：
+**管线裁决已完成**：在线管线是唯一产品主干，旧离线 artifact 管线已删除。
+以下约束保留为在线管线的落盘规则：
 
 1. `invariants.md` I1（持久化文件中不得出现展示状态字段）适用于任何一条管线的落盘产物。
 2. PlanVersion 的新性质（结构 + 事实引用，不含展示态）见 `freshness-policy.md` §4。
@@ -218,7 +224,7 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 
 | # | 判据 | 核对方式 |
 |---|---|---|
-| A1 | `invariants.md` 中 I1–I9 每条都有对应测试文件，且全部通过 | 测试套件执行结果 |
+| A1 | `invariants.md` 中 I1–I15 的现行机器守卫全部通过 | 测试套件执行结果 |
 | A2 | 持久化产物中展示状态字段出现次数 = 0 | I1 的扫描器 |
 | A3 | 展示 token 的产生实现数 = 1 | I6 的扫描器 |
 | A4 | 对外返回值中，token ≠ `verified` 的事实携带合法 `next_action` 的比例 = 100% | I3a |
@@ -278,7 +284,7 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 | 7 | 各可行性判定点对 `support == estimated` 的接受与否 | **已决**（裁决 5，2026-08-02）：可以参与判定，但不得产出无条件可行结论——`estimated` 输入必须至少产生一个 conditional。作为 `invariants.md` I7 的扩展分支，不新开不变式 |
 | 8 | 高德个人开发者配额与商用条款 | 保留自 v3，未验证 |
 | 9 | 乡镇班车信息的可获得率——决定 conflicting / unknown 在真实行程中的占比 | 保留自 v3，未实测 |
-| 10 | I8 反向规则的 `planned` 修订（P1 为解决裁决 2 与 I8 的冲突所做） | **待 Hugin 复核**，见 `freshness-policy.md` §2.1.1 |
+| 10 | I8 反向规则的 `planned` 修订（P1 为解决裁决 2 与 I8 的冲突所做） | **已决并落地**：`hotel_price` 转为 `active`，现行登记见 `freshness-policy.md` §2.2 |
 | 11 | `web/app.js` 的运行失败叙述改为结构化渲染 | **推迟到 P5 之后**（裁决 3，2026-08-03）：方向对、时机错——它是前端改造，P5 代码轨的收口目标是 ledger 全绿与 auto_refetch，不在这里开新战线。P5 轮 2 只补键 + `INTERNAL_ERROR_` 前缀兜底。见 `p5r1-handoff.md` §7 |
 | 12 | `{DOMAIN}_ACTION_STALLED` → `_TIMED_OUT` 的精度改名 | **推迟，无认领阶段**（裁决 1，2026-08-03）：判为低收益——「停滞」与「超时」的语义差不值一次全量同步的风险（D1 的反面）。若将来有一次同域全量同步可顺带做。见 `p5r1-handoff.md` §7 |
 
@@ -358,7 +364,7 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 
 不先出清单就改代码，等于在 29 个决策点上逐个即兴发挥——基线报告记录的四套状态词表就是这么来的。
 
-**清单已产出**：`docs/contracts/p3b-gate-inventory.md`（2026-08-02），**待 Hugin 确认**。四型分布：甲 20 / 乙 4 / 丙 4 / 丁 1。其中 3 点需裁决，见该文件 §8。
+**清单已产出并执行完毕**：`docs/contracts/p3b-gate-inventory.md`（2026-08-02）。四型分布：甲 20 / 乙 4 / 丙 4 / 丁 1。3 个历史裁决点及结论见该文件 §8。
 
 **P3b 前置修正（已完成，2026-08-02）**：P3a 问题 1（缓存降级值渲染为 `verified`）已裁决落地——`refresh_failure` 转正为契约字段，freshness 增加刷新失败封顶，`reason_code` 新增第 15 个 `refresh_failed`。见 `evidence-axes.md` §3.4、`invariants.md` I1 白名单与 I2 边界说明。
 
@@ -375,7 +381,7 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 
 **前置条件（硬性）**：**P4 开始前必须产出落盘契约 v2 规格，规格过 Hugin 后才动代码。** 与 P3b 的闸门清单同理——落盘契约一次改错的代价是全部历史数据不可读（基线报告 H1）。
 
-**规格已产出**：`docs/contracts/persistence-v2.md`（2026-08-02），**待 Hugin 确认**。实测一次全新 run 落盘 476 处 I1 禁用字段；规格逐文件给出删除项、新增项与引用结构，并含 blocker 家族清理（21 → 11）、历史 run 处置、`DEFAULT_AGENT_STORE` 惰性化三件。其中 5 项需裁决，见该文件 §12。
+**规格已产出并执行完毕**：`docs/contracts/persistence-v2.md`（2026-08-02）。当时实测一次全新 run 落盘 476 处 I1 禁用字段；规格逐文件给出删除项、新增项与引用结构，并含 blocker 家族清理（21 → 11）、历史 run 处置、`DEFAULT_AGENT_STORE` 惰性化三件。5 个历史裁决点及结论见该文件 §12。
 
 **P3b 尾巴（已完成，2026-08-02）**：裁决 3 的 `schema_version` 打标补齐 `evidence/current.json` 与 `evidence/guided-comparison.json`。三份独立的原子写实现统一走 `travel_agent.stamp_schema_version()`。
 
@@ -412,4 +418,5 @@ v3 §8 的十天时间线作废。理由：日期硬指标在阶段闸门面前�
 5. `docs/contracts/invariants.md` — 必须始终成立的性质，以及它们各自的测试在哪。
 6. `docs/contracts/engineering-discipline.md` — 作业纪律的单一出处，每条带一次真实事故。作业单按编号引用（「按 D5 处理」），不再逐条展开。
 
-`PRODUCT.md` 与 `README.md` 的多处计数与实际不符（基线报告 §4 列出 5 处），在 §9.2 A8 转绿前不应作为核对依据。
+`CURRENT_ARCHITECTURE.md` 是当前模块关系的入口；本文与
+`docs/audit/handover-baseline.md` 保留的数字只用于追溯迁移过程。

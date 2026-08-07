@@ -24,7 +24,6 @@ from trip_decider.evidence_projection import item_retrieved_at
 from trip_decider.travel_agent import (
     default_runtime_root,
     EvidenceItem,
-    EvidenceStatus,
     TravelAgentError,
     TravelIntent,
 )

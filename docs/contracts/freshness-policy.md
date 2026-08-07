@@ -4,10 +4,12 @@
 > 建立日期：2026-08-02（P0 阶段产出）
 > 前置阅读：`docs/contracts/evidence-axes.md`（两轴模型）、`docs/audit/handover-baseline.md` §3.4 与 §5.3。
 > 证据规则：涉及现有代码的陈述给出 `文件:行号`。不确定的标注【待验证】。
+> §2.2 是现行权威登记表。§1、§4.1、§4.4 与 §5.2–§5.3 保留的“现状”是
+> 2026-08-02 至 2026-08-03 的迁移记录，不代表当前实现。
 
 ---
 
-## 1. 现状：当前实际配置
+## 1. 迁移前基线：当时的实际配置
 
 以下表格逐字读自 `src/trip_decider/evidence_broker.py:38-61` 的 `FRESHNESS_POLICIES`，并补上一列实测的可达性。
 
@@ -26,7 +28,7 @@
 
 **结论**：8 个已登记的 data_type 中有 4 个没有生产者。它们的策略配置从未被执行过，因此其取值也从未被验证过。背景决定 4「影响可行性的字段自动重查」在这 4 项上目前无处落地。
 
-**注**：上表描述的是 `src/` 中的**当前**状态，与 §2.2 的目标策略表不同。P1 阶段不修改 `src/`，因此本表在 P5 之前保持不变，仅作为迁移起点。`seat_availability` 已被裁决删除（见 §2.2 注 1），删除动作在 P5 执行。
+**注**：上表只是 P0 时的迁移起点，与 §2.2 的现行权威登记表不同。
 
 ### 1.1 现状的结构性问题
 
@@ -202,7 +204,7 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 
 ## 4. PlanVersion 的性质变更
 
-### 4.1 现状
+### 4.1 迁移前基线
 
 `travel_agent.py:941-989` 的 `persist_plan_version()` 把整个 plan 深拷贝落盘（`:976` `deepcopy(dict(plan))`）。实测 `runtime/sessions/f4d3aec8-.../plan-version.json`（129,188 字节）中包含的展示态字段：
 
@@ -217,7 +219,7 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 | `schedule_status` | `LIVE` | 5 |
 | `display_status` | `DISPLAYABLE_CONDITIONAL_ITINERARY` | 1 |
 
-也就是说，当前的 PlanVersion 是**某一时刻全部展示判断的冻结快照**。这份文件在 2026-08-01 写入，此后无论过多久读取，里面的 `LIVE` 都还是 `LIVE`。
+也就是说，当时的 PlanVersion 是**某一时刻全部展示判断的冻结快照**。
 
 ### 4.2 新性质
 
@@ -231,7 +233,9 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 | 用户显式做出的选择（锁定的活动、必去项） | `displayable`、`planning_state`（见 §4.4） |
 | `support`（可持久化轴，`evidence-axes.md` §1） | `next_action`（读时产出） |
 
-`support` 是唯一允许出现在持久化文件里的证据状态维度。上表中现存的 `"support": "estimated"` ×14 因此可以保留——但它当前来自 `itinerary_planner.py:160-170` 的规划器默认值契约，与两轴的 support 是否同义【待验证】。
+`support` 是唯一允许出现在持久化文件里的证据状态维度。基线中的
+`"support": "estimated"` 来自规划器默认值契约；后续 P1 核对已确认它与证据轴
+support 不同义（见 §6 未决问题 3 的已核对结论）。
 
 ### 4.3 对读取路径的要求
 
@@ -243,7 +247,7 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 | R4 | token 计算必须由唯一实现完成，读取路径不得自带映射 | 见 `invariants.md` I6 |
 | R5 | 读取层必须能报告「这个 PlanVersion 现在还成不成立」，且该结论每次读取重算 | 取代 §4.4 的持久化 `planning_state` |
 
-### 4.4 与现有安装闸门的冲突
+### 4.4 迁移时与安装闸门的冲突（已解决）
 
 `b120894` 建立的 PlanVersion 安装闸门依赖三个持久化字段：
 
@@ -266,10 +270,11 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 | `feasibility_critical == False` 且 `freshness == stale` | `flag_for_confirmation` | 无（仅标注） |
 | `stale_allowed == False` 且缓存中有值 | `block` | 系统必须实采，实采失败即 `unknown` |
 
-现状与之的差距：
+迁移前与之的差距：
 
 - STALE 只在实采失败后产生（`evidence_broker.py:177-206` 的 `stale_after_failure()`，且 `:186-189` 断言必须先有一次失败的实采）。这一点与新策略一致，不需改动。
-- 但**没有任何主动重查触发器**。当前 STALE 一旦产生就一直是 STALE，直到下一次有人手动重跑。MCP 面甚至没有重试入口（基线报告 H4：`retry_action` 只存在于 HTTP 面 `product_web.py:536-549`）。`auto_refetch` 档位在 P5 之前无处落地。
+- 但当时**没有任何主动重查触发器**。STALE 一旦产生就会一直保留，
+  `auto_refetch` 档位在 P5 之前无处落地。
 - `_stale_projection()` 返回的 `EvidenceItem` 未传 `missing_reason`（`evidence_broker.py:437-443`），导致陈旧证据对外的 `missing_reason` 恒为 `null`（基线报告 §5.3 实证）。新模型下这个信息应进入 `next_action.reason_code = beyond_tolerance_window`。
 
 ### 5.1 触发时机：读取时同步重查（2026-08-03 裁决）
@@ -292,7 +297,7 @@ blocker 多开一个分支，不改变「可能出现哪些可行性结论、从
 
 ### 5.2 落点归因：判定点唯一，替换点不唯一（2026-08-03 实测）
 
-**实现未落地，原因记录在此。** P5 轮 1 的结论「落点已收敛到唯一漏斗
+**当时实现尚未落地，原因记录在此。** P5 轮 1 的结论「落点已收敛到唯一漏斗
 `project_domain`」**仍然成立，但只覆盖判定**：`evaluate_fact` 至今只有
 `project_domain` 一个调用者，「这份证据算不算 stale」确实只有一处答案。
 
@@ -319,17 +324,17 @@ token 的那一瞬间。这是「第二个触发点」，触及停点规则，�
 
 | # | 入口 | 证据容器 | 解析步装载点 |
 |---|---|---|---|
-| 1 | `TripQueryService.trip()` | `run.result["context"]["evidence"]` | 经 `plan_verdict_from_result` |
+| 1 | `TripQueryService.trip()` | `evidence/current.json` | `_compile_evidence` → `resolve_stale_evidence` |
 | 2 | `TripQueryService.candidates()` | `evidence/guided-comparison.json` | `_with_recomputed_tokens` |
-| 3 | `TripQueryService.plan_readiness()` | `run.result["context"]["evidence"]` | `plan_verdict_from_result` |
+| 3 | `TripQueryService.plan_readiness()` | `evidence/current.json` | `_compile_evidence` → `resolve_stale_evidence` |
 
 `agent_actions.get_next_actions()` 经 `plan_verdict_from_result` 拿结论，**不碰
 证据容器**，因此不是入口。`map_payload()` / `missing_information()` 委托给
 `trip()`。
 
-**逻辑一份、装载点两个**：容器有两种是落盘历史造成的事实（容器统一记 P5 后
-待办），重采与替换的逻辑只写在 `evidence_projection.resolve_stale_evidence`
-一处，两个装载点各自只负责容器形状与写回位置（D5/D20）。
+**逻辑一份、装载点两个**：详细规划共用 `evidence/current.json`，候选比较读
+`evidence/guided-comparison.json`。重采与替换逻辑只写在
+`evidence_projection.resolve_stale_evidence` 一处，装载点只负责容器形状与写回位置。
 
 ### 5.2.2 已实现与未实现（2026-08-03）
 
@@ -345,8 +350,7 @@ token 的那一瞬间。这是「第二个触发点」，触及停点规则，�
 **成功与失败都写回**：失败写 `refresh_failure.attempted_at`，节流的状态就存在
 它上面——不写回则节流永远空转，一个挂掉的数据源会被每次页面刷新反复捶打。
 
-仍未接生产采集器：`TripQueryService(refetcher=...)` 默认 `None`，产品路径当前
-不会真的重采。这一条与下面的副本问题绑在一起，一并裁决。原先记录的契约冲突
+当时尚未接生产采集器：`TripQueryService(refetcher=...)` 默认 `None`。原先记录的契约冲突
 （已由上述裁决解决，保留为归因）：
 
 - 解析步的替换是**内存内**的，读完即弃。下次读取拿到的还是旧证据，于是**每次
@@ -361,7 +365,7 @@ token 的那一瞬间。这是「第二个触发点」，触及停点规则，�
 路径，回到排队模型——那等于推翻 §5.1 的裁决。**建议 (a)**：它保住读取层只读，
 也保住 I5，代价是应用层要多一个「读取产生的证据更新」入口。
 
-### 5.2.3 证据有三份副本，写回只对一份生效（**停点，待裁决**）
+### 5.2.3 迁移停点：三份副本（已裁决并收敛）
 
 实现写回时实测发现的，**与「容器有两种」的既有认知冲突**：证据在盘上是**三份**
 独立副本，同 `evidence_id`、不同文件、不同对象。
@@ -393,6 +397,11 @@ token 的那一瞬间。这是「第二个触发点」，触及停点规则，�
    且 `plan_readiness` 的重采仍然无处落盘。
 
 **按停点规则停在这里**：修复面牵动落盘契约与表征，超出单点。
+
+**后续裁决与现状**：采纳方案 1，A 已收敛进 B。详细规划的 intent 从
+`run.json` 读，证据统一从 `evidence/current.json` 读；候选比较的阶段性容器 C
+仍单独保留。本地 Web 启用读时同步重采并由应用层写回；MCP 为遵守 I14
+不在工具调用内做同步网络实采。
 
 ### 5.3 读取入口普查（2026-08-03 实测，作废记录）
 
@@ -436,6 +445,6 @@ token 的那一瞬间。这是「第二个触发点」，触及停点规则，�
 | 1 | §2.2 中 5 项 `max_reuse_seconds` 的具体取值 | **已决**（裁决 6，2026-08-02）：按建议值执行，标记为可调，P5 拿到真实运行数据后复核 |
 | 2 | 4 个无生产者的 data_type 是保留还是删除 | **已决**（裁决 2，2026-08-02）：`seat_availability` 删除（属订票域）；`hotel_price` 保留且为 `planned`（价格区间是预算硬约束输入）；`opening_hours` 与 `ticket_price` 标记 `reserved` |
 | 3 | `itinerary_planner.py:160-170` 的 `"support": "estimated"` 与两轴 support 是否同义 | **已核对**（P1，见 `docs/contracts/support-reclassification.md` §4）：不同义，是规划器默认值的自描述字段，与证据 support 无关 |
-| 4 | `auto_refetch` 的触发时机（读取时同步重查 / 异步排队 / 仅在下次推进时） | **已决**（裁决，2026-08-03）：**读取时同步重查**。理由见 §5.1。**实现未落地**，落点归因见 §5.2 |
-| 5 | PlanVersion 落盘契约的版本标记方案 | 未定，P4 决定 |
-| 6 | `status` 三态（含新增的 `planned`）与 I8 反向规则的修订 | **待 Hugin 复核**，见 §2.1.1。这是 P1 为解决裁决 2 与 I8 的冲突所做的契约修订 |
+| 4 | `auto_refetch` 的触发时机（读取时同步重查 / 异步排队 / 仅在下次推进时） | **已决并落地**：本地 Web 读取时同步重查；MCP 路径关闭读时网络重采，见 I14 |
+| 5 | PlanVersion 落盘契约的版本标记方案 | **已决并落地**：持久化文档统一带 `schema_version` |
+| 6 | `status` 三态（含新增的 `planned`）与 I8 反向规则的修订 | **已落地**：`hotel_price` 转为 `active`，保留项见 §2.2 |

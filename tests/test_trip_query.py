@@ -34,6 +34,23 @@ def _intent(*, mode: str = "DIRECT_PLAN") -> dict[str, object]:
 
 
 class TripQueryServiceTests(unittest.TestCase):
+    def test_application_only_uses_its_store(self) -> None:
+        store = InMemoryAgentStore()
+        application = TripApplicationService(store=store)
+
+        query = TripQueryService(application_service=application)
+
+        self.assertIs(query.store, store)
+        self.assertIs(query.application_service, application)
+
+    def test_store_only_builds_a_matching_application_service(self) -> None:
+        store = InMemoryAgentStore()
+
+        query = TripQueryService(store=store)
+
+        self.assertIs(query.store, store)
+        self.assertIs(query.application_service.store, store)
+
     def test_query_and_command_services_must_share_one_store(self) -> None:
         first = InMemoryAgentStore()
         second = InMemoryAgentStore()

@@ -14,12 +14,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 from threading import RLock
 import time
 from typing import Any
-from uuid import uuid4
 
 from trip_decider.destination_runtime import (
     collect_map_evidence,
@@ -520,7 +518,6 @@ def run_until_blocked(
                     )
                     for action in batch
                 ]
-                dispatched_at = time.monotonic()
                 completed, pending = wait(
                     futures,
                     timeout=remaining,
@@ -573,7 +570,6 @@ def run_until_blocked(
                 store=store,
                 evidence_broker=evidence_broker,
             )
-            dispatched_at = time.monotonic()
             completed, pending = wait(
                 (future,),
                 timeout=remaining,
@@ -1416,6 +1412,7 @@ def _map_handler(
     local_transit = _normalize_local_transit(route_result)
     resolutions = route_result.get("place_resolutions")
     retrieved_at = route_result.get("retrieved_at")
+    enriched = deepcopy(dict(value))
     for route in local_transit:
         if isinstance(resolutions, Mapping):
             origin = resolutions.get(route.get("from"))
@@ -1427,7 +1424,6 @@ def _map_handler(
                     destination_point.get("location")
                 )
         route["retrieved_at"] = retrieved_at
-        enriched = deepcopy(dict(value))
     enriched["local_transit"] = local_transit
     enriched["local_transit_outcome"] = route_result.get("status")
     enriched["local_transit_input_signature"] = route_signature
@@ -2910,16 +2906,6 @@ def _clear_timeout_strikes(run_id: str, action_id: str) -> None:
         _TIMEOUT_STRIKES.pop((run_id, action_id), None)
 
 
-def _is_real_stall(dispatched_at: float) -> bool:
-    """这次等不到，是动作卡住了，还是本次调用的预算先花完了？
-
-    只有前者才是超时。把后者也算成超时，就是第五次实测那个死循环的成因：
-    5 秒预算 → 判超时 → 重发 → 又 5 秒 → 再重发，而真实耗时 26 秒，永远走不完。
-    """
-
-    return time.monotonic() - dispatched_at >= ACTION_STALL_SECONDS
-
-
 def _budget_exhausted(
     run_id: str,
     pending_ids: Sequence[str],
@@ -3179,9 +3165,6 @@ def _load_loop_state(
         return None
     action_path = run_directory / "action-loop.json"
     evidence_path = run_directory / "evidence" / "current.json"
-    legacy_evidence_path = run_directory / "evidence.json"
-    if not evidence_path.exists() and legacy_evidence_path.is_file():
-        evidence_path = legacy_evidence_path
     if not action_path.exists() and not evidence_path.exists():
         return None
     if not action_path.is_file() and evidence_path.is_file():

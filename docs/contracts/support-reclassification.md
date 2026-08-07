@@ -1,6 +1,7 @@
 # D2 清点：`sourced` → `estimated` 重分类清单
 
-> 状态：P1 产出。这是**现状清单**，归类由 `docs/contracts/evidence-axes.md` §2.2 的判定顺序决定，不由现状定义。
+> 状态：P1 的**已完成迁移清单**。正文的“当前实现”指 2026-08-02
+> 重分类前基线；现行四态判定由 `evidence_core.py` 与 I7 守卫。
 > 建立日期：2026-08-02
 > 关闭的未决项：`evidence-axes.md` §7 问题 2、`freshness-policy.md` §6 问题 3。
 > 证据规则：每条给出 `文件:行号`。

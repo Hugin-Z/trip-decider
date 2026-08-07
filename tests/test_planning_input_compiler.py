@@ -534,13 +534,6 @@ class PlanningInputCompilerTests(unittest.TestCase):
                 product_web,
                 "_CONFIGURED_STORE",
                 store,
-            ), patch.object(
-                product_web,
-                "get_next_actions",
-                side_effect=lambda value: get_next_actions(
-                    value,
-                    store=store,
-                ),
             ):
                 response = product_web._run_response(run.run_id)
             self.assertIsNone(response["run"]["result"])

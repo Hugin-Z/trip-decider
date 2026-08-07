@@ -17,7 +17,6 @@ import logging
 from pathlib import Path
 import re
 import threading
-from typing import Any
 
 from trip_decider.agent_actions import (
     ACTION_STALL_SECONDS,
@@ -51,7 +50,6 @@ from trip_decider.travel_agent import (
     default_agent_store,
     AgentRun,
     EvidenceItem,
-    EvidenceStatus,
     InMemoryAgentStore,
     Revision,
     RETRYABLE_BLOCK_CODES,
@@ -841,9 +839,6 @@ class TripApplicationService:
         if run_directory is None:
             return {}
         path = run_directory / "evidence" / "current.json"
-        legacy = run_directory / "evidence.json"
-        if not path.is_file() and legacy.is_file():
-            path = legacy
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
@@ -1200,11 +1195,7 @@ class TripApplicationService:
         return run_directory / "evidence" / "guided-comparison.json"
 
     def _guided_evidence_read_path(self, run_id: str) -> Path:
-        path = self._guided_evidence_path(run_id)
-        if path.is_file():
-            return path
-        legacy = path.parents[1] / "guided-evidence.json"
-        return legacy if legacy.is_file() else path
+        return self._guided_evidence_path(run_id)
 
     @staticmethod
     def _spawn(
@@ -1596,7 +1587,6 @@ def reset_default_trip_application_service() -> None:
 
 __all__ = [
     "ApplicationOutcome",
-    "DEFAULT_TRIP_APPLICATION_SERVICE",
     "TripApplicationError",
     "TripApplicationService",
 ]

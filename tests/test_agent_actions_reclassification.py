@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from trip_decider.agent_actions import _merged_support
-from trip_decider.travel_agent import EvidenceStatus
+from tests.invariant_support import controlled_web, offline_intent
+from trip_decider.agent_actions import _LoopState, _map_handler, _merged_support
+from trip_decider.travel_agent import EvidenceItem, EvidenceStatus, TravelIntent
 
 
 class MergedSupportCase(unittest.TestCase):
@@ -73,6 +75,50 @@ class ReclassifiedConstructionPointsCase(unittest.TestCase):
             source,
             "R1/R2 已重分类，不应再有 sourced 构造",
         )
+
+    def test_map_route_with_no_normalized_segments_keeps_base_evidence(
+        self,
+    ) -> None:
+        """路线接口返回空列表时也应该产出可读证据，不应访问未赋值局部变量。"""
+
+        map_evidence = EvidenceItem(
+            evidence_id="controlled-map-empty-routes",
+            domain="map",
+            status=EvidenceStatus.SOURCED,
+            value={
+                "destination": {"name": "乙地", "adcode": "330100"},
+                "retrieved_at": "2026-08-01T09:00:00+08:00",
+            },
+            sources=(
+                {
+                    "provider": "controlled-map",
+                    "retrieved_at": "2026-08-01T09:00:00+08:00",
+                },
+            ),
+        )
+        state = _LoopState(
+            evidence={"web": controlled_web(), "map": map_evidence}
+        )
+        route_result = {
+            "status": "NO_ROUTE",
+            "segments": [],
+            "place_resolutions": {},
+            "retrieved_at": "2026-08-01T09:01:00+08:00",
+            "source": {"provider": "controlled-route"},
+        }
+
+        with patch(
+            "trip_decider.agent_actions.estimate_live_public_transport_segments",
+            return_value=route_result,
+        ):
+            result = _map_handler(
+                TravelIntent.from_mapping(offline_intent()),
+                state,
+            )
+
+        self.assertEqual(EvidenceStatus.ESTIMATED, result.status)
+        self.assertEqual([], result.value["local_transit"])
+        self.assertEqual("NO_ROUTE", result.value["local_transit_outcome"])
 
 
 if __name__ == "__main__":

@@ -15,10 +15,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from trip_decider.agent_actions import (
-    get_next_actions,  # compatibility export for existing local callers
-    start_action_loop,
-)
 from trip_decider.trip_application import (
     default_trip_application_service,
     TripApplicationError,
@@ -29,25 +25,10 @@ from trip_decider.trip_query import (
     TripQueryError,
     TripQueryService,
 )
-from trip_decider.trip_read_model import (
-    _budget_summary,
-    _compact_progress_contract,
-    _elapsed_seconds,
-    _guided_domain_label,
-    _guided_progress_contract,
-    _intent_day_skeleton,
-    _map_payload_contract,
-    _map_polyline,
-    _map_position,
-    _planning_draft_read_model,
-    _planning_handoff_contract,
-    _presentation_contract,
-)
 from trip_decider.travel_agent import (
     AgentRuntimeMode,
     default_agent_store,
     TaskMode,
-    TravelIntent,
     TravelAgentError,
     runtime_status,
 )

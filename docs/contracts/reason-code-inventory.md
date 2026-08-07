@@ -1,6 +1,7 @@
 # D1 清点：`unknown` 的 reason 现状字面量映射
 
-> 状态：P1 产出。这是**现状清单**，归类由 `docs/contracts/evidence-axes.md` §5.2 定义的取值域决定，不由现状定义。
+> 状态：P1 的**历史清点与迁移记录**；现行取值域由
+> `docs/contracts/evidence-axes.md` §5.2 和 `evidence_core.py` 定义。
 > 建立日期：2026-08-02
 > 关闭的未决项：`evidence-axes.md` §7 问题 1。
 > 证据规则：每条给出 `文件:行号`。无法归入现有取值域的**列为待裁决，不新增取值域**。

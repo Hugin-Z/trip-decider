@@ -4,6 +4,8 @@
 > 建立日期：2026-08-02（P0 阶段产出）
 > 取代：`PLAN.md` v3 §4 的五态模型、`schemas/evidence.schema.json` 的 `display_status` 五态枚举。
 > 前置阅读：`docs/audit/handover-baseline.md`（接手基线报告），特别是 §3「五态证据模型专项核对」。
+> 基线报告中的“当前”指 2026-08-02 迁移前现状；现行实现由
+> `evidence_core.py` 和 `tests/invariant_ledger.json` 核对。
 > 证据规则：涉及现有代码的陈述给出 `文件:行号`。不确定的标注【待验证】。
 
 ---
@@ -444,11 +446,13 @@ next_action:
 
 ### 5.4 UI 侧要求
 
-`next_action.detail` 必须被渲染。基线报告 §3.4「丢失 3」实测确认，当前 MCP App（`mcp_app_workspace_v1.html:212-268`）只渲染 `evidence_missing` 的中文自由文本列表，完全不引用 `evidence_statuses`。两轴模型若重蹈此路，模型的存在对用户不可见。可机械核对形式见 `invariants.md` I3b。
+`next_action.detail` 必须被渲染。基线报告 §3.4「丢失 3」记录了
+迁移前 MCP App 完全不引用 `evidence_statuses` 的缺口；当前 MCP App 与 Web
+均渲染该信息，并由 `invariants.md` I3b 机械核对。
 
 ---
 
-## 6. 相对旧五态模型的映射
+## 6. 迁移记录：相对旧五态模型的映射
 
 对照对象：`schemas/evidence.schema.json` 的 `payload.facts[]` 字段集。
 
@@ -474,8 +478,8 @@ next_action:
 | `freshness.status`（`current/stale/unknown`） | **废弃** | 读时计算 |
 | `display_status`（五态） | **废弃** | 由读时计算的 token 取代，不落盘 |
 | `display_rule` | **废弃** | 规则版本由唯一的 token 计算实现携带，不逐条重复 |
-| `mapping_rule_version` | **废弃** | 它是五态映射的版本号。是否需要一个等价的 support 判定规则版本号【待 Hugin 确认】 |
-| — | **新增** `data_type` | freshness 计算的必需输入；当前只存在于 `EvidenceQuery`（`evidence_broker.py:74`），未随事实落盘 |
+| `mapping_rule_version` | **废弃** | 不新设版本轴；`SupportVerdict.rule` 保留命中规则的可追溯标识 |
+| — | **新增** `data_type` | freshness 计算的必需输入；已随字段级 fact 落盘 |
 | — | **新增** `next_action` | 结构见 §5。仅在读取层产出，**不落盘** |
 
 `freshness` 从一个四字段对象收缩为两个字段（`retrieved_at` / `effective_at`）后，是否仍保留 `freshness` 这个嵌套层级，属于 schema 形态问题，本文件不作规定。
@@ -527,7 +531,9 @@ next_action:
 
 ### 6.4 这次映射会改变行为的地方
 
-重分类会改变可行性判定的输入。`guided_discovery.py:520-524` 的 `rail_sourced` 判据只接受 `EvidenceStatus.SOURCED`；若某条证据从 `sourced` 重分类为 `estimated`，该判据当前会直接把它当作不可用。这不是可以顺带处理的细节，需要在 P3/P5 明确每个判定点对 `estimated` 的态度。本文件不规定该态度。
+重分类会改变可行性判定的输入。迁移前 `rail_sourced` 判据只接受
+`EvidenceStatus.SOURCED`；P3b 已将判定点收敛为四态感知，`estimated` 可以参与
+判定但必须产生 conditional，该性质由 I7 守卫。
 
 ---
 
@@ -535,9 +541,9 @@ next_action:
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | `unknown` 的 `reason` 完整取值域 | **已清点**（P1）：`reason-code-inventory.md`，44 个现状字面量。归并方案见其 §4【待 Hugin 批准】，取值域由 10 扩到 14 |
+| 1 | `unknown` 的 `reason` 完整取值域 | **已决并落地**：P2 归并方案加 P3b 的 `refresh_failed`，现行 `evidence_core.REASON_CODES` 共 15 值 |
 | 2 | 从 `sourced` 重分类为 `estimated` 的完整清单 | **已清点**（P1）：`support-reclassification.md`，3 处需重分类。生效时机由 P3b 承担 |
-| 3 | 是否需要 support 判定规则的版本号（替代 `mapping_rule_version`） | 【待 Hugin 确认】。内核已在 `SupportVerdict.rule` 上携带命中的判定序号，可作为版本号的载体 |
+| 3 | 是否需要 support 判定规则的版本号（替代 `mapping_rule_version`） | **已落地为规则追踪，不新设版本轴**：`SupportVerdict.rule` 携带命中的判定序号 |
 | 4 | `freshness` 嵌套层级在收缩为两字段后是否保留 | 未定，属 P4 schema 形态问题 |
 | 5 | 各可行性判定点对 `support == estimated` 的接受与否 | **总原则已决**（裁决 5）：可参与判定但必须产生 conditional。29 个闸门的逐点落法由 P3b 前的改造清单承担 |
 | 6 | `confirmed_absent` 的聚合处理（§2.2.2） | **已决**（2026-08-02）：正式生效，scope 只取缺席输入的并集 |

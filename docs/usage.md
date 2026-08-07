@@ -40,15 +40,33 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
 没配 `AMAP_WEB_SERVICE_KEY` 不会崩，但目的地与当地交通会一直是「未采集」，
 行程排不出来。
 
-### 1.3 验证环境能跑通
+### 1.3 选择正确的验证层级
 
-配好之后先跑一次冒烟，它用真实数据走一遍采集与编译：
+日常改动先跑 CI 等价的离线回归；它不需要 key，也不访问真实供应商：
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+.\.venv\Scripts\python.exe -m ruff check src
+.\.venv\Scripts\pyright.exe
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+需要确认当前供应商集成时，再配置 key 并手动跑 live smoke：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\smoke_live.py
+.\.venv\Scripts\python.exe scripts\smoke_action_loop.py
 ```
 
-每步会打印「预期」与实测。全部通过说明 key 和网络都没问题。
+发布前用 soak 重复跑真实动作循环：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\soak_full_loop.py --rounds 20
+```
+
+live smoke 与 soak 都需要凭据和网络，保持人工执行，不进入普通 CI。它们只能说明
+当次真实输入与供应商条件下的结果，不能替代离线回归，也不代表全国覆盖。完整边界见
+[`docs/verification.md`](verification.md)。
 
 ---
 
@@ -133,9 +151,11 @@ $env:AMAP_JS_SECURITY_CODE  = "你的安全密钥"
 全部候选都被排除时，系统会**如实说「没有可行候选」并给放松建议**（比如延长
 行程窗、换出发地），而不是硬凑一个到不了的地方给你。
 
-**当前候选池是仓库自带的样例目录**（`examples/destination_catalog.json`，
-28 个国内目的地）。你可以整份替换它——设环境变量
-`TRIP_DECIDER_DESTINATION_POOL` 指向你自己的目录文件即可。
+**开放推荐默认从仓库自带的样例种子池起步**
+（`examples/destination_catalog.json`，28 个国内目的地）。种子只决定哪些候选值得
+进入实查，不是可行性证据；后续仍会实查车次、地点与路线。可设环境变量
+`TRIP_DECIDER_DESTINATION_POOL` 指向自己的目录文件。目录缺失或不可读时，开放推荐才会
+回落到高德的实时地区与 POI 检索。
 
 ---
 

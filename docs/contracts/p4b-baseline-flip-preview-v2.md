@@ -1,6 +1,6 @@
 # 表征基线翻面预告 v2
 
-> 状态：P4-b2 产出，**翻面执行时的核对物**。取代 v1
+> 状态：P4-b2 已完成的基线翻面记录。取代 v1
 > （`p4b-baseline-flip-preview.md`，已作废，正文保留不改）。
 > 建立日期：2026-08-02
 > 依据：`evidence-axes.md` §3.2、`invariants.md` I5。

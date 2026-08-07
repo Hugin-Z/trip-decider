@@ -4,6 +4,8 @@
 > 建立日期：2026-08-02（P0 阶段产出）
 > 前置阅读：`docs/contracts/evidence-axes.md`、`docs/contracts/freshness-policy.md`、`docs/audit/handover-baseline.md`。
 > 证据规则：涉及现有代码的陈述给出 `文件:行号`。不确定的标注【待验证】。
+> 当前通过状态以 `tests/invariant_ledger.json` 和实际测试结果为准。
+> 下文的“建立时基线”保留不变式立项时的反例，不表示当前仍然失败。
 
 ---
 
@@ -53,7 +55,7 @@
 
 判定程序必须对**新写入的文件**生效，因此测试需自己跑一次完整 run 并检查其产出目录，而不是检查仓库里已有的历史 run。
 
-### 当前状态：不成立
+### 建立时基线（已修复）
 
 实测 `runtime/sessions/f4d3aec8-cf6f-49fd-9e09-ff55e4d267c7/plan-version.json`（129,188 字节）中的命中：`timing_status: "estimated"` ×71、`timing_status: "sourced_stale_snapshot"` ×6、`schedule_status: "STALE"` ×6、`snapshot_status: "STALE"` ×6、`evidence_status: "LIVE"` ×5、`schedule_status: "LIVE"` ×5、`display_status: "DISPLAYABLE_CONDITIONAL_ITINERARY"` ×1。写入方为 `travel_agent.py:941-989`。
 
@@ -85,7 +87,7 @@
 1. **单事实层**：构造 `support × freshness` 的 4×3 = 12 种组合的证据 fixture，对每个对外读取入口断言返回 token 等于 `evidence-axes.md` §4.1 表中的对应格。
 2. **聚合层**：构造多输入派生事实，覆盖聚合规则的四条分支（任一 conflicting / 任一 unknown / 有推算或任一 estimated / 全 sourced），断言聚合后的 token。
 
-**必须包含的反例**：一条 `support == unknown`、`value` 缺失但证据条目存在的输入。这正是当前缺陷的形状——`trip_read_model.py:231-238` 在此情形下返回 `"LIVE"`，实测：
+**必须包含的反例**：一条 `support == unknown`、`value` 缺失但证据条目存在的输入。这正是立项时缺陷的形状——当时读模型在此情形下返回 `"LIVE"`，实测：
 
 ```
 railway 证据存在但 status=missing  -> [('武汉','LIVE'), ('上饶','LIVE')]
@@ -93,7 +95,7 @@ railway 证据完全缺席               -> [('武汉','MISSING'), ('上饶','MI
 railway snapshot UNKNOWN           -> [('武汉','LIVE'), ('上饶','LIVE')]
 ```
 
-### 当前状态：不成立
+### 建立时基线（已修复）
 
 见上。方向与不变式相反：采集失败显示为可用，完全没采集反而显示为缺失。
 
@@ -134,7 +136,7 @@ B2（缺失/未知证据被展示为 LIVE，违反冻结 invariant）；相关 M
 
 **判定方法**：遍历每个 MCP tool 与每个 HTTP 读取端点的返回值，递归找出所有带 token 的事实节点，逐个断言上述双向条件；对 `next_action` 的每个枚举字段断言取值 ∈ 域；对 `kind == auto_refetch` 断言 `retry_after_at` 存在且可解析；对 `kind == user_choice` 断言 `options` 非空且每项字段完整。
 
-**当前状态：不成立**。当前无 `next_action` 结构。最接近的信息载体是 `evidence_missing`（中文自由文本列表，`guided_discovery.py:585`）与 `roundtrip_transport.missing_reason`（`guided_discovery.py:563`），后者对陈旧证据恒为 `null`（`evidence_broker.py:437-443` 未传 `missing_reason`），且 `evidence_statuses` 的元组里根本没有原因字段（`guided_discovery.py:575-584`）。
+**建立时基线（已修复）**。当时无 `next_action` 结构。最接近的信息载体是 `evidence_missing`（中文自由文本列表）与 `roundtrip_transport.missing_reason`，且 `evidence_statuses` 中没有原因字段。当前结构由 I3a 对应测试守卫。
 
 **对应测试文件**：`tests/test_invariant_i3a_next_action_required.py`
 
@@ -146,9 +148,10 @@ B2（缺失/未知证据被展示为 LIVE，违反冻结 invariant）；相关 M
 
 裁决理由：`requirements.lock`（44 行）中不存在任何浏览器驱动或 DOM 实现，为一条不变式引入浏览器依赖不划算。
 
-**已知覆盖缺口**：弱形式能抓住「字段被完全忽略」这一当前实际发生的失败模式，抓不住「引用了但渲染在不可见位置」。接受该缺口。
+**已知覆盖缺口**：弱形式能抓住「字段被完全忽略」这一立项时的失败模式，抓不住「引用了但渲染在不可见位置」。接受该缺口。
 
-**当前状态：不成立**。`grep -n "evidence_statuses" src/trip_decider/mcp_app_workspace_v1.html` 无命中；候选卡渲染块（`mcp_app_workspace_v1.html:212-268`）只渲染 `feasibility_status`、`roundtrip_transport`、`playable_time_seconds`、`themes`、`physical_intensity`、`budget_headroom_*` 与 `evidence_missing`。
+**建立时基线（已修复）**。当时 MCP App 候选卡未渲染
+`evidence_statuses` 与 `next_action`。当前 MCP App 和 Web 都由 I3b 的静态守卫核对。
 
 **对应测试文件**：`tests/test_invariant_i3b_ui_renders_next_action.py`
 
@@ -216,7 +219,9 @@ hotel_price 一旦可得，`I4` 的第 2、3 条断言才第一次有机会跑�
 
 #### 历史阻塞说明（已失效）
 
-`evidence_broker.py:190-192` 的 `stale_after_failure()` 对 `not policy.stale_allowed` 直接 `return None`，即缓存层行为正确。但现有测试 `tests/test_evidence_broker.py:113-129`（`test_expired_or_never_stale_values_are_not_reused`）只断言上述第 1 条，第 2、3 条无覆盖。且 `hotel_price` 当前在产品路径中无生产者（`status == planned`，`freshness-policy.md` §2.2），因此第 2、3 条**在 P5 生产者落地前无法构造场景**——该部分测试登记为阻塞项。
+立项时 `stale_after_failure()` 的缓存层行为已正确，但当时的测试只覆盖第 1 条；
+`hotel_price` 尚无生产者，第 2、3 条在 P5 落地前无法构造。该阻塞已于
+2026-08-05 随 `hotel_price` 字段级生产者解除。
 
 ### 对应测试文件
 
@@ -247,9 +252,9 @@ I1 只禁止写入展示状态字段，但可以被绕过：不写 `status` 而�
 
 注入可控时钟（`EvidenceBroker` 已支持注入 `clock`，`evidence_broker.py:131-134`；读取层需要同等能力）。用同一 run 目录读两次，对剔除 token 与 `next_action` 后的结果做规范化 JSON 序列化后比较字节相等；对完整结果断言至少一处 freshness 分量不同。
 
-### 当前状态：不成立
+### 建立时基线（已修复）
 
-当前展示态在写入时冻结（见 I1 的实测数据），读取时刻不影响输出。
+当时展示态在写入时冻结（见 I1 的建立时数据），读取时刻不影响输出。
 
 ### 对应测试文件
 
@@ -265,7 +270,7 @@ I1 只禁止写入展示状态字段，但可以被绕过：不写 `status` 而�
 
 ### 增列理由
 
-基线报告 §3.3 实测：状态映射当前散落在至少 5 处独立实现（`guided_discovery.py:593-630`、`guided_discovery.py:633-651`、`evidence_broker.py:359-443`、`trip_read_model.py:223-238` 与 `:809-846`、`planning_input_compiler.py:216-227`），M6 记录了由此产生的四套并行词表。两轴模型若允许多实现，会在三个月内退化回同一状态。这条不变式是防止重演的唯一机械手段。
+基线报告 §3.3 实测：状态映射当时散落在至少 5 处独立实现，M6 记录了由此产生的四套并行词表。两轴模型若允许多实现，会退化回同一状态。这条不变式是防止重演的机械手段。
 
 ### 陈述
 
@@ -277,7 +282,7 @@ I1 只禁止写入展示状态字段，但可以被绕过：不写 `status` 而�
 
 前端资源（`mcp_app_workspace_v1.html`、`web/app.js`）允许出现 token 字面量用于**样式映射**，但不得出现任何由 support 或 freshness 推导 token 的逻辑。这一区分靠白名单显式声明，不靠扫描器判断。
 
-### 当前状态：不成立
+### 建立时基线（已修复）
 
 见上述 5 处实现。
 
@@ -295,7 +300,7 @@ M6（四套状态词表并存）；基线报告 §3.3。
 
 ### 增列理由
 
-这是 `PLAN.md` v3:74 的执行红线，v4 保留。它目前既没有实现也无法检验：`guided_discovery.py:595-599` 把 `EvidenceStatus.CONFLICTING` 折叠成 `MISSING`，`conflict_details` 完全丢弃（`guided_discovery.py:548-590` 的返回体中无该字段），因此「conflicting 是否被静默使用」在当前代码里无法区分于「unknown 被静默使用」。红线必须要么可测，要么删除；v4 选择保留，因此必须给出判定方法。
+这是 `PLAN.md` v3:74 的执行红线，v4 保留。立项时它既没有实现也无法检验：`EvidenceStatus.CONFLICTING` 会被折叠成 `MISSING`，`conflict_details` 完全丢失。红线必须要么可测，要么删除；v4 选择保留，因此给出下述判定方法。
 
 ### 陈述
 
@@ -335,7 +340,7 @@ M6（四套状态词表并存）；基线报告 §3.3。
 
 老四条用例改造后若有任何一条变成恒真，说明扩充把它们架空了——那不是扩充，是放宽。
 
-### 当前状态：不成立
+### 建立时基线（已修复）
 
 `conflicting` 被折叠为 `MISSING`，第 3 条直接失败。第 1、2 条在 `unknown` 输入下部分成立（`guided_discovery.py:520-536` 的 `rail_sourced` 判据会使 `feasibility_status` 落到 `UNKNOWN`），但无测试覆盖。
 
@@ -456,7 +461,7 @@ freshness 无法对未登记的 data_type 计算，静默默认会让新数据�
 
 写入侧 import 内核算 support **不违反 I6**：I6 管的是 token，support 聚合不是 token。
 
-### 当前状态：未生效
+### 建立时状态：未生效
 
 字段级 facts 形状属 P4-b，本批只收录文档。
 
@@ -648,6 +653,8 @@ or not running.」
 3. **单一落状态入口**：AST 扫 `trip_application`，断言 `store.block(` 的调用
    只出现在登记的入口里，防止再长出第二处只落一半的实现。
 
+### 当前状态：成立
+
 ### 未覆盖
 
 `MCP_CALL_BUDGET_SECONDS` 是**上界不是目标**。正常调用都在 1 秒内，唯一会主动
@@ -685,7 +692,7 @@ or not running.」
 | 1 | I3b 采用强形式还是弱形式 | **已决**（裁决 4，2026-08-02）：弱形式。理由见 I3b |
 | 2 | I1 禁用键名集合是否完备（当前从一个 run 目录实测归纳，可能漏掉未出现过的字段） | 【待验证】P4 前需对全部历史 session 目录做一次全量归纳 |
 | 3 | I6 白名单中「唯一渲染层常量表」的边界（三个宿主面是否各自持有一份） | 未定，取决于宿主面收敛决策 |
-| 4 | I8 反向规则的 `planned` 修订 | **待 Hugin 复核**，见 I8「2026-08-02 修订说明」 |
+| 4 | I8 反向规则的 `planned` 修订 | **已落地**：`hotel_price` 已转 `active`，现行登记见 `freshness-policy.md` §2.2 |
 | 5 | I9 地名字面量集合的维护方式（手工清单 vs 从数据文件推导） | 未定。手工清单会漏，从数据文件推导在数据文件本身即违规时会自指 |
 
 ---
