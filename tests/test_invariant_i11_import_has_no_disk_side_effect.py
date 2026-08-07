@@ -81,7 +81,7 @@ class ImportHasNoDiskSideEffectCase(unittest.TestCase):
             env={
                 "PYTHONPATH": str(SRC_ROOT),
                 "PATH": "",
-                "SYSTEMROOT": "C:\Windows",
+                "SYSTEMROOT": r"C:\Windows",
             },
         )
         self.assertEqual(
