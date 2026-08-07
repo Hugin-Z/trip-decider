@@ -39,7 +39,10 @@ class PersistedDisplayStatusCase(unittest.TestCase):
 
             hits: list[str] = []
             for path, document in iter_json_documents(run_directory):
-                relative = path.relative_to(sessions_root).as_posix()
+                relative = (
+                    f"{run_directory.name}/"
+                    f"{path.relative_to(run_directory).as_posix()}"
+                )
                 for pointer, key, value in walk_scalars(document):
                     if key in ALLOWED_KEYS:
                         continue
